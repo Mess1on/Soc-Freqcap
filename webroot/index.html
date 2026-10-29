@@ -1,0 +1,3836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta name="color-scheme" content="light dark">
+<title>Soc智能限频</title>
+<style>
+/* ── 新拟物（Neumorphism）────────────────────────────────────────
+ * 单一底色，卡片、输入、按钮与背景同色，形状靠阴影表达：
+ * 光源在左上，凸起为「左上亮 + 右下暗」两层阴影，凹陷（滑杆槽、
+ * 输入框、日志）用 inset 反向。分隔用刻痕（亮线压暗线），不用硬边框。
+ *
+ * 两套配色并存：:root 是浅色，:root[data-theme="dark"] 是深色。
+ * 深色不是把浅色整体调暗 —— 新拟物的立体感全在「亮档 / 暗档」两层阴影上：
+ * 深色下亮档换成比底色略浅的灰、暗档换成近黑，光源方向照旧不变，
+ * 卡片依旧和背景同色、依旧不描边。
+ *
+ * 改样式时保持不动（JS 与自检依赖）：所有类名、id、CSS 变量名
+ * (--bg/--card/--fg/--mut/--acc/--ok/--warn/--err/--r)、.pk .ico 的 38px、
+ * .tabbar 的 fixed + safe-area、@keyframes beat。
+ * 功能色压暗：浅底上亮色对比度不足，数值行会看不清。
+ */
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+
+:root{
+  /* 底色：背景与表面同色，塑形全靠阴影，不靠色差 */
+  --bg:#e9edf3; --card:#e9edf3; --card2:#e9edf3;
+  /* 两层阴影：左上受光、右下投影 */
+  --lt:#ffffff; --sh:#c4cbd7;
+  --line:#d4dbe5;              /* 变量名保留；用作"刻痕"的暗侧，不是描边色 */
+  --fg:#39414f; --mut:#7b8698;
+  --acc:#4a6da6; --acc2:#3d5c8f; --ok:#2d8a68; --warn:#a2701d; --err:#b24a45;
+  --on-acc:#f3f6fa;            /* 压在主色面上的字色 */
+  --r:18px;
+  /* 状态底色（一层色雾）：跟着主题一起换 */
+  --ok-wash:linear-gradient(90deg,rgba(45,138,104,.16),rgba(45,138,104,0) 62%);
+  --acc-wash:linear-gradient(90deg,rgba(74,109,166,.18),rgba(74,109,166,0) 62%);
+  --err-wash:linear-gradient(90deg,rgba(178,74,69,.16),rgba(178,74,69,0) 62%);
+  /* 刻痕：上沿一线、下沿一线，中间夹出一条凹槽 */
+  --sepa-top:var(--lt);
+  --sepa-bot:rgba(196,203,215,.85);
+  --sb:#c4cbd7;                /* 滚动条 */
+  --tab-shadow:rgba(196,203,215,.8);   /* 底部标签栏压在页面上的投影 */
+  --thumb-in:rgba(196,203,215,.6);
+  --acc-ring:rgba(74,109,166,.24);
+  --hov:rgba(74,109,166,.09);
+  --log-fg:#5b6577;
+  --bar:#93a9c8;               /* 逐核柱条 */
+  --bar2a:#8aa2c6; --bar2b:#6f8fbe;   /* 深睡榜柱条 */
+  --wla:#79b89e; --wlb:#4f9b7d;
+  --ph-s1:34%; --ph-l1:74%; --ph-s2:32%; --ph-l2:60%;  /* 图标占位色块 */
+  --shade:rgba(255,255,255,.75);      /* 凸起顶面的高光 */
+  /* 凸起 / 凹陷 两个基元，下面所有组件都复用 */
+  --up:-6px -6px 14px var(--lt), 6px 6px 15px var(--sh);
+  --up-sm:-3px -3px 8px var(--lt), 3px 3px 8px var(--sh);
+  --down:-2px -2px 5px var(--lt), 2px 2px 6px var(--sh);
+  --in:inset -4px -4px 9px var(--lt), inset 4px 4px 10px var(--sh);
+  --in-sm:inset -2px -2px 5px var(--lt), inset 2px 2px 6px var(--sh);
+}
+
+/* 深色：底色压到近黑，亮档抬到略浅的灰，暗档收到更深。
+   阴影「左上受光」的方向不变，卡片照样和背景同色。 */
+:root[data-theme="dark"]{
+  --bg:#22262e; --card:#22262e; --card2:#22262e;
+  --lt:#2e3543; --sh:#14181f;
+  --line:#1a1f27;
+  --fg:#dfe4ed; --mut:#939eb2;
+  --acc:#7ea6e6; --acc2:#6a90d2; --ok:#4bc79a; --warn:#e0a742; --err:#e8736b;
+  --on-acc:#131922;
+  --ok-wash:linear-gradient(90deg,rgba(75,199,154,.17),rgba(75,199,154,0) 62%);
+  --acc-wash:linear-gradient(90deg,rgba(126,166,230,.19),rgba(126,166,230,0) 62%);
+  --err-wash:linear-gradient(90deg,rgba(232,115,107,.17),rgba(232,115,107,0) 62%);
+  /* 深色下的凹槽是「上暗下亮」，正好和浅色相反 */
+  --sepa-top:rgba(0,0,0,.55);
+  --sepa-bot:rgba(255,255,255,.055);
+  --sb:#3a4250;
+  --tab-shadow:rgba(0,0,0,.6);
+  --thumb-in:rgba(0,0,0,.5);
+  --acc-ring:rgba(126,166,230,.32);
+  --hov:rgba(126,166,230,.11);
+  --log-fg:#a7b1c2;
+  --bar:#5d7fae;
+  --bar2a:#6d8dbd; --bar2b:#4a6a99;
+  --wla:#5fb694; --wlb:#3c8769;
+  --ph-s1:38%; --ph-l1:50%; --ph-s2:40%; --ph-l2:34%;
+  --shade:rgba(255,255,255,.07);
+}
+
+/* 主题定下来之前先别画：脚本在 body 末尾才跑，
+   不挡一下就会先用浅色画一遍再跳成深色，闪一下。
+   4 秒那条动画是兜底：万一脚本没跑，页面也会自己露出来，不会白屏。 */
+html:not([data-theme]) body{visibility:hidden;animation:show .01s 4s forwards}
+@keyframes show{to{visibility:visible}}
+
+body{
+  background:var(--bg); color:var(--fg);
+  /* 关掉窄容器里的字体自动放大：四列小卡会被 Chrome 的 font boosting
+     把 9~10px 的行高撑成两倍，核号和百分比互相挤到省略。 */
+  -webkit-text-size-adjust:100%; text-size-adjust:100%;
+  font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  padding:0 0 calc(104px + env(safe-area-inset-bottom)); -webkit-font-smoothing:antialiased;
+  transition:background-color .3s ease,color .3s ease;
+}
+.wrap{max-width:680px;margin:0 auto;padding:16px}
+
+/* 头部：左边品牌（图标 + 标题），右边主题开关 */
+header{display:flex;align-items:center;gap:12px;padding:22px 4px 18px}
+.brand{display:flex;align-items:center;gap:12px;min-width:0;flex:1}
+.logo{flex:none;width:46px;height:46px;border-radius:15px;background:var(--card);
+  box-shadow:var(--up-sm),inset 0 1px 0 var(--shade);
+  display:flex;align-items:center;justify-content:center}
+.logo svg{width:25px;height:25px;fill:none;stroke:var(--acc);stroke-width:2.1;
+  stroke-linecap:round;stroke-linejoin:round}
+.htxt{min-width:0}
+h1{font-size:20px;font-weight:700;letter-spacing:.4px;white-space:nowrap;
+   overflow:hidden;text-overflow:ellipsis}
+.sub{color:var(--mut);font-size:12.5px;margin-top:3px;white-space:nowrap;
+     overflow:hidden;text-overflow:ellipsis}
+/* 版本号做成一个小凸片，扫一眼就知道是哪个版 */
+.sub #ver{display:inline-block;padding:1px 8px;border-radius:9px;background:var(--card);
+  box-shadow:var(--up-sm);font-size:11px;font-weight:650;color:var(--acc);letter-spacing:.3px}
+
+/* 主题开关：两个图标挤在一条凹槽里，选中的那个凸出来 */
+.tsw{flex:none;display:flex;gap:3px;padding:4px;border-radius:999px;background:var(--card);
+  box-shadow:var(--in-sm)}
+.tsw button{width:34px;height:34px;padding:0;border-radius:50%;display:flex;
+  align-items:center;justify-content:center;background:transparent;color:var(--mut);
+  box-shadow:none;transition:box-shadow .22s ease,color .22s ease,background-color .3s ease}
+.tsw button .ti{width:18px;height:18px;display:block}
+.tsw .ti-s{fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.tsw .ti-d{fill:currentColor;stroke:none}
+.tsw button.on{background:var(--card);color:var(--acc);box-shadow:var(--up-sm)}
+.tsw button:active{box-shadow:var(--in-sm);transform:translateY(1px)}
+
+/* 状态卡 */
+.hero{background:var(--card);border-radius:var(--r);
+  box-shadow:var(--up),inset 0 1px 0 var(--shade);
+  overflow:hidden;margin-bottom:20px}
+.status{display:flex;align-items:center;gap:11px;padding:16px 16px 15px 19px;position:relative}
+/* 左侧竖条：新拟物下不做描边，做成一条压亮的色带 */
+.status::before{content:'';position:absolute;left:0;top:9px;bottom:9px;width:4px;
+  border-radius:0 4px 4px 0;background:currentColor;opacity:.8}
+.status .beat{width:17px;height:17px;flex:0 0 auto;display:block;fill:currentColor}
+.status .beat path{transform-origin:50% 62%}
+.beat{animation:beat 1.5s ease-in-out infinite}
+@keyframes beat{
+  0%,100%{transform:scale(1)}
+  16%{transform:scale(1.22)}
+  32%{transform:scale(1)}
+  48%{transform:scale(1.15)}
+  64%{transform:scale(1)}
+}
+/* 故障和暂停时爱心不跳 */
+.status.off .beat,.status.paused .beat{animation:none}
+.status .stxt{font-size:16.5px;font-weight:680;letter-spacing:.3px}
+/* 状态底色：浅底上用极淡的色雾，不画边框 */
+.status.on{background:var(--ok-wash);color:var(--ok)}
+.status.game{background:var(--acc-wash);color:var(--acc)}
+.status.off{background:var(--err-wash);color:var(--err)}
+/* 首屏还没拿到新状态时先画上次的值，淡一点表示"正在刷新"；
+   新状态一到就恢复满不透明。比先摆一个"连接中"再跳变诚实。 */
+.status.stale{opacity:.55}
+/* 暂停是附注：推到右边的小凸起，不与主状态抢注意力 */
+.chip{margin-left:auto;padding:4px 12px;border-radius:999px;font-size:12px;
+  font-weight:650;white-space:nowrap}
+.chip.pause{background:var(--card);color:var(--warn);box-shadow:var(--up-sm)}
+.hero-body{padding:14px 16px 16px}
+/* 两格：整块凹进去，格子之间靠同一层内阴影自然分开 */
+.hero-meta{display:grid;grid-template-columns:repeat(2,1fr);
+  gap:10px;background:transparent;border-radius:14px;padding:0}
+.kv{background:var(--card);box-shadow:var(--in-sm);border-radius:13px;
+    padding:12px 10px;text-align:center}
+.kv .k{font-size:10.5px;color:var(--mut);letter-spacing:.4px}
+.kv .v{font-size:15.5px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums;
+  word-break:break-all}
+/* 状态色：关于页按严重程度分色。bad 仅用于"原因不可查"，色块本身不算故障。 */
+.kv .v.ok{color:var(--ok)}
+.kv .v.warn{color:var(--warn);font-size:13px;font-weight:600}
+.kv .v.bad{color:var(--err);font-size:13px;font-weight:600}
+/* 作者行：整块可点进主页，凸起的横条 */
+a.kv{display:block;text-decoration:none;color:inherit;margin-bottom:10px;
+  box-shadow:var(--up-sm)}
+a.kv:active{box-shadow:var(--in-sm)}
+a.kv .go{display:block;font-size:11.5px;font-weight:400;color:var(--acc);
+  margin-top:5px}
+/* 守护 PID 单独一行：与"桥接方式"分开放，避免被读成同一个数字 */
+.hero-foot{margin-top:13px;display:flex;align-items:center;gap:8px;
+  font-size:11.5px;color:var(--mut);flex-wrap:wrap}
+.hero-foot b{color:var(--fg);font-weight:600;font-variant-numeric:tabular-nums}
+.hero-foot .sep{opacity:.4}
+
+/* 卡片：和背景同色，只靠凸起分出来 */
+.card{background:var(--card);border-radius:var(--r);
+  box-shadow:var(--up),inset 0 1px 0 var(--shade);
+  padding:17px;margin-bottom:20px}
+.card h2{font-size:14.5px;font-weight:650;margin-bottom:4px;display:flex;
+         align-items:center;gap:9px}
+/* 标题图标放进一个小凸片里，整张卡的标题栏就有了落点 */
+.card h2 .ico{width:30px;height:30px;padding:7px;border-radius:10px;flex:none;
+  background:var(--card);box-shadow:var(--up-sm);
+  stroke:var(--acc);fill:none;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round}
+.hint{font-size:12px;color:var(--mut);margin-bottom:13px;line-height:1.6}
+/* 「自己定具体数值」：默认收起，展开后是原来那批滑杆。
+   折叠本身不改变任何值——收起时控件仍在文档里，保存照旧读到。 */
+details.more{margin-top:4px}
+details.more>summary{list-style:none;cursor:pointer;font-size:12px;color:var(--mut);
+  padding:10px 13px;border-radius:13px;box-shadow:var(--up-sm);background:var(--card);
+  display:flex;align-items:center;gap:7px;user-select:none}
+details.more>summary::-webkit-details-marker{display:none}
+details.more[open]>summary{box-shadow:var(--in-sm);margin-bottom:10px}
+details.more>summary::before{content:'⚙';opacity:.7;font-size:12px;line-height:1}
+
+/* 行：分隔用"刻痕"（一条亮线压一条暗线），不是硬边框 */
+.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:13px 0;
+     border-top:1px solid var(--sepa-top);box-shadow:0 1px 0 var(--sepa-bot)}
+.row:first-of-type{border-top:0;box-shadow:none}
+.row .lbl{flex:1;min-width:0}
+.row .lbl b{font-weight:600;font-size:14px;display:block}
+.row .lbl span{font-size:11.5px;color:var(--mut);line-height:1.5;display:block}
+
+/* 滑杆：槽是凹的、钮是凸的，钮在主色和卡片色之间切换。
+   整条 input 的触摸高度 20px，再加 touch-action:pan-y ——
+   竖着划时手势交给页面滚动，只有横向位移才改值。
+   --p 是已走的比例（JS 按 min/max 算），走过的部分染成主色，
+   免得凹槽看不出滑到哪儿了。 */
+.slider{flex:1.4;min-width:110px}
+input[type=range]{-webkit-appearance:none;width:100%;height:20px;background:transparent;
+  margin:0;touch-action:pan-y;--p:0%}
+input[type=range]::-webkit-slider-runnable-track{height:8px;border-radius:999px;
+  background:linear-gradient(90deg,var(--acc) 0 var(--p),var(--card) var(--p) 100%);
+  box-shadow:var(--in-sm)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;
+  border-radius:50%;background:var(--card);border:0;margin-top:-5px;
+  box-shadow:-2px -2px 5px var(--lt),2px 2px 6px var(--sh),
+             inset -1px -1px 2px var(--lt),inset 1px 1px 2px var(--thumb-in)}
+input[type=range]:active::-webkit-slider-thumb{background:var(--acc);
+  box-shadow:-2px -2px 5px var(--lt),2px 2px 6px var(--sh),
+             inset -1px -1px 2px rgba(255,255,255,.45)}
+.pct{font-size:14px;font-weight:660;color:var(--acc);min-width:46px;text-align:right;
+     font-variant-numeric:tabular-nums}
+
+/* 开关：槽凹、钮凸，开的时候槽染一层色雾 */
+.sw{position:relative;width:46px;height:26px;flex:none}
+.sw input{opacity:0;width:0;height:0}
+.sw i{position:absolute;inset:0;background:var(--card);border-radius:999px;
+      box-shadow:var(--in-sm);transition:.22s ease;cursor:pointer}
+.sw i:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;
+  background:var(--card);border-radius:50%;box-shadow:var(--up-sm);transition:.22s cubic-bezier(.4,1.4,.5,1)}
+.sw input:checked+i{box-shadow:var(--in-sm),inset 0 0 0 2px var(--acc-ring)}
+.sw input:checked+i:before{transform:translateX(20px);background:var(--acc);
+  box-shadow:var(--up-sm),inset -1px -1px 2px rgba(255,255,255,.45)}
+
+/* 输入/下拉：一律凹进背景里，聚焦时把内阴影加深当作反馈。
+   number 也要一起管：应用档位里有两个手填的百分比框，
+   漏了就是浏览器默认的白底黑字，深色模式下格外扎眼。 */
+select,input[type=text],input[type=number]{background:var(--card2);border:0;color:var(--fg);
+  border-radius:12px;padding:10px 12px;font-size:14px;font-family:inherit;width:100%;
+  box-shadow:var(--in-sm);appearance:none;-webkit-appearance:none}
+select:focus,input:focus{outline:none;box-shadow:var(--in)}
+input[type=number]{-moz-appearance:textfield}
+input[type=number]::-webkit-outer-spin-button,
+input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+
+/* 按钮：凸起点下去变凹，就是"按进去了" */
+button{font-family:inherit;font-size:13.5px;font-weight:600;border:0;
+  background:var(--card2);color:var(--fg);padding:10px 16px;border-radius:13px;
+  cursor:pointer;box-shadow:var(--up-sm);
+  transition:box-shadow .16s ease,transform .16s ease,color .16s ease,background-color .3s ease}
+button:active{box-shadow:var(--in-sm);transform:translateY(1px)}
+button.pri{background:linear-gradient(145deg,var(--acc),var(--acc2));color:var(--on-acc);
+  box-shadow:var(--up-sm),inset -2px -2px 5px rgba(255,255,255,.22),
+             inset 2px 2px 5px rgba(0,0,0,.18)}
+button.pri:active{box-shadow:var(--in-sm)}
+button.dan{color:var(--err)}
+button:disabled{opacity:.45;box-shadow:none;cursor:default}
+.btns{display:flex;gap:11px;flex-wrap:wrap;margin-top:15px}
+.btns button{flex:1;min-width:118px}
+
+/* ── 页内选择控件 ─────────────────────────────────────────────
+   页面跑在管理器的 WebView 里，<select> 一点就弹安卓系统的单选框，
+   颜色、圆角、字体全都不受我们控制，和新拟物的界面完全两个世界。
+   所以选项一律用下面这两个组件画：少的排成一行，多的自绘下拉。 */
+.seg{display:flex;flex-wrap:wrap;gap:7px;justify-content:flex-start;margin-top:2px}
+.seg button{padding:7px 12px;font-size:12.5px;border-radius:11px;
+  box-shadow:var(--up-sm);color:var(--mut)}
+/* 选中态必须一眼看出来：以前只是字换成主色 + 一道内阴影，在浅灰平面上
+   和不选几乎没差别（真机反馈"点了没感觉，不知道选的是哪个"）。 */
+.seg button.on{background:linear-gradient(145deg,var(--acc),var(--acc2));
+  color:var(--on-acc);font-weight:700;
+  box-shadow:var(--up-sm),inset -2px -2px 5px rgba(255,255,255,.2),
+             inset 2px 2px 5px rgba(0,0,0,.18)}
+.seg button.cust{color:var(--warn);font-size:11.5px}
+.seg button.cust.on{background:var(--warn);color:var(--on-acc);font-weight:700;
+  box-shadow:var(--up-sm),inset -2px -2px 5px rgba(255,255,255,.22),
+             inset 2px 2px 5px rgba(0,0,0,.22)}
+/* 短标签的一组（学习偏好三档）均分整行：三颗挤在左边一小坨时，
+   右边空一大片，看着像没排完。 */
+.seg.fill{flex-wrap:nowrap}
+.seg.fill button{flex:1 1 0;min-width:0;padding:7px 4px;text-align:center;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 选项组整行独占：手机上五个短标签挤不进滑杆旁边那一列，
+   挤的结果是标题被压成一字一行。所以容器给满 100%，让它换到下一行。 */
+.row>.pset{flex:1 0 100%}
+.dd{position:relative;display:inline-block;flex:0 0 auto;text-align:right}
+.dd-btn{width:100%;text-align:left;font-size:12.5px;padding:8px 11px;border-radius:11px}
+.dd-btn::after{content:'▾';float:right;opacity:.55;font-size:11px}
+.dd-list{display:none;position:absolute;right:0;top:calc(100% + 5px);z-index:40;
+  min-width:100%;max-height:236px;overflow-y:auto;background:var(--card);
+  border-radius:12px;box-shadow:var(--up);padding:5px;text-align:left}
+.dd.open .dd-list{display:block}
+.dd-list button{display:block;width:100%;text-align:left;font-size:12.5px;
+  padding:9px 11px;margin:1px 0;border-radius:9px;box-shadow:none;background:transparent;
+  color:var(--fg)}
+.dd-list button:hover{background:var(--hov)}
+.dd-list button.on{box-shadow:var(--in-sm);color:var(--acc)}
+
+/* 日志 */
+.log{background:var(--card);border-radius:13px;padding:12px;
+     box-shadow:var(--in);
+     font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.65;
+     max-height:290px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;
+     color:var(--log-fg)}
+.log:empty::after{content:"暂无日志";color:var(--mut)}
+
+/* 名单 */
+.list{max-height:330px;overflow-y:auto;margin:0 -4px}
+.pk{display:flex;align-items:center;gap:9px;padding:9px 4px;font-size:13.5px;
+    border-bottom:1px solid var(--sepa-top);box-shadow:0 1px 0 var(--sepa-bot)}
+.pk:last-child{border-bottom:0;box-shadow:none}
+.pk code{font-family:ui-monospace,Menlo,monospace;font-size:12.5px;flex:1;
+         word-break:break-all;color:var(--fg)}
+/* 一行两句话：应用名在上、包名在下。名字取不到时第一行仍是包名、
+ * 第二行整条不显示（见 makeNameEl），退回一行样式。
+ * .t 折成省略号、.s 允许断行：包名长，折开不影响认应用。 */
+.pk .nm{flex:1;min-width:0}
+.pk .nm .t{font-size:14px;font-weight:600;line-height:1.3;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pk .nm .s{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;
+           color:var(--mut);line-height:1.3;word-break:break-all}
+.pk .ico{flex:none;width:38px;height:38px;border-radius:12px;background:var(--card);
+     color:var(--fg);display:flex;align-items:center;justify-content:center;
+     font-size:17px;font-weight:700;text-transform:uppercase;overflow:hidden;
+     box-shadow:var(--up-sm)}
+/* 没装 / 解不出图标时退成首字母色块，不留破图占位。
+   色相由包名算，同一应用每次颜色一致。浅底上饱和度压一档。 */
+.pk .ph{background:linear-gradient(145deg,
+     hsl(var(--h,240) var(--ph-s1) var(--ph-l1)),
+     hsl(calc(var(--h,240) + 30) var(--ph-s2) var(--ph-l2)));
+     color:#fff;box-shadow:var(--up-sm),inset -2px -2px 5px rgba(255,255,255,.3)}
+.pk img.ico{object-fit:cover;display:block}
+.pk .rm{flex:none;width:28px;height:28px;padding:0;border-radius:9px;line-height:1;
+         color:var(--mut);font-size:16px}
+.pk .rm:active{color:var(--err);box-shadow:var(--in-sm)}
+/* 候选栏的"＋"：和删除同一个手感，但颜色走"已生效"那一组，不用红色。 */
+.pk .add{flex:none;width:28px;height:28px;padding:0;border-radius:9px;line-height:1;
+         color:var(--ok);font-size:16px}
+.pk .add:active{box-shadow:var(--in-sm)}
+.pk .add[disabled]{color:var(--mut)}
+/* 档位行里的下拉：窄一点，避免挤掉包名 */
+.pk .md-sel{flex:0 0 88px;font-size:11.5px;padding:6px 7px;border-radius:10px}
+/* 这条档位是学习写回来的还是你手填的。手填的永远压过学出来的，
+   所以这个标不只是说明，点它就是"这条以后归我管"。 */
+.pk .src{flex:none;font-size:10.5px;color:var(--mut);padding:5px 7px;
+     border-radius:8px;box-shadow:var(--up-sm);cursor:pointer}
+/* 档位行：应用名/包名独占第一行，CPU/GPU 下拉换到第二行。
+   两个 88px 的下拉并排会把名字挤成“c.”，先让人认出是哪个应用，
+   再谈调哪个值；删除按钮留在第一行右侧。 */
+.pk-mode{flex-wrap:wrap;row-gap:7px}
+.pk-mode .nm{flex:1 1 160px}
+.pk-mode .rm{order:1}
+.pk-mode .src{order:2}
+/* 基准给 110px：flex-basis 0 时下拉会跟名字挤在同一行，只有真放不下才换行。 */
+.pk-mode .md-sel{order:2;flex:1 1 110px;max-width:180px;min-width:0}
+/* 按应用建议的理由单独占一行：那一行要放图标、名字和数值，塞不下这段话。
+   左边缩进对齐到名字下面（图标 38 + 间距 12）。 */
+#advice-app .why{font-size:11.5px;color:var(--mut);margin:-2px 0 12px;padding-left:50px}
+.adv-ev{font-size:11.5px;color:var(--mut);margin:-2px 0 12px}
+#advice-app .adv-ev{padding-left:50px}
+
+/* 本机不存在的档位：只留名字和（未检测到），整行压暗。
+   滑杆和百分比已由 JS 摘掉，这里只表示该行不可用。 */
+.row.absent{opacity:.55}
+.row.absent .lbl b{font-weight:600}
+.empty{text-align:center;color:var(--mut);font-size:13px;padding:26px 10px}
+
+/* tab：浮在底部的一条药丸，选中的那格按进去 */
+.tabbar{position:fixed;left:12px;right:12px;
+  bottom:calc(10px + env(safe-area-inset-bottom));
+  display:flex;background:var(--card);
+  box-shadow:var(--up),0 12px 26px var(--tab-shadow);
+  border-radius:22px;
+  padding:7px max(6px,env(safe-area-inset-right)) 7px max(6px,env(safe-area-inset-left));z-index:9}
+.tabbar button{flex:1;background:none;padding:8px 4px;font-size:11px;
+  color:var(--mut);font-weight:600;border-radius:16px;display:flex;
+  flex-direction:column;align-items:center;gap:4px;box-shadow:none;
+  transition:box-shadow .18s ease,color .18s ease,background-color .3s ease}
+.tabbar button .ico{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round}
+.tabbar button.on{color:var(--acc);box-shadow:var(--in-sm)}
+
+/* toast */
+.toast{position:fixed;left:50%;bottom:calc(108px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(14px);
+  background:var(--card);color:var(--fg);padding:11px 20px;border-radius:14px;
+  font-size:13.5px;box-shadow:var(--up),0 10px 24px var(--tab-shadow);opacity:0;
+  pointer-events:none;
+  transition:.25s;z-index:20;max-width:88vw;text-align:center}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.err{color:var(--err)}
+
+/* 桥接不可用的常驻提示条：凹陷的一块（与卡片相反的触感），
+   不用硬边框，警告靠内凹和字色区分。 */
+.nobar{margin:0 0 16px;padding:15px 17px;border-radius:15px;
+  background:var(--bg);box-shadow:var(--in);color:var(--err)}
+.nobar-t{font-size:14px;font-weight:700;line-height:1.5}
+.nobar-s{margin-top:6px;font-size:12px;line-height:1.6;color:var(--mut)}
+.nobar code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:11.5px;color:var(--fg)}
+
+/* 赞赏码：两张图放白底里，扫码边界更清楚。
+   深色模式下也留白底 —— 二维码在深底上扫不出来，白底是功能要求，不是配色。 */
+.reward-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;
+  align-items:start}
+.reward{margin:0;background:#fff;border-radius:14px;padding:6px;
+  box-shadow:var(--up-sm),0 6px 18px var(--tab-shadow);text-align:center}
+.reward img{display:block;width:100%;height:auto;border-radius:10px}
+/* 赞赏码卡片始终是白底：说明字不能跟着深色主题变浅，否则白底上读不清 */
+.reward figcaption{font-size:11px;color:#5f6b7c;padding:5px 0 2px}
+@media(max-width:340px){.reward-grid{grid-template-columns:1fr}}
+
+/* 深度睡眠：状态条走凹陷，和开关同一套手感；榜单柱条和唤醒数分两列。 */
+.ds-st{display:flex;align-items:center;gap:9px;margin-top:11px;padding:11px 13px;
+  border-radius:13px;box-shadow:var(--in-sm);font-size:13px;font-weight:600;color:var(--mut)}
+.ds-st .dot{width:9px;height:9px;border-radius:50%;background:var(--mut);flex:none}
+.ds-st.on{color:var(--ok)}
+.ds-st.on .dot{background:var(--ok);box-shadow:0 0 7px var(--ok)}
+.ds-st.wait{color:var(--acc)}
+.ds-st.wait .dot{background:var(--acc)}
+.ds-st .meta{margin-left:auto;font-size:11px;font-weight:400;color:var(--mut);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:56%}
+.ds-board{margin-top:14px}
+.ds-bh{display:flex;align-items:baseline;gap:8px;font-size:12.5px;font-weight:600}
+.ds-bh .n{color:var(--mut);font-size:10.5px;font-weight:400;margin-left:auto;
+  font-variant-numeric:tabular-nums}
+.ds-row{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:12px}
+.ds-rank{width:18px;text-align:center;color:var(--mut);font-variant-numeric:tabular-nums}
+.ds-rank.top{color:var(--warn);font-weight:700}
+.ds-name{flex:0 0 40%;min-width:0;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis}
+.ds-name .wl{font-size:9.5px;color:var(--ok);margin-left:4px}
+.ds-barw{flex:1;height:11px;border-radius:4px;box-shadow:var(--in-sm);overflow:hidden}
+.ds-bar{display:block;height:100%;min-width:2px;border-radius:4px;
+  background:linear-gradient(90deg,var(--bar2a),var(--bar2b));transition:width .4s ease}
+.ds-bar.wl{background:linear-gradient(90deg,var(--wla),var(--wlb))}
+.ds-cnt{flex:none;min-width:30px;text-align:right;font-weight:600;
+  font-variant-numeric:tabular-nums}
+.ds-board .empty{padding:14px 0;font-size:12px}
+
+.pg{display:none}.pg.on{display:block}
+
+/* SoC 识别横幅与原生频率表 */
+#soc-name{font-size:16px;font-weight:700;margin-bottom:6px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.3px}
+#hw-table{margin-top:12px}
+.hw{display:flex;align-items:baseline;gap:8px;padding:9px 0;font-size:12.5px;
+  border-bottom:1px solid var(--sepa-top);box-shadow:0 1px 0 var(--sepa-bot)}
+.hw:last-child{border-bottom:0;box-shadow:none}
+.hw .t{flex:1;color:var(--mut)}
+.hw .max{color:var(--fg);font-variant-numeric:tabular-nums}
+.hw .cap{color:var(--acc);font-variant-numeric:tabular-nums;font-weight:600}
+.hw .sep{color:var(--mut);opacity:.55}
+/* 每个核心一行的明细：档位表是设定的上限，这张表是当前每颗核的实际频率。 */
+.core-h{margin-top:16px;padding-top:13px;border-top:1px solid var(--sepa-top);
+        box-shadow:0 1px 0 var(--sepa-bot)}
+.core-h .ch-t{font-size:11.5px;color:var(--mut);margin-bottom:2px}
+.core-h .ch-s{font-size:10.5px;color:var(--mut);opacity:.8;margin-bottom:8px}
+/* 每核一张小卡：上面是最近约 25 秒的频率分布，下面当前频率和硬件范围。
+   八核在手机宽度下排四列，和用户给的参考图一致。 */
+.core-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:9px;margin-top:10px}
+.core-card{background:var(--card);border-radius:13px;padding:8px 4px 7px;
+  box-shadow:var(--up-sm);text-align:center;min-width:0;overflow:hidden}
+.core-top{display:flex;align-items:baseline;justify-content:space-between;gap:3px}
+.core-top .cid{flex:1;min-width:0;font-size:9px;color:var(--mut);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-variant-numeric:tabular-nums}
+/* 类名不能叫 .pct：滑杆那一列的 .pct 带 min-width:46px，会把核号挤没。 */
+.core-top .cpct{flex:none;font-size:10px;color:var(--mut);white-space:nowrap;
+  font-variant-numeric:tabular-nums}
+.core-bars{display:flex;align-items:flex-end;justify-content:center;gap:2px;
+  height:36px;margin:3px 0 4px}
+.core-bar{width:5px;border-radius:2px 2px 1px 1px;background:var(--bar);min-height:2px;
+  transition:height .25s ease,background-color .2s ease}
+.core-bar.on{background:var(--warn)}
+.core-card .hz{font-size:clamp(10px,3vw,12px);font-weight:650;line-height:1.25;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  letter-spacing:-.2px;font-variant-numeric:tabular-nums;max-width:100%}
+.core-card .hz .u{font-size:8px;font-weight:600;color:var(--mut);
+  letter-spacing:0;margin-left:1px}
+.core-card .rg{font-size:clamp(7px,2vw,8.5px);color:var(--mut);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.1px;
+  font-variant-numeric:tabular-nums;max-width:100%}
+@media(max-width:340px){.core-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:400px){.row{flex-wrap:wrap}.slider{min-width:100%;order:3}}
+
+/* 滚动条：跟着主题走，别在深色面板上留一条灰杠 */
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--sb);border-radius:999px;
+  border:2px solid var(--card)}
+::-webkit-scrollbar-thumb:hover{background:var(--mut)}
+
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="brand">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l2.5-6 4 12 2.5-6h5"/></svg>
+    </div>
+    <div class="htxt">
+      <h1>Soc智能限频</h1>
+      <div class="sub">梦笙Mess1on · <span id="ver">V1.6</span></div>
+    </div>
+  </div>
+  <!-- 主题开关：太阳=浅色，月亮=深色。点一下就换，选中哪个存到本地。 -->
+  <div class="tsw" role="group" aria-label="界面主题">
+    <button type="button" id="th-l" onclick="setTheme('light')"
+            title="浅色模式" aria-label="浅色模式" aria-pressed="true">
+      <svg class="ti ti-s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.6"/><path d="M12 2.6v2.4M12 19v2.4M2.6 12h2.4M19 12h2.4M5.3 5.3l1.7 1.7M17 17l1.7 1.7M18.7 5.3L17 7M7 17l-1.7 1.7"/></svg>
+    </button>
+    <button type="button" id="th-d" onclick="setTheme('dark')"
+            title="深色模式" aria-label="深色模式" aria-pressed="false">
+      <svg class="ti ti-d" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- 桥接不可用时的常驻提示条：放在最上面且不会自动消失，
+     此时下方卡片都无数据，需要引导用户改用命令行入口。 -->
+<div class="nobar" id="nobar" style="display:none">
+  <div class="nobar-t" id="nobar-t"></div>
+  <div class="nobar-s" id="nobar-s"></div>
+</div>
+
+<!-- ── 首页 ── -->
+<div class="pg on" id="p-home">
+  <div class="hero">
+    <div class="status off" id="badge">
+      <svg class="beat" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+      <span class="stxt" id="btxt">连接中</span>
+      <span class="chip pause" id="pbadge" style="display:none">已暂停</span>
+    </div>
+    <!-- 实时偏移那一行：谁在动、动多少、依据是什么。
+         只写"当前封顶"不够 —— 温控压了 10% 时，用户必须能看出那不是滑杆的值。 -->
+    <div class="hint" id="adapt-line" style="display:none;margin-top:6px"></div>
+    <div class="hero-body">
+      <div class="hero-meta">
+        <div class="kv"><div class="k">守护 PID</div><div class="v" id="m-pid">—</div></div>
+        <div class="kv"><div class="k">游戏名单</div><div class="v" id="m-npkg">—</div></div>
+      </div>
+      <div class="hero-foot">
+        <span>桥接 <b id="m-bridge">—</b></span>
+        <span class="sep">·</span>
+        <span>守护 <b id="ver2">V1.6</b></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg>CPU 封顶</h2>
+    <div class="hint" id="cpu-hint">按各簇硬件最高频排序自动分档</div>
+    <div id="cpu-rows"></div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1"/></svg>智能建议</h2>
+    <div class="hint">读学习到的频率分布，判断各簇这道帽该放宽还是收紧（建议学习 3 天以上效果更好）。
+      每次只动 5%，应用后等约 5 分钟新样本再看；连点会连续加/减 5%。</div>
+    <div id="advice"><div class="hint">正在取样本…</div></div>
+    <!-- 按应用那一层：开了「按应用学习」并攒到样本后才有内容 -->
+    <div id="advice-app"></div>
+    <div class="btns">
+      <button class="pri" id="adv-apply" onclick="applyAdvice()">应用建议（±5%）</button>
+      <button onclick="refreshAdvice()">重新读取</button>
+      <button id="adv-reset" onclick="resetLearn()">清零重学</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 2L4.5 13H11l-1 9 8.5-11H12z"/></svg>GPU 封顶</h2>
+    <div class="hint">高通 KGSL / MTK Mali，按百分比向下吸附到实际频点</div>
+    <div class="row">
+      <div class="lbl"><b id="gpu-name">GPU</b><span id="gpu-hint">当前封顶</span></div>
+      <div class="pct" id="m-gpu2">—</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>运行日志</h2>
+    <div class="log" id="log"></div>
+    <div class="btns"><button onclick="loadLog()">刷新日志</button></div>
+  </div>
+</div>
+
+<!-- ── 配置 ── -->
+<div class="pg" id="p-conf">
+  <div class="card" id="soc-card">
+    <div id="soc-name">检测中…</div>
+    <div class="hint" style="margin:0" id="soc-hw"></div>
+    <div id="hw-table"></div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-2.9 1.2V21a2 2 0 11-4 0v-.1A1.7 1.7 0 007 19.4a1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00-1.2-2.9H1a2 2 0 110-4h.1A1.7 1.7 0 002.6 7a1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H7a1.7 1.7 0 001-1.5V1a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V7a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>CPU 封顶百分比</h2>
+    <div class="hint">封顶值向下吸附到实际频点，绝不超过设定百分比</div>
+    <div id="conf-pct"></div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 9h8M8 13h5"/></svg>GPU</h2>
+    <div class="row">
+      <div class="lbl"><b>封顶百分比</b><span>高通 KGSL / MTK Mali</span></div>
+      <div class="slider"><input type="range" id="gpu_pct" min="1" max="100" oninput="pv('gpu_pct')"></div>
+      <div class="pct" id="gpu_pct_v">45%</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>下限锁定</b><span>钉在最低档，抵消 Boost 越界</span></div>
+      <label class="sw"><input type="checkbox" id="gpu_min_lock" onchange="pv('gpu_min_lock')"><i></i></label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>行为</h2>
+    <div class="row">
+      <div class="lbl"><b>巡检间隔</b><span>压回被顶高上限的周期（2-60 秒）</span></div>
+      <div class="slider"><input type="range" id="interval" min="2" max="60" oninput="pv('interval')"></div>
+      <div class="pct" id="interval_v">5s</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>退出宽限</b><span>游戏退到后台后保持解锁（2-300 秒）</span></div>
+      <div class="slider"><input type="range" id="grace" min="2" max="300" oninput="pv('grace')"></div>
+      <div class="pct" id="grace_v">10s</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>开机满血</b><span>开机后前若干秒不封顶（0 = 关）</span></div>
+      <div class="slider"><input type="range" id="boot_full" min="0" max="600" step="15" oninput="pv('boot_full')"></div>
+      <div class="pct" id="boot_full_v">60s</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>熄屏交还系统</b><span>开：熄屏后解除封顶并交还系统，只保留 15s 轻巡检；
+        关：旧行为，熄屏照样封着</span></div>
+      <label class="sw"><input type="checkbox" id="screen_uncap" onchange="pv('screen_uncap')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>智能学习</b><span>只在封顶真的生效时采样（熄屏、满血、游戏时段不计）；关闭会清空已学样本</span></div>
+      <label class="sw"><input type="checkbox" id="learn" onchange="pv('learn')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>学习偏好</b><span>省电：允许下调大核；均衡：大核只升不降；性能：只升不降、上升更积极。
+        只改建议，不改实时封顶</span></div>
+      <div class="pset" id="p-learn-mode"></div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>按应用学习</b><span>默认关。开了以后，每个前台应用都会各自攒一份自己的记录，
+        建议就能细到"这个应用可以放宽一档"；没设档位的按全局平均当基准，攒得比全局慢。
+        没设档位的应用只在真有可改建议时才列出来，只是样本不够不会占一行</span></div>
+      <label class="sw"><input type="checkbox" id="learn_app" onchange="pv('learn_app')"><i></i></label>
+    </div>
+    <details class="more"><summary>自己定门槛</summary>
+      <div class="row">
+        <div class="lbl"><b>一个应用至少用多久</b><span>5-600 分钟。不满这个数就只报"样本不够"，不出建议</span></div>
+        <div class="slider"><input type="range" id="learn_app_min" min="5" max="600" step="5" oninput="pv('learn_app_min')"></div>
+        <div class="pct" id="learn_app_min_v">30分</div>
+      </div>
+      <div class="row">
+        <div class="lbl"><b>要跨几天</b><span>1-28 天。从第一次采样起每满 24 小时算一天，不按过零点切；
+          只在一天里用过的应用不给建议，免得把一次性的负载当常态。
+          <b>上调（经常贴着帽跑）固定要 3 天，不受这里影响；这个天数只管下调。</b></span></div>
+        <div class="slider"><input type="range" id="learn_app_day" min="1" max="28" oninput="pv('learn_app_day')"></div>
+        <div class="pct" id="learn_app_day_v">2天</div>
+      </div>
+    </details>
+    <div class="row">
+      <div class="lbl"><b>日常调速器</b><span>厂商调速器不会被改写</span></div>
+      <div id="governor" style="flex:0 0 154px"></div>
+    </div>
+  </div>
+
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>保存</h2>
+    <div class="hint">保存后守护自动重算封顶值并立即生效，无需重启手机</div>
+    <div class="btns">
+      <button class="pri" onclick="saveAll()">保存并生效</button>
+      <button onclick="loadConf()">放弃修改</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ── 功能：一条功能一张卡，先给人话选项，具体数值收在「自己定」里 ── -->
+<div class="pg" id="p-func">
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M4 12h4l2-6 4 12 2-6h4"/></svg>现在这台机器会怎么做</h2>
+    <div id="func-sum"><div class="hint">正在读当前设置…</div></div>
+    <div class="hint">这三条只调<b>当下生效的封顶</b>，不会去改「配置」页里你设的百分比；
+      首页那一行也会写明现在是被谁调了、调了多少。改完在页面底部按「保存并生效」。</div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M7 3h10v4H7zM5 7h14v14H5z"/><path d="M9 12h6"/></svg>插着电的时候</h2>
+    <div class="hint">插着电时发热由充电器承担，压它没意义；拔电会自动回到你设的值。</div>
+    <div class="row">
+      <div class="lbl"><b>要不要放松</b><span>选一个就行</span></div>
+      <div class="pset" id="p-chg"></div>
+    </div>
+    <details class="more"><summary>自己定具体数值</summary>
+      <div class="row">
+        <div class="lbl"><b>充电态放宽</b><span>开关：关掉就是插不插电都按设定值压</span></div>
+        <label class="sw"><input type="checkbox" id="chg_uncap" onchange="pv('chg_uncap');syncFunc()"><i></i></label>
+      </div>
+      <div class="row">
+        <div class="lbl"><b>插电抬到</b><span>20-100%，100% 等于插电时不封顶</span></div>
+        <div class="slider"><input type="range" id="chg_pct" min="20" max="100" step="5" oninput="pv('chg_pct');syncFunc()"></div>
+        <div class="pct" id="chg_pct_v">100%</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="7" width="16" height="10" rx="2"/><path d="M21 10v4"/><path d="M6 10v4"/></svg>电量低的时候</h2>
+    <div class="hint">不充电且电量低时再收紧一点，让最后一段电撑久些。插着电不生效，
+      分应用档位不吃这一刀（那是你明确设的值）。</div>
+    <div class="row">
+      <div class="lbl"><b>低电量再压一点</b><span>关掉后电量再低也不额外收紧</span></div>
+      <label class="sw"><input type="checkbox" id="batt_step" onchange="pv('batt_step');syncFunc()"><i></i></label>
+    </div>
+    <details class="more"><summary>自己定具体数值</summary>
+      <div class="row">
+        <div class="lbl"><b>低于多少开始压</b><span>5-95%</span></div>
+        <div class="slider"><input type="range" id="batt_low" min="5" max="95" oninput="pv('batt_low');syncFunc()"></div>
+        <div class="pct" id="batt_low_v">20%</div>
+      </div>
+      <div class="row">
+        <div class="lbl"><b>第一刀收紧</b><span>0-30%</span></div>
+        <div class="slider"><input type="range" id="batt_low_cut" min="0" max="30" oninput="pv('batt_low_cut');syncFunc()"></div>
+        <div class="pct" id="batt_low_cut_v">−5%</div>
+      </div>
+      <div class="row">
+        <div class="lbl"><b>低于多少再叠一刀</b><span>必须低于上面那个；1-95%</span></div>
+        <div class="slider"><input type="range" id="batt_crit" min="1" max="95" oninput="pv('batt_crit');syncFunc()"></div>
+        <div class="pct" id="batt_crit_v">10%</div>
+      </div>
+      <div class="row">
+        <div class="lbl"><b>第二刀再收紧</b><span>0-30%，和第一刀叠加</span></div>
+        <div class="slider"><input type="range" id="batt_crit_cut" min="0" max="30" oninput="pv('batt_crit_cut');syncFunc()"></div>
+        <div class="pct" id="batt_crit_cut_v">−10%</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M8.5 6.5a4 4 0 107 0c0 3-3.5 4.5-3.5 8"/><circle cx="12" cy="18" r="2.6"/></svg>机身发热的时候</h2>
+    <div class="hint">读的是 CPU/GPU 自己的温度传感器。到温度就一档一档往下压，凉下来再一档一档放开，
+      比等系统热管控直接砍频平滑。<b>不管选哪档，都不会低于你设定值往下这么多</b>：</div>
+    <div class="row">
+      <div class="lbl"><b>降速时机</b><span>拿不准就选「适中」</span></div>
+      <div class="pset" id="p-th"></div>
+    </div>
+    <details class="more"><summary>自己定具体数值</summary>
+      <div class="row">
+        <div class="lbl"><b>温控开关</b><span>关掉后温度再高也不主动降（系统自己的保护仍在）</span></div>
+        <label class="sw"><input type="checkbox" id="th_cap" onchange="pv('th_cap');syncFunc()"><i></i></label>
+      </div>
+      <div class="row">
+        <div class="lbl"><b>开始降的温度</b><span>35-110℃。数字越小越早就开始降，机器更凉、也更慢</span></div>
+        <div class="slider"><input type="range" id="th_high" min="35" max="110" oninput="pv('th_high');syncFunc()"></div>
+        <div class="pct" id="th_high_v">75℃</div>
+      </div>
+      <div class="row">
+        <div class="lbl"><b>放开的温度</b><span>必须比上面那个低，中间这段保持不动，不然会在阈值附近来回抖</span></div>
+        <div class="slider"><input type="range" id="th_low" min="30" max="105" oninput="pv('th_low');syncFunc()"></div>
+        <div class="pct" id="th_low_v">68℃</div>
+      </div>
+      <div class="row">
+        <div class="lbl"><b>最多降多少</b><span>最多比你设定值低这么多。设 65%、这里填 25，
+          就是降到 40%（不是 65%×75%）。0 = 不主动降</span></div>
+        <div class="slider"><input type="range" id="th_max" min="0" max="60" step="5" oninput="pv('th_max');syncFunc()"></div>
+        <div class="pct" id="th_max_v">−25%</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg>真的卡的时候</h2>
+    <div class="hint">看的是系统自己的"任务在等 CPU"计数，和这台机最近 10 分钟平常水平比：
+      明显高出才临时放宽一点，不卡了自动收回去。<b>它只会往上放宽，永远不会比你设的值更狠</b>。</div>
+    <div class="row">
+      <div class="lbl"><b>要不要借</b><span>拿不准就选「适中」</span></div>
+      <div class="pset" id="p-psi"></div>
+    </div>
+    <details class="more"><summary>自己定具体数值</summary>
+      <div class="row">
+        <div class="lbl"><b>PSI 护栏</b><span>关掉后卡的时候也不会放宽</span></div>
+        <label class="sw"><input type="checkbox" id="psi_adapt" onchange="pv('psi_adapt');syncFunc()"><i></i></label>
+      </div>
+      <div class="row">
+        <div class="lbl"><b>最多借出</b><span>0-30%：一次放宽的总量上限。
+          设 65%、这里填 10，就是临时放宽到 75%</span></div>
+        <div class="slider"><input type="range" id="psi_gain" min="0" max="30" step="5" oninput="pv('psi_gain');syncFunc()"></div>
+        <div class="pct" id="psi_gain_v">+10%</div>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>保存</h2>
+    <div class="hint">和「配置」页共用同一份保存动作：一次把两页的改动都写进去并立即生效</div>
+    <div class="btns">
+      <button class="pri" onclick="saveAll()">保存并生效</button>
+      <button onclick="loadConf()">放弃修改</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── 游戏 ── -->
+<div class="pg" id="p-game">
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M4 12a8 8 0 018-8 8 8 0 018 8 8 8 0 01-8 8 8 8 0 01-8-8z"/></svg>可能是游戏、还没进名单</h2>
+    <div class="hint">按发行商词典（vendors.txt）挑出来的候选，<b>不会自动生效</b>：
+      点 ＋ 才加进白名单，不点就什么都不变。名单覆盖不到的新游戏就在这里加。</div>
+    <div id="gsug"></div>
+    <div class="btns"><button onclick="loadSuggest()">重新扫描</button></div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 21s-8-5-8-11a5 5 0 018-3 5 5 0 018 3c0 6-8 11-8 11z"/></svg>游戏白名单</h2>
+    <div class="hint">前台命中即解除 CPU / GPU 封顶，本机已装 <b id="gcount">0</b> 个</div>
+    <input type="text" id="gadd" placeholder="输入包名后回车添加" autocomplete="off"
+           autocapitalize="off" autocorrect="off" spellcheck="false">
+    <div class="btns"><button class="pri" onclick="addGame()">添加</button></div>
+    <div class="list" id="glist"></div>
+  </div>
+
+  <!-- 分应用档位：按应用设定的例外，与游戏白名单同类，放在游戏页。 -->
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7"/></svg>分应用档位</h2>
+    <div class="hint">优先于配置页的全局百分比。<b>满血</b> = 这个应用在前台时整个交还系统
+      （CPU 与 GPU 都不封顶）。CPU 四簇统一按一个百分比封顶；GPU 默认跟随全局，
+      也可以单独给这个应用设一道更低的帽（例如录像时压住 GPU 发热）。
+      <b>熄屏也封顶</b> = 这个应用在前台时锁屏也不交还系统，适合挂机下载/编译。
+      相机类应用装机时会按机型自动设为满血（可改可删，升级不会塞回来）。</div>
+    <div id="mode-rows"></div>
+    <div class="btns">
+      <button class="pri" id="pk-btn" onclick="togglePicker()">＋ 添加应用</button>
+      <button onclick="loadModes()">刷新</button>
+    </div>
+
+    <!-- 应用选择器：从已安装列表里挑。页面在管理器里打开，
+         守护抓到的前台永远是管理器自己，故不按前台设置。 -->
+    <div id="picker" style="display:none">
+      <div class="row">
+        <div class="lbl"><b>新加这条用哪一档</b><span>点下面的应用就按这个值写入</span></div>
+        <div id="pk-mode" style="flex:0 0 110px"></div>
+      </div>
+      <div class="row" id="pk-custom-row" style="display:none">
+        <div class="lbl"><b>自定义 CPU 百分比</b><span>1 ~ 100，CPU 四簇统一</span></div>
+        <input type="number" id="pk-custom" min="1" max="100" value="75"
+               style="flex:0 0 90px;text-align:center">
+      </div>
+      <div class="row" id="pk-gpu-row">
+        <div class="lbl"><b>GPU 上限</b><span>跟随全局，或给这个应用单独设一道；满血时不需要</span></div>
+        <div id="pk-gpu" style="flex:0 0 110px"></div>
+      </div>
+      <div class="row" id="pk-gpu-custom-row" style="display:none">
+        <div class="lbl"><b>自定义 GPU 百分比</b><span>1 ~ 100；只压游戏/录像这类 GPU 负载才有意义</span></div>
+        <input type="number" id="pk-gpu-custom" min="1" max="100" value="45"
+               style="flex:0 0 90px;text-align:center">
+      </div>
+      <input type="text" id="pk-q" placeholder="搜包名或应用名：相机 / camera / 王者"
+             autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+             oninput="queuePicker()">
+      <label class="hint" style="display:flex;align-items:center;gap:8px;margin-top:8px">
+        <input type="checkbox" id="pk-all" onchange="setAppsAll(this.checked)"> 显示系统应用（含服务/组件）
+      </label>
+      <div class="hint" id="pk-count" style="margin:8px 0 0"></div>
+      <div class="list" id="pk-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── 睡眠 ── -->
+<div class="pg" id="p-sleep">
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/><path d="M15 3.5l.7 1.8 1.8.7-1.8.7L15 8.5l-.7-1.8-1.8-.7 1.8-.7z"/></svg>深度睡眠</h2>
+    <div class="hint">熄屏且没在充电，满 20 秒开始冻结第三方后台；满 7 分半再让系统进入 Doze 深度空闲。
+      亮屏或插上电立刻解冻并退出。内置豁免（微信、QQ、钉钉等）和正在放音乐的应用不会被冻，
+      闹钟和来电照常。</div>
+    <div class="row">
+      <div class="lbl"><b>自动深度睡眠</b><span>关闭时不冻结、不碰系统 Doze</span></div>
+      <label class="sw"><input type="checkbox" id="ds_enable" onchange="setDsEnable(this.checked)"><i></i></label>
+    </div>
+    <div class="ds-st off" id="ds-st">
+      <span class="dot"></span><span id="ds-stxt">读取中…</span><span class="meta" id="ds-meta"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 21s-8-5-8-11a5 5 0 018-3 5 5 0 018 3c0 6-8 11-8 11z"/></svg>永久豁免</h2>
+    <div class="hint">名单里的应用在深睡时也能被正常唤醒（等同系统电量设置里的「无限制」）。
+      深睡期间正在放音乐的应用会自动临时保护，退出深睡后自动撤销。
+      微信、QQ、钉钉、企业微信、常用音乐和运动健康应用装机时已默认加入；
+      时钟/电话/信息等系统应用也会豁免，闹钟前 30 分钟不强制深睡（名单可移除，升级不会塞回）。</div>
+    <div class="list" id="ds-white"></div>
+    <div class="btns">
+      <button class="pri" id="ds-add-btn" onclick="toggleDsPicker()">＋ 添加应用</button>
+      <button onclick="loadDs(true)">刷新</button>
+    </div>
+    <div id="ds-picker" style="display:none">
+      <input type="text" id="ds-q" placeholder="搜包名或应用名" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false"
+             oninput="queueDsPicker()">
+      <label class="hint" style="display:flex;align-items:center;gap:8px;margin-top:8px">
+        <input type="checkbox" id="ds-all" onchange="setAppsAll(this.checked)"> 显示系统应用（含服务/组件）
+      </label>
+      <div class="hint" id="ds-count" style="margin:8px 0 0"></div>
+      <div class="list" id="ds-list"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>唤醒榜</h2>
+    <div class="hint">深睡期间各应用靠闹钟把系统叫醒的次数。白名单应用被叫醒是正常的，用绿色标出。</div>
+    <div class="ds-board">
+      <div class="ds-bh">本次深睡<span class="n" id="ds-run-n"></span></div>
+      <div id="ds-run"></div>
+    </div>
+    <div class="ds-board">
+      <div class="ds-bh">累计<span class="n" id="ds-since"></span></div>
+      <div id="ds-cur"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── 关于 ── -->
+<div class="pg" id="p-about">
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>模块信息</h2>
+    <div id="about"></div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 21s-8-5-8-11a5 5 0 018-3 5 5 0 018 3c0 6-8 11-8 11z"/></svg>支持作者</h2>
+    <div class="hint">一直都是免费更新 无收费 悬赏一下给作者动力更新！</div>
+    <div class="reward-grid">
+      <figure class="reward">
+        <img src="reward-wechat.jpg" alt="微信赞赏码" loading="lazy">
+        <figcaption>微信</figcaption>
+      </figure>
+      <figure class="reward">
+        <img src="reward-alipay.png" alt="支付宝赞赏码" loading="lazy">
+        <figcaption>支付宝</figcaption>
+      </figure>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>维护</h2>
+    <div class="hint">停止并恢复可临时关闭限频；暂停后看门狗不再拉起守护</div>
+    <div class="btns">
+      <button onclick="ctl('restart')">重启守护</button>
+      <button onclick="ctl('pause')">暂停</button>
+      <button onclick="ctl('resume')">恢复</button>
+      <button class="dan" onclick="ctl('stop')">停止并恢复</button>
+      <button class="dan" id="reset-all" onclick="resetAll()">恢复全部默认</button>
+    </div>
+    <div class="hint" style="margin-top:10px">恢复全部默认会把百分比、GPU、熄屏策略、实时偏移、深睡开关与豁免名单、分应用档位、适配覆盖、学习样本都回到出厂；<b>游戏名单、发行商词典、主题保留</b>。需要连点两次确认。</div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>芯片适配</h2>
+    <div class="hint">这台机看不到核心表、或 GPU 那一档不限频时才用这里。点下面的按钮导出一个 txt（落在 Download/Soc智能限频），把它发给作者；他照着这份包适配好后写进新版本，你到时候更新模块就生效，不用自己动任何文件。</div>
+    <div id="ovr"><div class="hint">正在看探测结果…</div></div>
+    <div class="btns">
+      <button class="pri" onclick="exportPkg()">导出适配包</button>
+    </div>
+  </div>
+</div>
+</div>
+
+<div class="tabbar" id="tabbar">
+  <button class="on" data-p="home"><svg class="ico" viewBox="0 0 24 24"><path d="M3 10l9-7 9 7v10a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>首页</button>
+  <button data-p="conf"><svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>配置</button>
+  <button data-p="func"><svg class="ico" viewBox="0 0 24 24"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6l2.1 2.1m0-12.8l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="3.2"/></svg>功能</button>
+  <button data-p="game"><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>应用</button>
+  <button data-p="sleep"><svg class="ico" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/></svg>睡眠</button>
+  <button data-p="about"><svg class="ico" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>关于</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ── 主题：浅色 / 深色 ─────────────────────────────────────────────
+ * 颜色全在 CSS 里：:root 一套浅色，:root[data-theme="dark"] 一套深色。
+ * JS 只干一件事 —— 在 <html> 上换 data-theme 这一个属性。
+ *
+ * 脚本跑在 body 末尾，第一件事就得把主题定下来：CSS 里
+ * html:not([data-theme]) body 是藏着的（外加一条 4 秒的动画兜底，
+ * 万一脚本没跑，页面也会自己露出来，不会白屏一片）。
+ * 定完再画，就不会先用浅色闪一下再跳成深色。
+ *
+ * 存哪：localStorage。管理器的 WebView 可能清缓存或禁用存储，
+ * 所以读不到就退回系统偏好（prefers-color-scheme），再退回浅色。 */
+const THEME_KEY = 'socfreq-theme';
+function readTheme(){
+  try{
+    const v = localStorage.getItem(THEME_KEY);
+    if(v === 'light' || v === 'dark') return v;
+  }catch(e){}
+  try{
+    if(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
+  }catch(e){}
+  return 'light';
+}
+function applyTheme(mode){
+  const m = (mode === 'dark') ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', m);
+  // 系统滚动条和输入控件也跟着换，不然深色页里会留一条亮色滚动条
+  const c = document.querySelector('meta[name="color-scheme"]');
+  if(c) c.setAttribute('content', m);
+  const l = document.getElementById('th-l'), d = document.getElementById('th-d');
+  if(l){
+    l.classList.toggle('on', m === 'light');
+    l.setAttribute('aria-pressed', m === 'light' ? 'true' : 'false');
+  }
+  if(d){
+    d.classList.toggle('on', m === 'dark');
+    d.setAttribute('aria-pressed', m === 'dark' ? 'true' : 'false');
+  }
+  return m;
+}
+function setTheme(mode){
+  const m = applyTheme(mode);
+  try{ localStorage.setItem(THEME_KEY, m); }catch(e){}
+}
+applyTheme(readTheme());
+/* 用户没手动选过时，跟着系统的深浅色走 */
+try{
+  const mq = window.matchMedia('(prefers-color-scheme: dark)');
+  if(mq && mq.addEventListener){
+    mq.addEventListener('change', e=>{
+      let saved = '';
+      try{ saved = localStorage.getItem(THEME_KEY) || ''; }catch(e){}
+      if(saved !== 'light' && saved !== 'dark') applyTheme(e.matches ? 'dark' : 'light');
+    });
+  }
+}catch(e){}
+
+/*
+ * 调用 root shell。
+ * 参数一律走 sh 的单引号转义（单引号内 $ ` \ 都是字面量），
+ * 不拼进 eval / 反引号模板，WebUI 拿到的包名不会被当成命令。
+ *
+ * 各管理器的桥接口径不同，少一个都会整页"无法连接守护"。
+ * 顺序很重要：kernelsu 是新版 KernelSU Manager 注入的名字，
+ * 必须排在 ksu 前面，否则新版管理器上永远走不到。
+ *   新版 KernelSU Manager : kernelsu.exec(cmd) -> Promise<string | {code,stdout,stderr}>
+ *   旧版 KernelSU / APatch : ksu.exec(cmd, opts, cbName) -> 回调 (errno, stdout, stderr)
+ *   MM 管理器              : mm.exec(cmd) -> Promise<string>
+ *
+ * magisk 分支为兼容性保留，仅当注入该接口时才走到。桥名字显示在「守护 PID」旁边。
+ */
+const MODID = 'soc_freqcap';
+const ROOTS = ['/data/adb/modules', '/data/adb/ap/modules']; // Magisk 系 / APatch 系
+const AUTHOR_URL = 'https://www.coolapk.com/u/20276654';   // 作者主页
+let MOD = ROOTS[0] + '/' + MODID;                          // 探测后修正
+let API = MOD + '/webroot/api.sh';
+
+function q(s){
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+/* MM / magisk 那两类桥只回一个字符串、没有退出码，只能从输出猜成败。
+ * 判据（见 mmBad）：认 E/ 前缀为失败；空输出只在"本来必然有输出"的命令上算失败，
+ * 列表类命令的空输出是合法结果。 */
+function mmBad(s, cmd){
+  if(/(^|\n)E\//.test(s)) return true;
+  if(s.trim()) return false;
+  return !/(^|\s)(modes_list|modes_del|games_list|games_suggest|labels|icons?|cores|mode_apps|builtin_white)(\s|$)/.test(cmd);
+}
+
+/* 统一的回调式封装：无论哪个管理器，外部都拿到 {errno, stdout, stderr} */
+function exec(cmd){
+  return new Promise(res=>{
+    let done = false;
+    const finish = (r)=>{ if(!done){ done = true; res(r); } };
+    try{
+      // 0) 新版 KernelSU Manager
+      if(typeof kernelsu !== 'undefined' && kernelsu && typeof kernelsu.exec === 'function'){
+        const to = setTimeout(()=>finish({errno:-1, stdout:'', stderr:'调用超时'}), 12000);
+        Promise.resolve(kernelsu.exec(cmd)).then(r=>{
+          clearTimeout(to);
+          const o = (typeof r === 'string') ? {code:0, stdout:r, stderr:''} : (r || {});
+          finish({errno: o.code || 0, stdout: o.stdout || '', stderr: o.stderr || ''});
+        }).catch(e=>{
+          clearTimeout(to);
+          finish({errno:-1, stdout:'', stderr:String(e && e.message || e)});
+        });
+        return;
+      }
+      // 1) 旧版 KernelSU / APatch
+      if(typeof ksu !== 'undefined' && ksu && typeof ksu.exec === 'function'){
+        const id = 'cb_' + Math.random().toString(36).slice(2);
+        const to = setTimeout(()=>finish({errno:-1, stdout:'', stderr:'调用超时'}), 12000);
+        window[id] = (errno, stdout, stderr)=>{
+          clearTimeout(to);
+          try{ delete window[id]; }catch(e){ window[id] = undefined; }
+          finish({errno: errno||0, stdout: stdout||'', stderr: stderr||''});
+        };
+        ksu.exec(cmd, JSON.stringify({cwd:'/'}), id);
+        return;
+      }
+      // 2) MM 管理器：Promise<string>，失败抛异常，没有 errno 概念
+      if(typeof mm !== 'undefined' && mm && typeof mm.exec === 'function'){
+        const to = setTimeout(()=>finish({errno:-1, stdout:'', stderr:'调用超时'}), 12000);
+        Promise.resolve(mm.exec(cmd)).then(out=>{
+          clearTimeout(to);
+          // MM 只给字符串没有退出码，成败从输出猜：带 E/ 算失败；
+          // 空输出只有"必然有输出"的命令才算失败（判据在 mmBad，
+          // 列表类命令的空是合法结果）。
+          const s = (out === undefined || out === null) ? '' : String(out);
+          const bad = mmBad(s, cmd);
+          finish({errno: bad ? 1 : 0, stdout: s, stderr: bad ? s : ''});
+        }).catch(e=>{
+          clearTimeout(to);
+          finish({errno:-1, stdout:'', stderr:String(e && e.message || e)});
+        });
+        return;
+      }
+      // 3) Magisk Manager：兼容性保留，仅当存在才用
+      if(typeof magisk !== 'undefined' && magisk && typeof magisk.exec === 'function'){
+        const to = setTimeout(()=>finish({errno:-1, stdout:'', stderr:'调用超时'}), 12000);
+        Promise.resolve(magisk.exec(cmd)).then(r=>{
+          clearTimeout(to);
+          const s = (r === undefined || r === null) ? '' : String(r);
+          const bad = mmBad(s, cmd);
+          finish({errno: bad ? 1 : 0, stdout: s, stderr: bad ? s : ''});
+        }).catch(e=>{
+          clearTimeout(to);
+          finish({errno:-1, stdout:'', stderr:String(e && e.message || e)});
+        });
+        return;
+      }
+      // 四个接口都没有：管理器不支持 WebUI 拿 root。
+      // 置位后顶部常驻提示，轮询全停。
+      setDead('nobridge');
+      finish({errno:-1, stdout:'', stderr:'当前管理器没有 root 调用接口'});
+    }catch(e){
+      finish({errno:-1, stdout:'', stderr:String(e)});
+    }
+  });
+}
+
+let probed = false;
+/* 首次调用把"探模块根 + 真正要跑的命令"合成同一条手机 shell：
+ * 两个根存在性、ping、目标命令都在一次 exec 里做完，管理器只付一次桥往返。
+ * 首屏的 status 走的就是这条，徽标不用先等一次单独的 ping。
+ * 并发调用共用 probeP；只有发起探测的那条能复用它跑出来的结果（probeOwner）。 */
+let probeP = null;
+let probeOwner = '';
+
+function apiOut(r){
+  if(r.errno !== 0) throw new Error((r.stderr||'执行失败').replace(/^E\/\S*\s*/,''));
+  return r.stdout;
+}
+
+async function api(){
+  const args = Array.prototype.slice.call(arguments);
+  const key = args.join('\u0000');
+  // 首次调用前先探模块根：APatch 装在 /data/adb/ap/modules，
+  // 写死 /data/adb/modules 会桥通但 api.sh 找不到。
+  if(!probed){
+    if(!probeP){
+      probeOwner = key;
+      const probe = 'for r in ' + ROOTS.map(q).join(' ') + '; do '
+        + 'p="$r/' + MODID + '/webroot/api.sh"; '
+        + 'if [ -f "$p" ] && [ "$(sh "$p" ping 2>/dev/null)" = "PONG" ]; then '
+        + 'echo "@@ROOT=$r"; sh "$p" ' + args.map(q).join(' ') + '; exit $?; fi; done; '
+        + 'echo "@@NOAPI"; exit 127';
+      probeP = (async()=>{
+        const readRoot = (r)=>{
+          // 标记不一定在第一行：管理器的第一次 exec 偶尔会先吐一行自己的东西。
+          // 真找不到 api.sh 时 shell 会明确回 @@NOAPI，这个要留着重试判断。
+          const m = (r.stdout || '').match(/(?:^|\r?\n)@@ROOT=([^\r\n]*)\r?\n/);
+          return { m, noapi: /@@NOAPI/.test(r.stdout || '') };
+        };
+        let r = await exec(probe);
+        let p = readRoot(r);
+        /* 管理器在页面刚开始的第一次 exec 可能还没就绪：等一小段再试，
+         * 逐次拉长。成功路径仍然只付一次；真故障最多拖 3 秒左右，
+         * 不会把偶发空回执直接报成"无法连接守护"，再等 5 秒的下一拍。 */
+        for(const wait of [300, 900, 2000]){
+          if(p.m || p.noapi) break;
+          await new Promise(res=>setTimeout(res, wait));
+          r = await exec(probe);
+          p = readRoot(r);
+        }
+        if(p.m && p.m[1]){
+          MOD = p.m[1] + '/' + MODID;
+          API = MOD + '/webroot/api.sh';
+          probed = true;
+          const at = p.m.index + p.m[0].length;
+          return { errno: r.errno, stderr: r.stderr, stdout: r.stdout.slice(at) };
+        }
+        // 桥是通的（否则前面就走 nobridge 了），是 api.sh 找不到。
+        // 两者要分开显示：一个是"换入口"，一个是"模块根不对"。
+        setDead('noapi');
+        throw new Error('模块根下找不到 api.sh（试过：' + ROOTS.join('、') + '）');
+      })().catch(e=>{ probeP = null; probeOwner = ''; throw e; });
+    }
+    const r = await probeP;
+    // 发起探测的那条命令已经跑过了，别再跑第二遍；其余请求只借根。
+    if(probeOwner === key) return apiOut(r);
+  }
+  // 每个参数独立加引号，api.sh 只收到纯参数
+  const r = await exec('sh ' + q(API) + ' ' + args.map(q).join(' '));
+  return apiOut(r);
+}
+
+/*
+ * 输出本机实际注入的桥名字，方便确认走的是哪条分支。
+ */
+function bridgeName(){
+  const known = ['kernelsu','ksu','mm','magisk','apatch']
+    .filter(k=>typeof window[k] !== 'undefined' && window[k] && typeof window[k].exec === 'function');
+  if(known.length) return known.join('+');
+  // 没探到真接口时返回"无"，别把浏览器自带属性（如含 mm 的 oncommand）
+  // 误当成管理器注入的，报一个假名字比报"无"更误导。
+  return '无';
+}
+
+let toastT;
+/* 桥接不可用时停止刷屏报错。
+ * DEAD：null=未知 / 'nobridge'=管理器没注入 root 接口 /
+ *       'noapi'=接口有、但两个模块根下都找不到 api.sh。
+ * 两者分开显示：前者引导改用命令行，后者是模块安装路径问题。 */
+let DEAD = null;
+const timers = [];
+function setDead(kind, detail){
+  if(DEAD) return;                 // 只认第一次：后面每 5 秒都会再失败一次
+  DEAD = kind;
+  const bar = document.getElementById('nobar');
+  const ttl = document.getElementById('nobar-t');
+  const sub = document.getElementById('nobar-s');
+  if(kind === 'nobridge'){
+    ttl.textContent = '当前管理器不支持 WebUI，请用 action.sh 命令行操作';
+    sub.innerHTML = '这个管理器没有向页面注入 root 调用接口，页面读不到守护，'
+      + '也无法写配置。<br>在模块列表里点「执行」就是命令行入口（音量＋ 切换、音量－ 执行），'
+      + '或直接 <code>socfreqd status</code>。';
+  } else {
+    ttl.textContent = 'root 接口正常，但找不到模块的 api.sh';
+    sub.innerHTML = '桥接是通的，问题在模块装的位置：找过 <code>'
+      + ROOTS.join('</code>、<code>') + '</code>。'
+      + '如果这台机器的模块根不是这两个，把实际路径发给我；现在页面所有操作都不会生效。';
+  }
+  bar.style.display = '';
+  // 下方卡片都无数据，隐藏标签页避免继续点击。
+  document.getElementById('tabbar').style.display = 'none';
+  // 停掉轮询，避免每 5 秒一次注定失败的 root 调用
+  timers.forEach(id=>clearInterval(id));
+  document.getElementById('m-bridge').textContent =
+    kind === 'nobridge' ? '无' : '有桥/缺 api.sh';
+}
+function toast(msg, bad){
+  // 桥接判定不可用时，同类错误会每 5 秒重复；常驻提示条已显示，这里不再弹 toast。
+  if(DEAD) return;
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (bad ? ' err' : '');
+  clearTimeout(toastT);
+  toastT = setTimeout(()=>{ t.className = 'toast'; }, 2100);
+}
+
+/* key=value 行 -> 对象 */
+function parse(s){
+  const o = {};
+  s.split('\n').forEach(l=>{
+    const i = l.indexOf('=');
+    if(i > 0) o[l.slice(0,i)] = l.slice(i+1);
+  });
+  return o;
+}
+
+const PCT_KEYS = [
+  {k:'CPU_PCT_BIG',   n:'超大核 (BIG)',  d:65},
+  {k:'CPU_PCT_MID2',  n:'次大核 (MID2)', d:64},
+  {k:'CPU_PCT_MID',   n:'中核 (MID)',    d:66},
+  {k:'CPU_PCT_LITTLE',n:'小核 (LITTLE)', d:65}
+];
+/* 本机不存在的档位（守护把 coretier_XXX 报成空）。
+ * 保存时跳过：写入无意义，且页面会留下一个用户并没有的档位。 */
+const TIER_ABSENT = {};
+
+function buildPctRows(){
+  const box = document.getElementById('conf-pct');
+  box.innerHTML = '';
+  PCT_KEYS.forEach(o=>{
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.id = 'tierrow_' + o.k;
+    row.innerHTML =
+      '<div class="lbl"><b>' + o.n + '</b>' +
+        '<span id="tiercpu_' + o.k + '">正在检测核心…</span></div>' +
+      '<div class="slider"><input type="range" id="' + o.k + '" min="1" max="100" ' +
+      'oninput="pv(\'' + o.k + '\')"></div>' +
+      '<div class="pct" id="' + o.k + '_v">—</div>';
+    box.appendChild(row);
+  });
+}
+
+/* 把"这一档管哪几颗核"写进每行标题下。
+ * 数据来自守护的 coretier_CPU_PCT_XXX=<核号,核号>，按 policy 反查
+ * core_policy_of(c) 得到，是内核报的符号链接，不是前端猜的。
+ * 三种结果分开显示：
+ *   CPU0-5      有这一档
+ *   （未检测到） 守护报该行但为空 —— 本机没这一档（如 m==2 只有 BIG/LITTLE）
+ *   检测失败     连 coretier_* 键都没有 —— 守护版本旧或读不到 */
+function paintTierCores(s){
+  PCT_KEYS.forEach(o=>{
+    const el = document.getElementById('tiercpu_' + o.k);
+    if(!el) return;
+    const row = document.getElementById('tierrow_' + o.k);
+    let absent = false;
+    if(!(('coretier_' + o.k) in s)){
+      // 连键都没有 = 守护版本旧或读不到。这种情况保留滑杆：
+      // 无法确定本机有没有这一档，不替用户隐藏控件。
+      el.textContent = '检测失败';
+    } else {
+      const raw = s['coretier_' + o.k];
+      const ids = raw ? raw.split(',').filter(x=>/^\d+$/.test(x)).map(Number) : [];
+      if(!ids.length){
+        // 守护明确报这一行为空 —— 本机没这一档（m==2 只有 BIG/LITTLE，
+        // MID2/MID 落空）。藏掉滑杆，避免用户以为设了没生效。
+        absent = true;
+        el.textContent = '（未检测到）';
+      } else {
+        ids.sort((a,b)=>a-b);
+        /* 单颗核不写"CPU"，两个以上才写 */
+        el.textContent = ids.length > 1
+          ? 'CPU ' + ids.join(', ') + '（共 ' + ids.length + ' 核）'
+          : 'CPU ' + ids[0];
+      }
+    }
+    if(row){
+      const sl = row.querySelector('.slider');
+      const pc = row.querySelector('.pct');
+      const inp = document.getElementById(o.k);
+      if(sl) sl.style.display = absent ? 'none' : '';
+      if(pc) pc.style.display = absent ? 'none' : '';   // 百分比也不显示
+      if(inp) inp.disabled = absent;
+      row.classList[absent ? 'add' : 'remove']('absent');
+    }
+    TIER_ABSENT[o.k] = absent;
+  });
+}
+
+/* 滑杆的进度：新拟物的槽是凹的，光看阴影不知道滑到哪儿了。
+   把已走的比例写进 --p，CSS 拿它给槽的前半段染成主色。 */
+function paintSlider(el){
+  if(!el || el.type !== 'range') return;
+  const min = parseFloat(el.min || 0), max = parseFloat(el.max || 100);
+  const v = parseFloat(el.value || 0);
+  let p = (max > min) ? (v - min) / (max - min) * 100 : 0;
+  if(!(p >= 0)) p = 0;
+  if(p > 100) p = 100;
+  el.style.setProperty('--p', p.toFixed(2) + '%');
+}
+/* 页面上所有滑杆的进度补画一遍（静态的和 JS 动态建出来的） */
+function syncSliders(){
+  document.querySelectorAll('input[type=range]').forEach(paintSlider);
+}
+function pv(id){
+  const el = document.getElementById(id);
+  if(!el) return;
+  const out = document.getElementById(id + '_v');
+  if(!out) return;
+  if(el.type === 'checkbox'){ out.textContent = el.checked ? '开' : '关'; return; }
+  // 单位分三类：百分比、秒、还有实时偏移这一组（℃ 和 百分点）。
+  // 别一律加 s —— "75s" 这种读数会让人以为温控填错了。
+  if(id === 'gpu_pct' || /^CPU_PCT_/.test(id) || id === 'chg_pct'){
+    out.textContent = el.value + '%';
+  } else if(/^th_(high|low)$/.test(id)){
+    out.textContent = el.value + '℃';
+  } else if(id === 'th_max' || id === 'psi_gain'){
+    // 这两个是"最多让出多少"，不是当前偏移：写成 ± 会被读成现在就在动。
+    // 显示用 %（多数人按百分数理解）；提示里配了 65% → 40% 的算例，
+    // 说清这是直接加减点数，不是 65%×75% 那种相对比例。
+    out.textContent = (id === 'th_max' ? '−' : '+') + el.value + '%';
+  } else if(id === 'batt_low' || id === 'batt_crit'){
+    out.textContent = el.value + '%';
+  } else if(id === 'batt_low_cut' || id === 'batt_crit_cut'){
+    out.textContent = '−' + el.value + '%';
+  } else if(id === 'learn_app_min'){
+    out.textContent = el.value + ' 分钟';
+  } else if(id === 'learn_app_day'){
+    out.textContent = el.value + ' 天';
+  } else {
+    out.textContent = el.value + 's';
+  }
+  // 拖滑杆时立刻更新折算出的 MHz
+  if(/^(CPU_PCT_|gpu_pct)/.test(id)) queuePaintHw();
+  // 顺带把槽的进度色跟上
+  paintSlider(el);
+}
+
+/* ── 页内选择控件（替代 <select>，见上面 .dd 那段注释） ─────────
+ * 容器节点上保留 .value 和 .onchange 两个约定：
+ * 原来按 select 写的代码（读 value、挂 onchange）一行都不用改。
+ * 赋值 .value 会自动刷新按钮上显示的文字，所以 loadConf 里
+ * 「先填控件再同步档位」那套顺序仍然成立。 */
+function ddEl(opts, value, cls){
+  const box = document.createElement('div');
+  box.className = 'dd' + (cls ? ' ' + cls : '');
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'dd-btn';
+  const list = document.createElement('div');
+  list.className = 'dd-list';
+  box.appendChild(btn); box.appendChild(list);
+  let v = value === undefined || value === null ? '' : String(value);
+  const labelOf = () => {
+    const hit = opts.filter(o => String(o[0]) === v)[0];
+    return hit ? hit[1] : (v === '' ? '（不选）' : v);
+  };
+  function paint(){
+    btn.textContent = labelOf();
+    list.innerHTML = '';
+    opts.forEach(o=>{
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = o[1];
+      if(String(o[0]) === v) b.classList.add('on');
+      b.onclick = e=>{
+        e.stopPropagation();
+        box.classList.remove('open');
+        if(String(o[0]) === v) return;
+        v = String(o[0]);
+        paint();
+        if(typeof box.onchange === 'function') box.onchange();
+      };
+      list.appendChild(b);
+    });
+  }
+  Object.defineProperty(box, 'value', {
+    get(){ return v; },
+    set(nv){ const s2 = nv === undefined || nv === null ? '' : String(nv);
+             if(s2 !== v){ v = s2; paint(); } else paint(); },
+  });
+  btn.onclick = e=>{
+    e.stopPropagation();
+    const was = box.classList.contains('open');
+    document.querySelectorAll('.dd.open').forEach(x=>x.classList.remove('open'));
+    if(!was) box.classList.add('open');
+  };
+  paint();
+  return box;
+}
+/* 点外面就收起：选项列表是绝对定位的浮层，不收会挡住下面的行 */
+document.addEventListener('click', ()=>{
+  document.querySelectorAll('.dd.open').forEach(x=>x.classList.remove('open'));
+});
+
+const GOVERNOR_OPTS = [['','不干预'],['walt','walt'],['schedutil','schedutil'],
+  ['powersave','powersave'],['conservative','conservative'],['performance','performance']];
+const PK_MODE_OPTS = [['full','满血'],['keep','熄屏也封顶'],['90','90%'],['80','80%'],
+  ['70','70%'],['60','60%'],['custom','自定义…']];
+const PK_GPU_OPTS = [['','跟随全局'],['90','90%'],['80','80%'],['70','70%'],
+  ['60','60%'],['50','50%'],['40','40%'],['30','30%'],['custom','自定义…']];
+
+/* 建那两个写在页面里的下拉（调速器、新加条目用哪一档）。
+   容器还是原来那个 id，所以读值、挂 onchange 的老代码一行没动。 */
+function buildStaticDD(){
+  const g = document.getElementById('governor');
+  if(g && !g.children.length){
+    const w = ddEl(GOVERNOR_OPTS, g.value || '', '');
+    w.id = 'governor';
+    w.style.flex = '0 0 154px';
+    w.onchange = ()=>pv('governor');
+    g.parentNode.replaceChild(w, g);
+  }
+  const m = document.getElementById('pk-mode');
+  if(m && !m.children.length){
+    const w = ddEl(PK_MODE_OPTS, 'full', '');
+    w.id = 'pk-mode';
+    w.style.flex = '0 0 110px';
+    w.onchange = ()=>pkModeChange();
+    m.parentNode.replaceChild(w, m);
+  }
+  const gp = document.getElementById('pk-gpu');
+  if(gp && !gp.children.length){
+    const w = ddEl(PK_GPU_OPTS, '', '');
+    w.id = 'pk-gpu';
+    w.style.flex = '0 0 110px';
+    w.onchange = ()=>pkModeChange();
+    gp.parentNode.replaceChild(w, gp);
+  }
+}
+
+/* 一排分段按钮：三四个选项时比下拉少一次点击，也看得见全部选项。
+   直接往宿主元素上渲染、选中值挂在宿主的 .value 上 ——
+   另建一个子节点会把值藏在临时对象里，按 id 读的人拿不到。 */
+function segInto(box, opts, value, onpick){
+  let v = value === undefined || value === null ? '' : String(value);
+  function paint(){
+    box.innerHTML = '';
+    opts.forEach(o=>{
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = o[1];
+      if(o[2]) b.classList.add('cust');      // 第三项标"这是兜底档"，用警示色
+      if(String(o[0]) === v) b.classList.add('on');
+      b.onclick = ()=>{
+        if(String(o[0]) === v) return;
+        v = String(o[0]);
+        paint();
+        if(onpick) onpick(v);
+      };
+      box.appendChild(b);
+    });
+  }
+  /* 一律定义访问器：容器上原来那个 value（如果有）会被换掉。
+     留着"已有就不覆盖"的判断，替身里 mkEl 先建了 value:''，
+     于是点按钮只改到闭包里的 v，测试读 host.value 读不到 —— 测试当场失效。 */
+  Object.defineProperty(box, 'value', {
+    get(){ return v; },
+    set(nv){ v = nv === undefined || nv === null ? '' : String(nv); paint(); },
+    configurable: true,
+  });
+  paint();
+  return box;
+}
+
+/* ── 滑杆只认"捏住滑块再拖" ─────────────────────────────────────
+ * 原生 range 手指落在轨道哪里值就跳哪里，手机上容易在滚动时误改封顶。
+ * touch-action:pan-y 只挡住竖向滚动被吃掉，挡不住误按，所以再加一层：
+ * 按下点离滑块超过 GRAB_PX 就不认这次拖动。
+ * 两道保险：preventDefault 拦跳转（各家 WebView 对 range 处理不一致，
+ * 不能只靠它）；记原值 + input 里回滚兜底。鼠标不拦：桌面调试点轨道跳转方便。
+ */
+const GRAB_PX = 26;
+function rangeThumbX(el){
+  const r = el.getBoundingClientRect();
+  const min = +el.min || 0, max = +el.max || 100, v = +el.value;
+  const pad = Math.min(r.height / 2, r.width / 2);   /* 滑块半径，两端留白 */
+  const w = Math.max(1, r.width - pad * 2);
+  return r.left + pad + w * (v - min) / Math.max(1, max - min);
+}
+document.addEventListener('pointerdown', e => {
+  const el = e.target;
+  if(!el || !el.matches || !el.matches('input[type=range]')) return;
+  if(e.pointerType === 'mouse') return;
+  if(Math.abs(e.clientX - rangeThumbX(el)) <= GRAB_PX) return;
+  el._reject = el.value;
+  e.preventDefault();
+}, true);
+document.addEventListener('input', e => {
+  const el = e.target;
+  if(el && el._reject !== undefined){
+    el.value = el._reject;
+    delete el._reject;
+    pv(el.id);          /* 回滚后同步刷新显示值 */
+  }
+}, true);
+
+/* 单位由守护决定，不能靠数值大小猜：
+ *   cpufreq 的 scaling_max_freq 是 kHz（1958400 = 1958 MHz）
+ *   GPU 的 max_hz 恒为 Hz（detect_gpu 里 MHz 表已 ×1e6）
+ * 两者都是 7~9 位数，靠阈值猜必错一边。 */
+const fmtHz = (raw, isHz, down) => {
+  const v = isHz ? raw / 1000000 : raw / 1000;
+  const d = v >= 100 ? 0 : v >= 10 ? 1 : 2, p = Math.pow(10, d);
+  // down = 封顶那一列：必须向下取整到显示精度，四舍五入会显示得比真实封顶还高。
+  // 原生最高频率那一列是硬件标称值，四舍五入可以。
+  return (down ? Math.floor(v * p) / p : v).toFixed(d) + ' MHz';
+};
+
+/* SoC 芯片代号 + 每个核心/GPU 的原生最高频与当前封顶。
+ * 光给百分比看不出对应多少 MHz。数据全部来自 socfreqd export（只读），页面不猜。
+ * cap 有两种来源，必须区分：
+ *   - 与守护一致：直接用 export 给的 cap，已吸附到真实频点；
+ *   - 滑杆刚拖动未保存：守护还不知道，只能按百分比估算，加 ≈ 前缀。
+ *     估算一律向下取整，和守护的向下吸附一致。 */
+let lastSt = null;
+let hwT = 0;
+/* 拖滑杆时 pv() 每次都重建「原生最高 → 封顶」表格；攒 80ms 再画，
+   拖动过程仍然跟手，但不会每个像素都重排一遍 DOM。 */
+function queuePaintHw(){
+  clearTimeout(hwT);
+  hwT = setTimeout(paintHw, 80);
+}
+function paintHw(){
+  const s = lastSt;
+  if(!s) return;
+  // 芯片代号统一大写：内核给的 ro.soc.model 是小写（sm8750），
+  // 前端转一次，显示才跟旁边的机型名一致。
+document.getElementById('soc-name').textContent =
+    '检测到你的 SoC：' + (s.soc ? String(s.soc).toUpperCase() : '未知');
+
+  const rows = [];
+  const idxs = Object.keys(s).filter(k=>/^cpu_\d+$/.test(k))
+    .sort((a,b)=>parseInt(a.slice(4),10) - parseInt(b.slice(4),10));
+  for(const k of idxs){
+    const i = k.slice(4);
+    const hw = parseInt(s[k],10) || 0;
+    const saved = parseInt(s['cpupct_' + i],10) || 0;
+    // 守护报这个 policy 归哪一档管，拖滑杆才知道该看哪个值
+    const el = document.getElementById(s['cpukey_' + i] || '');
+    const cur = el ? parseInt(el.value,10) : saved;
+    // 与守护一致就用它吸附过的真值；不一致（刚拖动未保存）只能估算
+    let cap = parseInt(s['cpucap_' + i],10) || 0, approx = false;
+    if(cur !== saved){
+      // 草稿必须按频点表吸附，不能直接乘百分比：不吸附会显示比真值高的
+      // 数（如 2851 而非守护实际写入的 2841），让人误以为守护没按百分比走。
+      // 频点表由守护导出（policyfreq_N），前端不猜。
+      const fl = s['policyfreq_' + i];
+      const want = Math.floor(hw * cur / 100);
+      cap = want;
+      if(fl){
+        const fs = fl.split(/[ \t]+/).filter(x=>/^\d+$/.test(x)).map(Number);
+        const ok = fs.filter(f=>f<=want);
+        if(ok.length) cap = Math.max.apply(null, ok);
+      }
+      approx = true;
+    }
+    rows.push({t:'CPU' + i + '  ' + cur + '%', max:hw, cap:cap, approx:approx, hz:false});
+  }
+  const gmax = parseInt(s.gpu_max,10) || 0;
+  const gdlt = parseInt(s.gpu_dlt,10) || 0;
+  if(gmax > 0){
+    const saved = parseInt(s.gpu_pct,10) || 0;
+    const el = document.getElementById('gpu_pct');
+    const cur = el ? parseInt(el.value,10) : saved;
+    /* 这张表回答的是"你设的百分比对应哪个频点"：只按真实频点表向下吸附，
+       不叠加实时偏移。实时偏移（温控/PSI）只改"当前生效值"，
+       那一个数在下面的「GPU 封顶」卡片里看，两处不混。 */
+    const want = Math.floor(gmax * cur / 100);
+    let cap = want;
+    if(s.gpufreq){
+      const fs = s.gpufreq.split(/[ \t]+/).filter(x=>/^\d+$/.test(x)).map(Number);
+      if(fs.length){
+        const ok = fs.filter(f=>f<=want);
+        // 守护的 gpu_snap 在"目标比最低频点还低"时回落到最低频点，
+        // 不是保留目标值；这里必须同口径，否则会显示 276、保存后变 282。
+        cap = ok.length ? Math.max.apply(null, ok) : Math.min.apply(null, fs);
+      }
+    }
+    rows.push({t:'GPU' + (s.gpu_kind ? '  ' + s.gpu_kind : '') + '  ' + cur + '%',
+               max:gmax, cap:cap, approx:(cur !== saved), hz:s.gpu_unit !== 'kHz'});
+  }
+  let hwNote = rows.length ? '原生最高频率 → 封顶后（按设定值吸附，≈ 为未保存的预估值）' : '未读到频率信息';
+  if(rows.length && gdlt){
+    hwNote += '；实时偏移 ' + (gdlt > 0 ? '+' : '') + gdlt +
+      '%（温控/PSI）只影响当前生效值，不改这里显示的设定值';
+  }
+  document.getElementById('soc-hw').textContent = hwNote;
+
+  const box = document.getElementById('hw-table');
+  box.innerHTML = '';
+  for(const r of rows){
+    const d = document.createElement('div');
+    d.className = 'hw';
+    const t = document.createElement('span'); t.className='t'; t.textContent = r.t;
+    const m = document.createElement('span'); m.className='max';
+    m.textContent = fmtHz(r.max, r.hz);
+    const sp = document.createElement('span'); sp.className='sep'; sp.textContent='→';
+    const c = document.createElement('span'); c.className='cap';
+    c.textContent = (r.approx ? '≈' : '') + fmtHz(r.cap, r.hz, true);
+    d.appendChild(t); d.appendChild(m); d.appendChild(sp); d.appendChild(c);
+    box.appendChild(d);
+  }
+  renderCores(s, rows, true);   /* 结构不变就原地更新，不要每 5 秒重建一次 */
+}
+
+/* 每个核心一张卡：柱形是最近约 5 秒的频率分布，橙色柱 = 当前频率所在档，
+ * 百分比 = 这一档的时间占比。页面每秒调一次 cores，只更新这些卡片，
+ * 不重跑 loadStatus 那一整套配置/温控。 */
+const CORE_UI = { grid:null, ids:[], cards:{} };
+const coreHzText = val => val > 0 ? fmtHz(val, false) : '—';
+
+function coreCardBuild(i){
+  const card = document.createElement('div');
+  card.className = 'core-card';
+  const top = document.createElement('div');
+  top.className = 'core-top';
+  const cid = document.createElement('span');
+  cid.className = 'cid';
+  cid.textContent = 'cpu' + i;
+  const pc = document.createElement('span');
+  pc.className = 'cpct';
+  top.appendChild(cid); top.appendChild(pc);
+
+  const bars = document.createElement('div');
+  bars.className = 'core-bars';
+  const barEls = [];
+  for(let b=0;b<8;b++){
+    const el = document.createElement('div');
+    el.className = 'core-bar';
+    el.style.height = '2px';
+    bars.appendChild(el);
+    barEls.push(el);
+  }
+  const hz = document.createElement('div'); hz.className = 'hz';
+  const rg = document.createElement('div'); rg.className = 'rg';
+  card.appendChild(top); card.appendChild(bars); card.appendChild(hz); card.appendChild(rg);
+  return {card, pc, bars: barEls, hz, rg};
+}
+
+function coreCardPaint(u, i, s){
+  if(!u) return;
+  const hz   = parseInt(s['corehz_'+i],10) || 0;
+  const tgt  = parseInt(s['coretgt_'+i],10) || 0;
+  const hw   = parseInt(s['coremax_'+i],10) || 0;
+  const hwlo = parseInt(s['coremin_'+i],10) || 0;
+  const obslo = parseInt(s['coreobsmin_'+i],10) || 0;
+  const obshi = parseInt(s['coreobsmax_'+i],10) || 0;
+  const freqs = (s['corefreqs_'+i] || '').split(',')
+    .map(x => parseInt(x, 10)).filter(x => Number.isFinite(x));
+  const loads = (s['coreloads_'+i] || '').split(',')
+    .map(x => parseInt(x, 10)).filter(x => Number.isFinite(x));
+  const latest = parseInt(s['coreload_'+i],10);
+  const pct = Number.isFinite(latest) ? latest
+            : (loads.length ? loads[loads.length - 1] : null);
+  const maxLoad = loads.length ? Math.max.apply(null, loads) : 0;
+  /* 8 根柱，最右是现在；样本不足时右对齐，左边留空。 */
+  const arr = loads.slice(-8);
+  const off = 8 - arr.length;
+
+  u.pc.textContent = pct === null ? '' : pct + '%';
+  u.bars.forEach((bar, b) => {
+    const v = b >= off ? (arr[b - off] || 0) : null;
+    const on = v !== null && maxLoad > 0 && v === maxLoad;
+    bar.className = 'core-bar' + (on ? ' on' : '');
+    bar.style.height = v === null ? '2px' : Math.max(4, v) + '%';
+  });
+  /* 大数字拆成数值 + 小号单位：四列宽度下 \"2227 MHz\" 整串会顶出卡片。 */
+  u.hz.textContent = '';
+  if(hz > 0){
+    u.hz.appendChild(document.createTextNode(fmtHz(hz, false).replace(' MHz', '')));
+    const unit = document.createElement('span');
+    unit.className = 'u';
+    unit.textContent = 'MHz';
+    u.hz.appendChild(unit);
+  } else {
+    u.hz.textContent = '—';
+  }
+
+  /* 范围取这 8 个频率样本的 min/max；老守护没有 obs 键时退回硬件范围。 */
+  let lo = obslo > 0 ? obslo : 0;
+  let hi = obshi > 0 ? obshi : 0;
+  if(!lo || !hi){
+    const fs = freqs.filter(f => f > 0);
+    if(fs.length){ lo = lo || Math.min.apply(null, fs); hi = hi || Math.max.apply(null, fs); }
+  }
+  if(!lo) lo = hwlo;
+  if(!hi) hi = hw;
+  u.rg.textContent = (lo > 0 && hi > 0)
+    ? fmtHz(lo, false).replace(' MHz', '') + '~' +
+      fmtHz(hi, false, true).replace(' MHz', '') : '—';
+  u.rg.title = (lo > 0 && hi > 0)
+    ? fmtHz(lo, false) + ' ~ ' + fmtHz(hi, false, true) : '';
+
+  /* 档位名和封顶留在 tooltip 里，卡片本身只放参考图的四样。 */
+  const tierByPol = {};
+  for(const k of Object.keys(s)){
+    const m = /^cpukey_(\d+)$/.exec(k);
+    if(m) tierByPol[m[1]] = s[k];
+  }
+  const TIER_CN = {CPU_PCT_BIG:'超大核', CPU_PCT_MID2:'次大核',
+                   CPU_PCT_MID:'中核', CPU_PCT_LITTLE:'小核'};
+  const pol = s['corepol_' + i];
+  const tn = (pol !== undefined && tierByPol[pol]) ? tierByPol[pol] : '';
+  u.card.title = 'cpu' + i + (tn && TIER_CN[tn] ? ' · ' + TIER_CN[tn] : '') +
+                 ' · 封顶 ' + coreHzText(tgt);
+}
+
+function renderCores(s, rows, gridOnly){
+  const nc = parseInt(s.ncores,10) || 0;
+  if(nc <= 0) return;
+
+  /* 核号列表。老守护没有 coredet 时退回 0..nc-1（正常机器就是这样）。
+   * 必须用真实核号取值：守护只报存在的核（有核掉线时中间会缺号），
+   * 按 0..nc-1 顺次取会让整列频率错位。 */
+  const det = (s.coredet || '').split(',').filter(x => x !== '')
+                     .map(x => parseInt(x, 10)).filter(x => Number.isFinite(x));
+  const ids = det.length === nc ? det : Array.from({length: nc}, (_, i) => i);
+
+  /* 每秒刷新走这里：结构不变就只改数字和柱高，不重建 DOM。
+     必须确认 grid 还在文档里：paintHw 每 5 秒会先把 #hw-table 清空，
+     这时旧 grid 虽还挂在 CORE_UI 上，但已经脱离文档 —— 只改它等于卡片消失。 */
+  if(gridOnly && CORE_UI.grid && CORE_UI.grid.isConnected &&
+     CORE_UI.ids.join(',') === ids.join(',') ){
+    ids.forEach(i => coreCardPaint(CORE_UI.cards[i], i, s));
+    return;
+  }
+
+  const old = document.querySelector('#hw-table .core-h');
+  if(old) old.remove();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'core-h';
+  const t = document.createElement('div');
+  t.className = 'ch-t';
+  t.textContent = '各核心实际频率（' + nc + ' 核）';
+  wrap.appendChild(t);
+
+  const sub = document.createElement('div');
+  sub.className = 'ch-s';
+  sub.textContent = '每根柱是一秒的采样，最右边是现在；柱高是这一秒的 CPU 占用，最高的一根标黄；同簇核心共用频率';
+  wrap.appendChild(sub);
+
+  const grid = document.createElement('div');
+  grid.className = 'core-grid';
+  CORE_UI.grid = grid;
+  CORE_UI.ids = ids;
+  CORE_UI.cards = {};
+  ids.forEach(i => {
+    const u = coreCardBuild(i);
+    CORE_UI.cards[i] = u;
+    coreCardPaint(u, i, s);
+    grid.appendChild(u.card);
+  });
+  wrap.appendChild(grid);
+  document.getElementById('hw-table').appendChild(wrap);
+}
+
+/* 每秒只拉逐核数据（api.sh cores → socfreqd cores），
+   只在配置页可见时跑；DEAD 后由 timers 统一停掉。 */
+let coresBusy = false;
+async function loadCores(){
+  if(coresBusy || DEAD) return;
+  const pg = document.getElementById('p-conf');
+  if(!pg || !pg.classList.contains('on')) return;
+  coresBusy = true;
+  try{
+    const s = Object.assign({}, lastSt || {}, parse(await api('cores')));
+    renderCores(s, [], true);
+  }catch(_){
+    /* 老守护没有 cores 子命令时保持现有图，不弹错。 */
+  }
+  coresBusy = false;
+}
+
+/* ── 首页 ── */
+let busy = false;
+/* 首屏连续失败计数：第一条 exec 的空回执只算一次，不直接报红。 */
+let statusFail = 0;
+
+/* 徽标上次状态：首条 root 往返要一两秒，先把上次的值淡着画出来，避免每次
+ * 都先黑着"连接中"再跳变。只缓存文案和配色，不缓存任何判断；新状态一到就覆盖。
+ * 超过 7 天的不用：模块可能停过、改过档，旧状态参考价值太低。 */
+const BADGE_KEY = 'soc_badge_v1';
+function cachedBadge(){
+  try{
+    const o = JSON.parse(localStorage.getItem(BADGE_KEY) || 'null');
+    return (o && o.t && o.c && Date.now() - (o.at || 0) < 7*86400000) ? o : null;
+  }catch(_){ return null; }
+}
+function paintCachedBadge(){
+  const o = cachedBadge();
+  if(!o) return false;
+  const b = document.getElementById('badge'), t = document.getElementById('btxt');
+  b.className = o.c + ' stale';
+  b.title = '上次状态，正在刷新…';
+  t.textContent = o.t;
+  return true;
+}
+function saveBadge(){
+  const b = document.getElementById('badge'), t = document.getElementById('btxt');
+  if(!t || !t.textContent) return;
+  try{
+    localStorage.setItem(BADGE_KEY, JSON.stringify({
+      t: t.textContent,
+      c: b.className.replace(/\s*stale\b/g, '').trim(),
+      at: Date.now()
+    }));
+  }catch(_){}
+}
+
+/* 首页那一行：第一句给人看，第二句给排查的人看。
+ * 原来那行写的是「实时偏移 −10%（温控压 2 档）· stall 201/47 ms/s」——
+ * 没看过文档的人一个词都读不懂，而 pp、stall、档这些词一个都不该出现在第一句里。 */
+function paintAdapt(s){
+  const el = document.getElementById('adapt-line');
+  if(!el) return;
+  const n = k => { const v = parseInt(s[k], 10); return Number.isFinite(v) ? v : null; };
+  const dlt = n('dlt'), temp = n('temp'), stall = n('stall'), base = n('psib');
+  const psi = n('psi'), th = n('th'), chg = n('chg');
+  if(dlt === null || dlt < 0) { el.style.display = 'none'; return; }
+  el.innerHTML = '';
+  const main = document.createElement('span');
+  const why = th > 0 && psi > 0 ? '机器发热、又正好有活要跑'
+            : th > 0 ? '机器发热，正在降速保护'
+            : psi > 0 ? '刚才有任务在等 CPU，临时放宽了一点'
+            : chg === 1 ? '插着电，已经放开' : '没有额外调整';
+  if(dlt > 0)      main.textContent = '现在比设定值高 ' + dlt + '%　' + why;
+  else if(dlt < 0) main.textContent = '现在比设定值低 ' + (-dlt) + '%　' + why;
+  else             main.textContent = '现在就是设定值　' + (chg === 1 ? '插着电（已放开，热了会自己降）' : '没有额外调整');
+  el.appendChild(main);
+  /* 技术细节单独一行、更淡：截图给人看问题时这一行最有用，但不该挡着第一句 */
+  const raw = document.createElement('span');
+  raw.style.cssText = 'color:var(--mut);font-size:11px;margin-left:6px';
+  const bits = [];
+  if(temp !== null && temp >= 0) bits.push('最热 ' + temp + '℃');
+  if(stall !== null && stall >= 0 && base !== null && base >= 0)
+    bits.push('stall ' + stall + '/' + base + 'ms/s');
+  if(psi) bits.push('PSI ' + psi + '档');
+  if(th) bits.push('温控 ' + th + '档');
+  if(bits.length){ raw.textContent = '· ' + bits.join(' · '); el.appendChild(raw); }
+  el.style.display = '';
+}
+
+async function loadStatus(){
+  if(busy) return;
+  busy = true;
+  try{
+    const s = parse(await api('status'));
+    statusFail = 0;
+    lastSt = s;
+    const st = s.state || 'unknown';
+    const b = document.getElementById('badge');
+    const t = document.getElementById('btxt');
+    if(st === 'game'){
+      /* state=game 表示"已把限频交还给系统"，不只覆盖游戏。
+       * 开机满血和满血应用走同一个交权动作，故复用 game，具体原因在 reason= 里。
+       * 按 reason 分开显示，避免非游戏场景误显示"游戏中"。 */
+      const why = s.reason || '-';
+      b.className = 'status game';
+      t.textContent = why === 'boot'   ? '开机满血 · 暂不封顶'
+                    : why === 'screen' ? '熄屏解除 · 已交还系统'
+                    : why === 'app'    ? '应用满血 · 已交还系统'
+                    : '游戏中 · 已解锁';
+    } else if(st === 'full'){
+      b.className = 'status game';
+      t.textContent = (s.screen === 'deep' ? '深度空闲 · 已交还系统' : '熄屏 · 已交还系统')
+                    + '（' + (s.soff || '15') + 's 轻巡检）';
+    } else if(st === 'normal'){
+      b.className = 'status on';
+      t.textContent = (s.screen === 'off' && s.soff_keep === '1')
+                    ? '熄屏 · 保持封顶' : '常态限频中';
+    } else {
+      b.className = 'status off';
+      t.textContent = '未运行';
+    }
+    b.classList.remove('stale');
+    b.title = '';
+    saveBadge();       /* 这一份是刚刚从守护拿到的，下次打开先画它 */
+    document.getElementById('pbadge').style.display = s.paused === '1' ? '' : 'none';
+    paintAdapt(s);
+    document.getElementById('m-pid').textContent = s.pid || '—';
+    /* 首页不显示"前台 / 档位"那一格：状态徽标已说明当前档位，
+     * 具体应用和封到多少在应用页看得更全。
+     * 守护照常发布 fg= / app_mode=，这里只是不接。 */
+    document.getElementById('m-bridge').textContent = bridgeName();
+    document.getElementById('m-gpu2').textContent = s.gpu_pct ? s.gpu_pct + '%' : '—';
+    document.getElementById('gpu-name').textContent = s.gpu_kind || 'GPU';
+    // gpu_max / gpu_cap 恒为 Hz（守护里 MHz 频点表已 ×1e6 归一），这里除 1e9 显示 GHz。
+    document.getElementById('gpu-hint').textContent =
+      s.gpu_max > 0
+        ? '硬件上限 ' + (s.gpu_max/1e9).toFixed(2) + ' GHz · 当前封顶 ' +
+          (s.gpu_cap/1e9).toFixed(2) + ' GHz'
+        : (s.gpu_ok === '1' ? '未识别到 GPU 限频节点' : 'GPU 限频不可用');
+    document.getElementById('m-npkg').textContent = s.npkg || '0';
+    // 版本号在页面有两处（副标题 #ver、首页底部 #ver2），两处都要刷新。
+    if(s.ver){
+      document.getElementById('ver').textContent  = 'V' + s.ver;
+      document.getElementById('ver2').textContent = 'V' + s.ver;
+    }
+
+    // 配置页顶部：SoC 芯片代号 + 各核心原生最高频 → 当前封顶
+    paintHw();
+
+    // 每一档具体管哪几颗 CPU。放在这里而不是 buildPctRows：滑杆行建时
+    // export 还没回来，没有 coretier_* 可用。
+    paintTierCores(s);
+
+    // CPU 各簇现状
+    const box = document.getElementById('cpu-rows');
+    const keys = Object.keys(s).filter(k=>/^cpu_\d+$/.test(k));
+    if(keys.length){
+      box.innerHTML = '';
+      keys.forEach(k=>{
+        const hw = parseInt(s[k],10) || 0;
+        const cur = parseInt(s['cpucur_' + k.slice(4)],10) || 0;
+        const row = document.createElement('div');
+        row.className = 'row';
+        row.innerHTML =
+          '<div class="lbl"><b>policy' + k.slice(4) + '</b><span>硬件上限 ' +
+          (hw/1000000).toFixed(2) + ' GHz</span></div>' +
+          '<div class="pct" style="color:var(--ok)">当前 ' + (cur/1000000).toFixed(2) + ' GHz</div>';
+        box.appendChild(row);
+      });
+    }
+  }catch(e){
+    // 区分两种失败：桥接不通 vs 守护本身有问题，避免误显示"无法连接守护"。
+    const b = document.getElementById('badge');
+    const msg = String(e && e.message || e);
+    statusFail++;
+    /* 首屏第一条 exec 会偶发空回执（管理器侧还没就绪）：这一拍先不报红，
+     * 徽标留在"连接中"，400ms 后自己再来一次。真故障也只会晚 400ms 露出。 */
+    if(statusFail === 1 && !DEAD){
+      // 已经有过一次成功状态（或上次的缓存）就不要退回"连接中"：
+      // 保持上次的值，静默重试。
+      if(!lastSt && !b.classList.contains('stale')){
+        b.className = 'status';
+        b.title = msg;
+        document.getElementById('btxt').textContent = '连接中';
+      } else {
+        b.title = msg;
+      }
+      setTimeout(()=>loadStatus(), 400);
+      return;
+    }
+    b.className = 'status off';
+    b.title = msg;
+    document.getElementById('btxt').textContent =
+      /管理器|接口|no bridge|超时|timeout/.test(msg) ? '管理器不支持' : '无法连接守护';
+    // 这几行必须在这里重刷：api() 抛错会跳过上面的赋值，
+    // 否则"桥接"会停在上一次成功的残留值，给出假数据。
+    document.getElementById('m-pid').textContent = '—';
+    document.getElementById('m-bridge').textContent = bridgeName();
+    document.getElementById('m-gpu2').textContent = '—';
+  }finally{ busy = false; }
+}
+
+async function loadLog(quiet){
+  try{
+    const t = (await api('log','60')).trim() || '暂无日志';
+    const el = document.getElementById('log');
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+    el.textContent = t;
+    // 自动刷新时若用户正在上翻，不把他拽回底部。
+    if(!quiet || atBottom) el.scrollTop = el.scrollHeight;
+  }catch(e){ if(!quiet) toast(e.message, true); }
+}
+
+/* ── 配置 ── */
+async function loadConf(){
+  try{
+    const c = parse(await api('conf_get'));
+    PCT_KEYS.forEach(o=>{
+      const el = document.getElementById(o.k);
+      if(el){ el.value = c[o.k] || o.d; pv(o.k); }
+    });
+    const g = document.getElementById('gpu_pct');
+    g.value = c.GPU_PCT || 45; pv('gpu_pct');
+    const m = document.getElementById('gpu_min_lock');
+    m.checked = c.GPU_MIN_LOCK !== '0'; pv('gpu_min_lock');
+    const iv = document.getElementById('interval');
+    iv.value = c.INTERVAL || 5; pv('interval');
+    const gr = document.getElementById('grace');
+    gr.value = c.GAME_GRACE_SEC || 10; pv('grace');
+    const bf = document.getElementById('boot_full');
+    /* 0 是合法值（= 关），不能用 `c.BOOT_FULL_S || 60`：
+       那样会把关掉的开关在下次载入时又显示成 60。 */
+    bf.value = (c.BOOT_FULL_S === undefined || c.BOOT_FULL_S === '') ? 60 : c.BOOT_FULL_S;
+    pv('boot_full');
+    const su = document.getElementById('screen_uncap');
+    /* 新键优先。两个键都没有（手写/极老配置）按新装默认「交还系统」；
+       有 SCREEN_UNCAP 但没有 SCREEN_POLICY 时按旧键映射，老用户行为不变。 */
+    su.checked = c.SCREEN_POLICY === 'uncap'
+              || (c.SCREEN_POLICY === undefined &&
+                  (c.SCREEN_UNCAP === undefined || c.SCREEN_UNCAP === '1'));
+    pv('screen_uncap');
+    /* 老配置的 socfreq.conf 里没有 LEARN 这一行（升级装机不会重写用户的配置），
+       守护那边缺省按"开"处理，这里也要按开显示，否则页面显示关、实际在采。 */
+    const lm = document.getElementById('learn');
+    lm.checked = c.LEARN !== '0'; pv('learn');
+    /* 实时偏移三条：老配置里没有这些行，守护那边缺省全是"开"，
+       页面也必须按开显示，否则会出现"显示关、实际在动"。
+       数值同理用 !== '0' / undefined 判断：0 对 TH_MAX、PSI_GAIN 是合法值（= 关掉那一条）。 */
+    document.getElementById('chg_uncap').checked = c.CHG_UNCAP !== '0'; pv('chg_uncap');
+    document.getElementById('th_cap').checked    = c.TH_CAP !== '0';    pv('th_cap');
+    document.getElementById('psi_adapt').checked = c.PSI_ADAPT !== '0'; pv('psi_adapt');
+    /* 电量阶梯出厂是关的：老配置里没有这一行时也按关显示，
+       判据必须是 === '1'，不能沿用上面开关的 !== '0'。 */
+    document.getElementById('batt_step').checked = c.BATT_STEP === '1'; pv('batt_step');
+    const num = (id, key, dflt) => {
+      const el = document.getElementById(id);
+      el.value = (c[key] === undefined || c[key] === '') ? dflt : c[key];
+      pv(id);
+    };
+    num('chg_pct', 'CHG_PCT', 100);
+    num('th_high', 'TH_HIGH', 75);
+    num('th_low',  'TH_LOW',  68);
+    num('th_max',  'TH_MAX',  25);
+    num('psi_gain','PSI_GAIN', 10);
+    num('batt_low',      'BATT_LOW',      20);
+    num('batt_low_cut',  'BATT_LOW_CUT',  5);
+    num('batt_crit',     'BATT_CRIT',     10);
+    num('batt_crit_cut', 'BATT_CRIT_CUT', 10);
+    /* 按应用学习默认关，所以判据是 === '1' 而不是上面那批的 !== '0'：
+       老配置里没有这一行时，页面和守护都得按"关"显示。 */
+    document.getElementById('learn_app').checked = c.LEARN_APP === '1';
+    pv('learn_app');
+    num('learn_app_min', 'LEARN_APP_MIN', 30);
+    num('learn_app_day', 'LEARN_APP_DAY', 2);
+    const lmv = (c.LEARN_MODE || '').trim();
+    const lmode = document.getElementById('p-learn-mode');
+    if(lmode) lmode.value = (lmv === 'eco' || lmv === 'performance') ? lmv : 'balanced';
+    /* 日常调速器：认不出来的值一律显示成"不干预"。
+       守护那边是"白名单外的名字 = 不改任何调速器"，
+       下拉框拿到 option 里不存在的历史值会清空选中项，
+       而默认生效值就是不干预，两边口径要一致。 */
+    const gv = (c.CPU_GOVERNOR || '').trim();
+    const gs = document.getElementById('governor');
+    // 认不出来的值一律回落"不干预"（守护那边白名单外 = 不改任何节点）
+    gs.value = GOVERNOR_OPTS.some(o => o[0] === gv) ? gv : '';
+    pv('governor');
+    /* 功能页的下拉档和"现在会怎么做"那几句，都按刚填好的控件重算 */
+    syncFunc();
+    toast('已载入当前配置');
+  }catch(e){ toast(e.message, true); }
+}
+
+/* ── 功能页：人话档位 ↔ 具体数值 ────────────────────────────────
+ * 普通用户只需要在每张卡里选一个档位；下面那些滑杆是同一批键的精细版，
+ * 收在「自己定」里，范围一个都没缩 —— 选了档位也可以再手动改，
+ * 改完下拉框会自己变成「自己定的值」，不会骗人说还在某一档。
+ * 预设只写已有的那几个键，值必须落在 api.sh 的校验区间内（有断言盯着）。 */
+const FUNC_PRESETS = {
+  chg: { ids: ['chg_uncap', 'chg_pct'], opts: [
+    { v: 'free', lab: '不封顶（插电时放开）', set: { chg_uncap: 1, chg_pct: 100 } },
+    { v: 'soft', lab: '放松一点',            set: { chg_uncap: 1, chg_pct: 85 } },
+    { v: 'same', lab: '和平时一样压着',      set: { chg_uncap: 0 } },
+  ] },
+  th: { ids: ['th_cap', 'th_high', 'th_low', 'th_max'], opts: [
+    { v: 'early', lab: '早点降（更凉、更省电）', set: { th_cap: 1, th_high: 70, th_low: 64, th_max: 35 } },
+    { v: 'mid',   lab: '适中（推荐）',           set: { th_cap: 1, th_high: 75, th_low: 68, th_max: 25 } },
+    { v: 'late',  lab: '尽量保性能（很热才降）', set: { th_cap: 1, th_high: 82, th_low: 75, th_max: 15 } },
+    { v: 'off',   lab: '不主动降（交给系统）',   set: { th_cap: 0 } },
+  ] },
+  psi: { ids: ['psi_adapt', 'psi_gain'], opts: [
+    { v: 'off',  lab: '不放宽（一直按设定值）', set: { psi_adapt: 0 } },
+    { v: 'low',  lab: '少借一点',               set: { psi_adapt: 1, psi_gain: 5 } },
+    { v: 'mid',  lab: '适中（推荐）',           set: { psi_adapt: 1, psi_gain: 10 } },
+    { v: 'high', lab: '多借一些（更不容易卡）', set: { psi_adapt: 1, psi_gain: 20 } },
+  ] },
+};
+const CUSTOM_OPT = '__custom';
+
+function fv(id){
+  const el = document.getElementById(id);
+  if(!el) return NaN;
+  return el.type === 'checkbox' ? (el.checked ? 1 : 0) : parseInt(el.value, 10);
+}
+
+/* 三组档位各建一排分段按钮。onpick 里直接 applyPreset：
+   分段按钮没有"选中但没改值"的中间态，点了就该把值写进控件。 */
+function buildPresetSelects(){
+  for(const k of Object.keys(FUNC_PRESETS)){
+    const host = document.getElementById('p-' + k);
+    if(!host || host.children.length) continue;
+    host.classList.add('seg');
+    const opts = FUNC_PRESETS[k].opts.map(o => [o.v, o.lab]);
+    // 「自己定的值」只在真的对不上任何一档时才会亮，所以也排进去：
+    // 用户手动拖过滑杆后能一眼看出现在不在任何档上，而不是以为还在「适中」。
+    opts.push([CUSTOM_OPT, '自己定的值', true]);
+    segInto(host, opts, FUNC_PRESETS[k].opts[0].v, () => applyPreset(k));
+  }
+  /* 学习偏好：只影响建议的方向/门槛，不写实时策略。
+     seg 类必须补上——上面那三组是 host.classList.add('seg') 才吃到分段按钮样式的，
+     这里漏了就会退化成普通按钮，选中态根本没有样式。三档都是短标签，加 fill 均分整行。 */
+  const lm = document.getElementById('p-learn-mode');
+  if(lm && !lm.children.length){
+    lm.classList.add('seg', 'fill');
+    segInto(lm, [['eco', '省电'], ['balanced', '均衡'], ['performance', '性能']],
+            'balanced', () => {});
+  }
+}
+
+/* 应用档位：只往控件里写值，落盘仍然走页面底部的「保存并生效」 */
+function applyPreset(group){
+  const host = document.getElementById('p-' + group);
+  if(!host) return;
+  const o = FUNC_PRESETS[group].opts.filter(x => x.v === host.value)[0];
+  if(!o) return;                       // 「自己定的值」不覆盖任何东西
+  for(const id of Object.keys(o.set)){
+    const el = document.getElementById(id);
+    if(!el) continue;
+    if(el.type === 'checkbox') el.checked = !!o.set[id];
+    else el.value = o.set[id];
+    pv(id);
+  }
+  syncFunc();
+}
+
+/* 反向：按当前控件值判断落在哪一档，都不像就亮「自己定的值」 */
+function syncFunc(){
+  buildPresetSelects();
+  for(const g of Object.keys(FUNC_PRESETS)){
+    const host = document.getElementById('p-' + g);
+    if(!host) continue;
+    let hit = CUSTOM_OPT;
+    for(const o of FUNC_PRESETS[g].opts){
+      const ks = Object.keys(o.set);
+      if(ks.every(k => fv(k) === o.set[k])){ hit = o.v; break; }
+    }
+    host.value = hit;                  // 分段按钮跟着刷新
+  }
+  paintFuncSum();
+}
+
+/* 把当前设置翻译成一整句人话，放在功能页顶上。
+ * 全部从控件现算，不写死档位名 —— 用户手动改过数值之后，
+ * 这段话仍然说的是他真正会得到的行为。 */
+function paintFuncSum(){
+  const box = document.getElementById('func-sum');
+  if(!box) return;
+  box.innerHTML = '';
+  const line = (t, strong) => {
+    const d = document.createElement('div');
+    d.className = 'hint';
+    d.style.marginBottom = '7px';
+    const b = document.createElement('b');
+    b.textContent = strong + '　';
+    d.appendChild(b);
+    d.appendChild(document.createTextNode(t));
+    box.appendChild(d);
+  };
+  if(fv('chg_uncap') === 1)
+    line(fv('chg_pct') >= 100 ? '插着电时不封顶，拔电自动恢复'
+                              : '插着电时至少放开到 ' + fv('chg_pct') + '%，拔电自动恢复', '插电');
+  else line('插不插电都一样按设定值压着', '插电');
+
+  if(fv('batt_step') === 1)
+    line('电量低于 ' + fv('batt_low') + '% 收紧 ' + fv('batt_low_cut') +
+         '%；低于 ' + fv('batt_crit') + '% 再叠 ' + fv('batt_crit_cut') +
+         '%（插电时不生效）', '电量');
+  else line('低电量不额外收紧', '电量');
+
+  if(fv('th_cap') === 1)
+    line('CPU/GPU 到 ' + fv('th_high') + '℃ 开始一档档降，最多比设定低 ' + fv('th_max') +
+         '%；凉到 ' + fv('th_low') + '℃ 以下才慢慢放开', '发热');
+  else line('不主动降速，热到极限时由系统自己的保护处理', '发热');
+
+  if(fv('psi_adapt') === 1)
+    line('偶尔卡住时最多临时放宽 ' + fv('psi_gain') + '%，不卡了自动收回；这一条只会往上放宽', '卡顿');
+  else line('卡的时候也不会放宽，一直按设定值', '卡顿');
+}
+
+let saveBusy = false;
+async function saveAll(){
+  /* 以前的保存是三十多个 conf_set 串行：每次都是一次 root exec，
+     手机上要十几秒，用户以为没点上就反复按。现在一次 conf_set_many 收走，
+     同时把按钮锁住——重复点击不会排队再存一遍。 */
+  if(saveBusy) return;
+  saveBusy = true;
+  const btns = Array.prototype.slice.call(
+    document.querySelectorAll('button[onclick="saveAll()"]'));
+  btns.forEach(b => { b.disabled = true; b.dataset.label = b.textContent; b.textContent = '保存中…'; });
+  try{
+    // 未检测到的档位不保存（滑杆也已藏起来）。判据用 TIER_ABSENT：
+    // 首页未刷过 status 时它为空，此时按"全都存在"处理。
+    const pairs = PCT_KEYS.filter(o=>!TIER_ABSENT[o.k])
+                          .map(o=>[o.k, document.getElementById(o.k).value]);
+    pairs.push(['GPU_PCT', document.getElementById('gpu_pct').value]);
+    pairs.push(['GPU_MIN_LOCK', document.getElementById('gpu_min_lock').checked ? '1' : '0']);
+    pairs.push(['INTERVAL', document.getElementById('interval').value]);
+    pairs.push(['GAME_GRACE_SEC', document.getElementById('grace').value]);
+    pairs.push(['BOOT_FULL_S', document.getElementById('boot_full').value]);
+    const suOn = document.getElementById('screen_uncap').checked;
+    pairs.push(['SCREEN_POLICY', suOn ? 'uncap' : 'keep']);
+    pairs.push(['SCREEN_UNCAP', suOn ? '1' : '0']);
+    pairs.push(['CPU_GOVERNOR', document.getElementById('governor').value]);
+    pairs.push(['LEARN', document.getElementById('learn').checked ? '1' : '0']);
+    pairs.push(['BATT_STEP', document.getElementById('batt_step').checked ? '1' : '0']);
+    pairs.push(['BATT_LOW', document.getElementById('batt_low').value]);
+    pairs.push(['BATT_LOW_CUT', document.getElementById('batt_low_cut').value]);
+    pairs.push(['BATT_CRIT', document.getElementById('batt_crit').value]);
+    pairs.push(['BATT_CRIT_CUT', document.getElementById('batt_crit_cut').value]);
+    pairs.push(['LEARN_APP', document.getElementById('learn_app').checked ? '1' : '0']);
+    pairs.push(['LEARN_APP_MIN', document.getElementById('learn_app_min').value]);
+    pairs.push(['LEARN_APP_DAY', document.getElementById('learn_app_day').value]);
+    pairs.push(['LEARN_MODE', document.getElementById('p-learn-mode').value || 'balanced']);
+    /* 实时偏移。顺序有意：先关两条开关再改阈值没有依赖，但 TH_LOW 要在
+       TH_HIGH 之后发——后端那条 TH_ORDER 判的是"改完之后两者还成不成对"，
+       用户把触发温度调低到比恢复线还低时，这个顺序才不会被自己拦死。 */
+    pairs.push(['CHG_UNCAP', document.getElementById('chg_uncap').checked ? '1' : '0']);
+    pairs.push(['CHG_PCT', document.getElementById('chg_pct').value]);
+    pairs.push(['TH_CAP', document.getElementById('th_cap').checked ? '1' : '0']);
+    pairs.push(['TH_MAX', document.getElementById('th_max').value]);
+    pairs.push(['PSI_ADAPT', document.getElementById('psi_adapt').checked ? '1' : '0']);
+    pairs.push(['PSI_GAIN', document.getElementById('psi_gain').value]);
+    pairs.push(['TH_HIGH', document.getElementById('th_high').value]);
+    pairs.push(['TH_LOW', document.getElementById('th_low').value]);
+    // 先让"保存中…"画出来，再进同步 exec（exec 会卡住 WebView 渲染）
+    await new Promise(r => setTimeout(r, 0));
+    const args = ['conf_set_many'].concat(pairs.map(p => p[0] + '=' + p[1]));
+    await api.apply(null, args);
+    toast('已保存并生效');
+    loadStatus();
+  }catch(e){
+    toast(e.message, true);
+    // 批量里可能已经写进去前几条，回读一次让页面显示真实状态
+    try{ await loadConf(); }catch(_){ }
+  }finally{
+    saveBusy = false;
+    btns.forEach(b => { b.disabled = false; b.textContent = b.dataset.label || '保存并生效'; });
+  }
+}
+/* ── 智能建议 ── */
+/* 判据（顶帽占比、贴帽两桶、p99、要几天样本）全在 api.sh 的 advice 里，
+   这边只渲染和落盘：同一个阈值不许有两份实现，页面自己判一套迟早和后端不一致。
+   记录存在 ADV 里，「应用建议」只认这份，不拿滑杆当前值去反推。 */
+let ADV = [];
+let ADV_APP = [];
+const ADV_TEXT = { up: '建议放宽一档', down: '建议收紧一档', hold: '维持' };
+const ADV_COLOR = { up: 'var(--acc)', down: 'var(--ok)', hold: 'var(--mut)' };
+const MODE_TEXT = { eco: '省电', balanced: '均衡', performance: '性能' };
+/* 天数是 0 的时候，十有八九是一分钟都没采到。把守护那边"这一拍为什么不采"
+   翻成人话；不然用户只看到"已学到 0 天"，不知道该去拔电还是去关哪个开关。 */
+const GATE_TEXT = {
+  screen: '熄屏期间不采样：亮屏用一会儿就会开始累计。',
+  chg: '插电不封顶正在生效，插电时段不采样；拔电或用「功能 · 插着电的时候」关掉它后开始累计。',
+  adapt: '正在借频或降温（实时偏移生效），回到你设的百分比后继续累计。',
+  full: '游戏或满血交权时段不采样，退出后继续累计。',
+  pause: '模块已暂停，恢复后继续累计。'
+};
+/* GPU 的 conf 键是 GPU_PCT，页面上那颗滑杆的 id 却叫 gpu_pct（历史命名）。
+   建议里两边都要能对上，否则"应用"会写到一颗不存在的滑杆上。 */
+function advKey(k){
+  const pk = PCT_KEYS.filter(o => o.k === k)[0];
+  if(k === 'GPU_PCT') return { el: 'gpu_pct', n: 'GPU' };
+  return { el: k, n: pk ? pk.n : k };
+}
+
+function adviceLine(r){
+  const row = document.createElement('div');
+  row.className = 'row';
+  const lbl = document.createElement('div');
+  lbl.className = 'lbl';
+  const b = document.createElement('b');
+  b.textContent = advKey(r.key).n;
+  const sp = document.createElement('span');
+  sp.textContent = r.why || ADV_TEXT[r.advice] || '';
+  lbl.appendChild(b);
+  lbl.appendChild(sp);
+  const pc = document.createElement('div');
+  pc.className = 'pct';
+  pc.textContent = (r.advice === 'hold')
+    ? r.cur + '%' : r.cur + '% → ' + r.to + '%';
+  pc.style.color = ADV_COLOR[r.advice] || 'var(--mut)';
+  row.appendChild(lbl);
+  row.appendChild(pc);
+  const wrap = document.createElement('div');
+  wrap.appendChild(row);
+  const ev = document.createElement('div');
+  ev.className = 'adv-ev';
+  ev.textContent = '顶帽 ' + (r.pin || 0) + '% · 贴帽两桶 ' + (r.top2 || 0) +
+    '% · p99 ' + (r.p99 || 0) + '% · 采样 ' + (r.min || 0) + ' 分钟 / ' +
+    (r.days || 0) + ' 天';
+  wrap.appendChild(ev);
+  return wrap;
+}
+
+function adviceNote(text){
+  const d = document.createElement('div');
+  d.className = 'hint';
+  d.style.marginBottom = '0';
+  d.textContent = text;
+  return d;
+}
+
+async function loadAdvice(){
+  const box = document.getElementById('advice');
+  const btn = document.getElementById('adv-apply');
+  ADV = [];
+  if(btn) btn.disabled = true;
+  let txt;
+  try{ txt = await api('advice'); }
+  catch(e){ box.innerHTML = ''; box.appendChild(adviceNote('取建议失败：' + e.message)); return; }
+  /* 记录之间用 ---REC--- 分块（和关于页的 ---PROP--- 同一套路）。
+     why 是自由文本，只有分行传才不怕它把字段冲掉。 */
+  const chunks = txt.split('---REC---');
+  const meta = parse(chunks[0]);
+  const recs = chunks.slice(1).map(c => parse(c)).filter(r => r.tier !== undefined);
+  box.innerHTML = '';
+  ADV = recs;
+  if(meta.learn === '0'){
+    box.appendChild(adviceNote('智能学习是关的。到「功能 · 学习偏好」里打开，'
+      + '等封顶真的生效一段时间后这里才会有建议。'));
+    return;
+  }
+  if(meta.mode) box.appendChild(adviceNote('学习偏好：' + (MODE_TEXT[meta.mode] || meta.mode)));
+  if(meta.gate && GATE_TEXT[meta.gate]) box.appendChild(adviceNote(GATE_TEXT[meta.gate]));
+  if(!recs.length){
+    box.appendChild(adviceNote(meta.note || '还没有样本。'));
+    return;
+  }
+  recs.forEach(r => box.appendChild(adviceLine(r)));
+  const acts = recs.filter(r => r.advice === 'up' || r.advice === 'down').length;
+  const days = recs.map(r => Number(r.days) || 0).sort((a, b) => b - a)[0] || 0;
+  box.appendChild(adviceNote(acts
+    ? '已学到 ' + days + ' 天，有 ' + acts + ' 项建议。每次只动 5%，应用前自己看一眼依据；'
+      + '改完等约 5 分钟新样本再判断。'
+    : days > 0
+      ? '已学到 ' + days + ' 天，这一轮没有要改的（维持、或样本还不够）。'
+      : '还没有攒到可判断的样本。'));
+  if(btn) btn.disabled = !acts;
+}
+
+/* 按应用那一层。图标和应用名走 pkgRow，和「分应用档位」那张卡同一套取名/取图。 */
+function adviceAppLine(r){
+  const wrap = document.createElement('div');
+  const row = pkgRow(r.pkg);
+  /* parse() 交回来全是字符串：manual=0 的 '0' 在 JS 里是真值，
+     直接 if(r.manual) 会把三条学习条目全当得手填，一条都发不出去。 */
+  if(r.manual === '1'){
+    const tag = document.createElement('div');
+    tag.className = 'src';
+    tag.textContent = '手填';
+    tag.title = '这条是你自己填的，学习不会去改它';
+    row.el.appendChild(tag);
+  } else if(r.base === 'global'){
+    const tag = document.createElement('div');
+    tag.className = 'src';
+    tag.textContent = '全局';
+    tag.title = '这个包还没设专属档位，先按全局四簇平均 ' + r.cur
+               + '% 当基准；应用后会新建一条专属档位';
+    row.el.appendChild(tag);
+  }
+  const pc = document.createElement('div');
+  pc.className = 'pct';
+  pc.textContent = (r.advice === 'hold') ? r.cur + '%' : r.cur + '% → ' + r.to + '%';
+  pc.style.color = ADV_COLOR[r.advice] || 'var(--mut)';
+  row.el.appendChild(pc);
+  wrap.appendChild(row.el);
+  const why = document.createElement('div');
+  why.className = 'why';
+  why.textContent = r.why || '';
+  wrap.appendChild(why);
+  const ev = document.createElement('div');
+  ev.className = 'adv-ev';
+  ev.textContent = '顶帽 ' + (r.pin || 0) + '% · 贴帽两桶 ' + (r.top2 || 0) +
+    '% · p99 ' + (r.p99 || 0) + '% · 前台 ' + (r.min || 0) + ' 分钟 / ' +
+    (r.days || 0) + ' 天';
+  wrap.appendChild(ev);
+  return wrap;
+}
+
+async function loadAdviceApp(){
+  const box = document.getElementById('advice-app');
+  ADV_APP = [];
+  if(!box) return;
+  box.innerHTML = '';
+  let txt;
+  try{ txt = await api('advice_app'); }
+  catch(e){ box.appendChild(adviceNote('按应用的建议取不到：' + e.message)); return; }
+  const chunks = txt.split('---REC---');
+  const meta = parse(chunks[0]);
+  const recs = chunks.slice(1).map(c => parse(c)).filter(r => r.pkg !== undefined);
+  /* 用得最多的排前面：这一层的条数可以很多，先要看见的是天天开的那几个 */
+  recs.sort((a, b) => (Number(b.min) || 0) - (Number(a.min) || 0));
+  ADV_APP = recs;
+  box.appendChild(adviceNote('按应用（每个前台应用都会攒自己的样本；没设档位的按全局平均当基准）。'
+    + (meta.mode ? '当前偏好：' + (MODE_TEXT[meta.mode] || meta.mode) + '。' : '')
+    + '每次也只动 5%，改完等新样本再判。'));
+  if(meta.learn_app === '0'){
+    box.appendChild(adviceNote('「按应用学习」现在是关的。到「配置 · 行为」里打开；'
+      + '开着之后，每个前台应用都会攒自己的样本。'));
+    return;
+  }
+  if(!recs.length){ box.appendChild(adviceNote(meta.note || '还没有按应用的样本。')); return; }
+  recs.forEach(r => box.appendChild(adviceAppLine(r)));
+  ensureLabels(recs.map(r => r.pkg));
+}
+
+/* 两层里"真的能按下去"的那几条。手填过的应用条目不算：学习不覆盖用户显式填的值。 */
+function adviceTodo(){
+  const g = ADV.filter(r => (r.advice === 'up' || r.advice === 'down') && r.key && r.to);
+  const a = ADV_APP.filter(r => (r.advice === 'up' || r.advice === 'down')
+                             && r.pkg && r.to && r.manual !== '1');
+  return g.concat(a);
+}
+
+async function refreshAdvice(){
+  // 两份建议互不依赖：并行取，省一次往返的等待。
+  await Promise.all([loadAdvice(), loadAdviceApp()]);
+  const btn = document.getElementById('adv-apply');
+  if(btn) btn.disabled = !adviceTodo().length;
+}
+
+async function applyAdvice(){
+  const todo = adviceTodo();
+  if(!todo.length){ toast('现在没有要应用的建议'); return; }
+  const done = [];
+  try{
+    for(let i = 0; i < todo.length; i++){
+      const r = todo[i];
+      if(r.pkg){
+        /* 按应用的走 modes_learn：那条通道自己会拦手填条目，学习写不回 full */
+        await api('modes_learn', r.pkg, r.to);
+        done.push((LABELS[r.pkg] || r.pkg) + ' ' + r.cur + '%→' + r.to + '%');
+      } else {
+        await api('conf_set', r.key, r.to);
+        // 改完直接刷滑杆和百分比读数：不重载整页配置，免得把用户没保存的别的改动盖掉。
+        const kk = advKey(r.key);
+        const el = document.getElementById(kk.el);
+        if(el){ el.value = r.to; pv(kk.el); }
+        done.push(kk.n + ' ' + r.cur + '%→' + r.to + '%');
+      }
+    }
+    /* 手填过的那几条明明有建议却没动，必须说一句：不然看起来像漏了 */
+    const skip = ADV_APP.filter(r => (r.advice === 'up' || r.advice === 'down')
+                                  && r.manual === '1').length;
+    toast('已应用 ' + done.length + ' 项：' + done.join('、')
+      + '；采样还是改帽前的，约 5 分钟后再看'
+      + (skip ? '；另有 ' + skip + ' 条是你手填的，学习没改' : ''));
+    loadStatus();
+  }catch(e){ toast(e.message, true); }
+  refreshAdvice();
+}
+
+/* 破坏性操作只有"清零重学"一个：这个键没有别的入口，
+   所以用两步点确认（第一次点把按钮变成问句），不引一层弹层。 */
+let advResetArm = 0;
+function resetLearn(){
+  const btn = document.getElementById('adv-reset');
+  if(!btn) return;
+  const now = Date.now();
+  if(!advResetArm || now - advResetArm > 8000){
+    advResetArm = now;
+    btn.textContent = '再点一次确认清零';
+    setTimeout(()=>{
+      if(Date.now() - advResetArm >= 8000){ advResetArm = 0; btn.textContent = '清零重学'; }
+    }, 8200);
+    return;
+  }
+  advResetArm = 0;
+  btn.textContent = '清零重学';
+  api('learn_reset')
+    .then(()=>{ toast('样本已清零，重新开始学'); refreshAdvice(); },
+            e => toast(e.message, true));
+}
+
+/* 恢复全部默认：和清零重学一样两步确认。成功后整页重载，
+   保证所有滑杆/开关都按新的配置重画，而不是只改一半 DOM。 */
+let resetAllArm = 0;
+async function resetAll(){
+  const btn = document.getElementById('reset-all');
+  if(!btn) return;
+  const now = Date.now();
+  if(!resetAllArm || now - resetAllArm > 8000){
+    resetAllArm = now;
+    btn.textContent = '再点一次确认恢复';
+    setTimeout(()=>{
+      if(Date.now() - resetAllArm >= 8000){
+        resetAllArm = 0;
+        btn.textContent = '恢复全部默认';
+      }
+    }, 8200);
+    return;
+  }
+  resetAllArm = 0;
+  btn.disabled = true;
+  btn.textContent = '正在恢复…';
+  try{
+    await api('reset_all');
+    toast('已恢复默认；游戏名单、词典、主题保留。页面即将刷新');
+    setTimeout(()=>{ try{ location.reload(); }catch(_){} }, 900);
+  }catch(e){
+    toast(e.message, true);
+    btn.disabled = false;
+    btn.textContent = '恢复全部默认';
+  }
+}
+
+/* ── 游戏名单 ── */
+let gpkgs = [];
+/* 首字母色块：色相由包名散列决定，同一应用每次都是同一颜色 */
+const hueOf = pkg => {
+  let h = 0;
+  for (const c of pkg) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return h;
+};
+function makeIconEl(p){
+  // 先放色块占位，图标取到了再换掉——没有图也不留空洞
+  const ph = document.createElement('div');
+  ph.className = 'ico ph';
+  ph.style.setProperty('--h', hueOf(p));
+  ph.textContent = (p.replace(/^com\./, '')[0] || '?');
+  /* 色块占位说明。正式发布包经 AGP 会把资源路径缩短
+   * （res/mipmap-xxhdpi/ic_launcher.png → res/aK.png），按 mipmap/launcher
+   * 搜不到，只能找 res/ 下边长最接近 192 的方图，选中的未必是桌面图标。
+   * 取到真图后 title 会换掉，这里只是未取到时的占位说明。 */
+  ph.title = p + '\n还没取到桌面图标。\n' +
+    '正式发布包常把资源名缩短成 res/aK.png 这种，' +
+    '本模块只能按"res/ 下的正方形图、边长最接近 192"去猜，' +
+    '所以可能取到游戏内素材而不是桌面图标。\n' +
+    '长按可重试；应用换了图标也会自动失效重取。';
+  return ph;
+}
+
+/* 名字那一块：第一行应用名，第二行包名。
+ * 起笔先放包名，取到名字后才把第一行换成名字、显示第二行。
+ * 取不到名字就保持一行包名，不空行、不重复。 */
+function makeNameEl(p){
+  const nm = document.createElement('div');
+  nm.className = 'nm';
+  const t = document.createElement('div');
+  t.className = 't';
+  t.textContent = p;
+  const s = document.createElement('div');
+  s.className = 's';
+  s.textContent = p;
+  s.style.display = 'none';
+  nm.appendChild(t);
+  nm.appendChild(s);
+  return { nm, t, s };
+}
+
+/* 图标 + 名字共用一个观察器：图标是"滚进可视区才去 APK 里取"的。
+ * 分两个观察器会让同一条滚动手势触发两遍回调，且两处 unobserve 容易漏摘一个。 */
+function pkgRow(p){
+  const el = document.createElement('div');
+  el.className = 'pk';
+  el.dataset.pkg = p;
+  const ph = makeIconEl(p);
+  const name = makeNameEl(p);
+  el.appendChild(ph);
+  el.appendChild(name.nm);
+  applyLabel(name.t, name.s, (LABELS[p] || (typeof FALLBACK_LABELS === 'undefined' ? '' : FALLBACK_LABELS[p])), true);  // 名字已经有了就直接写，不等回调
+  // 图标已有缓存就直接换上，切页重画不再逐个发 root 调用。
+  // 这时候行还没 append 进文档，所以两个 apply 都要带 detached 放行。
+  if(ICONS[p] !== undefined){
+    applyIcon(p, ph, ICONS[p], true);
+    return { el, ph, t: name.t, s: name.s };
+  }
+  try{
+    const io = new IntersectionObserver(es=>{
+      es.forEach(e=>{
+        if(!e.isIntersecting) return;
+        io.unobserve(e.target);
+        loadIcon(p, ph);
+      });
+    }, {rootMargin: '160px'});
+    io.observe(el);
+  }catch(_){
+    loadIcon(p, ph);   // 没有 IntersectionObserver 就退回立刻取
+  }
+  return { el, ph, t: name.t, s: name.s };
+}
+
+/* 应用名：一次调用取"这一屏要的那几个"，不是一行一个请求。
+ * 名字只存在于 APK（AndroidManifest 的 android:label，通常是 @string 引用，
+ * 还要查 resources.arsc 字符串池），pm / dumpsys 拿不到标签，只能问守护（见 src/appinfo.c）。
+ * 不做全量解析：解一个包要读 manifest + 几 MB arsc，全量会顶到调用超时；
+ * 白名单加分应用档位通常只有十几个包，后端按 APK 路径缓存。
+ * 没被点名的包没有名字，会退回一行包名显示。
+ *
+ * 串行化：应用页一次会加载名单 / 候选 / 档位三块，三块各自点名。
+ * 以前三个 labels 调用会同时进后端，而后端的临时文件是固定名，
+ * 互相踩掉后谁先返回谁就把别人的结果盖掉 —— 表现就是"有时候名字出不来"。
+ * 这里改成一次只发一批，路上新点名的包追加到队列，下一批一起取。 */
+const LABELS = {};
+/* 系统应用名兜底：APK label 解析不出来时用（scripts/builtin_labels.txt）。
+ * 只填空白，不覆盖 APK label；搜索和显示都认它。 */
+const FALLBACK_LABELS = {};
+let FALLBACK_LOADED = false;
+/* 内置清单里特意指定的中文名（微信 / 企业微信等）。APK 标签可能是英文甚至
+ * 解析不出来；这些名字不管 builtin_white 和 labels 哪个先回来都要赢。 */
+const BUILTIN_LABELS = {};
+const LABEL_Q = [];
+let labelBusy = false;
+async function ensureLabels(pkgs){
+  for (const p of (pkgs || [])) {
+    if (!p || Object.prototype.hasOwnProperty.call(LABELS, p)) continue;
+    LABELS[p] = '';                 // 先占位：同一批不会被反复问
+    if (LABEL_Q.indexOf(p) < 0) LABEL_Q.push(p);
+  }
+  if (!LABEL_Q.length || labelBusy) return;
+  labelBusy = true;
+  try{
+    while (LABEL_Q.length) {
+      const list = LABEL_Q.splice(0, 120);
+      let out;
+      try{
+        out = await api.apply(null, ['labels'].concat(list));
+      }catch(_){
+        // 整批失败：删掉占位，下次渲染会重问。
+        // 成功但这一批里没回来的包保留占位（APK 里确实没标签时不该每次重解）。
+        for (const p of list) if (!LABELS[p]) delete LABELS[p];
+        continue;
+      }
+      out.split('\n').forEach(l=>{
+        const i = l.indexOf('\t');
+        if (i > 0) { const v = l.slice(i + 1).trim(); if (v) LABELS[l.slice(0, i)] = v; }
+      });
+      paintLabels();
+    }
+  }finally{ labelBusy = false; }
+}
+function applyLabel(tEl, sEl, v, detached){
+  // 同 applyIcon：行构造时还没插入文档，缓存命中的名字也要能写上。
+  if(!v || !tEl) return;
+  if(!detached && !tEl.isConnected) return;
+  tEl.textContent = v;
+  tEl.title = v;
+  if(sEl) sEl.style.display = '';
+}
+function paintLabels(){
+  document.querySelectorAll('.pk[data-pkg]').forEach(el=>{
+    const p = el.dataset.pkg, v = (LABELS[p] || (typeof FALLBACK_LABELS === 'undefined' ? '' : FALLBACK_LABELS[p]));
+    if(!v) return;
+    // 只改还没被写过的第一行：这一行的初始内容就是包名，
+    // 比对它就知道"是不是已经换成名字了"，不必另存一个标记。
+    const t = el.querySelector('.nm .t'), s = el.querySelector('.nm .s');
+    if(t && (t.textContent === p ||
+             Object.prototype.hasOwnProperty.call(BUILTIN_LABELS, p)))
+      applyLabel(t, s, v);
+  });
+  /* 深睡唤醒榜不是 .pk 行，名字在 .ds-name 里；标签回来得比榜单晚，
+    不补这一遍就会一直显示包名。白名单小标要留着，所以只换文字节点。 */
+  document.querySelectorAll('.ds-name[data-pkg]').forEach(el=>{
+    const p = el.dataset.pkg, v = (LABELS[p] || (typeof FALLBACK_LABELS === 'undefined' ? '' : FALLBACK_LABELS[p]));
+    if(!v) return;
+    const wl = el.querySelector('.wl');
+    el.textContent = v;
+    el.title = p;
+    if(wl) el.appendChild(wl);
+  });
+  /* 名字是分批回来的：搜索框里已经有字时，晚到的名字可能让原本不匹配的行
+     变得匹配（比如刚回来"Camera"，用户搜的是"相机"）。重画一次，省得再敲。 */
+  const pq = document.getElementById('pk-q');
+  if(typeof renderPicker === 'function' && pq && pq.value.trim() &&
+     document.getElementById('picker') && document.getElementById('picker').style.display !== 'none')
+    renderPicker();
+  const dq = document.getElementById('ds-q');
+  if(typeof renderDsPicker === 'function' && dq && dq.value.trim() &&
+     document.getElementById('ds-picker') && document.getElementById('ds-picker').style.display !== 'none')
+    renderDsPicker();
+}
+
+/* 内置深睡豁免的中文名：APK 里微信的 label 可能是 WeChat、企业微信甚至解析不出来。
+   这里按 scripts/builtin_white.txt 覆盖显示名（只影响显示，不参与任何匹配）。
+   启动时先取，之后 ensureLabels 看到已有名字就会跳过这个包，不会被英文标签盖回去。 */
+async function loadBuiltinNames(){
+  try{
+    const out = await api('builtin_white');
+    let n = 0;
+    out.split('\n').forEach(l=>{
+      const i = l.indexOf('\t');
+      if(i < 1) return;
+      const v = l.slice(i + 1).trim();
+      if(v){ LABELS[l.slice(0, i)] = v; BUILTIN_LABELS[l.slice(0, i)] = v; n++; }
+    });
+    if(n) paintLabels();
+  }catch(_){}
+}
+
+/* 系统应用名兜底：只填 APK label 解析不出来的那些，不覆盖已有英文名。 */
+async function loadBuiltinLabels(){
+  if(FALLBACK_LOADED) return;
+  try{
+    const out = await api('builtin_labels');
+    let n = 0;
+    out.split('\n').forEach(l=>{
+      const i = l.indexOf('\t');
+      if(i < 1) return;
+      const v = l.slice(i + 1).trim();
+      if(v){ FALLBACK_LABELS[l.slice(0, i)] = v; n++; }
+    });
+    FALLBACK_LOADED = true;
+    if(n) paintLabels();
+  }catch(_){}
+}
+/* 图标：会话内缓存 + 小批量取。
+ * 一行一个 api('icon') 在列表页就是几十次 root 调用，而且每次重画列表
+ * （切页、加删名单）都会重取一遍。缓存按包名存图；第一次见到的包攒 40ms
+ * 再去一次 icons，后端一次循环取完，只有一次桥接往返。
+ *
+ * 一条为什么是 8 个：未缓存的图标要现解 APK，24 个一批在真机上能跑到
+ * 两秒以上（再冷一点会撞 exec 的 12 秒超时）。小批失败的影响面也小。
+ * 调用失败或回包里少了某一行，**不能**记成"这个包没有图"——那会让它
+ * 整个会话都不再重试；放回队列再试一次，两次都不行才留色块。 */
+const ICONS = {};
+const ICON_Q = {};
+const ICON_TRY = {};
+let iconT = 0;
+/* 滑动时不要发 root 调用：管理器的 exec 是同步的，滑动中每批图标都会卡一帧。
+   先攒在 ICON_Q，停手 200ms 后再统一取。 */
+let scrollStamp = 0, scrollTimer = 0;
+function markScroll(){
+  scrollStamp = Date.now();
+  clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(()=>{
+    if(Object.keys(ICON_Q).length) flushIcons();
+  }, 220);
+}
+try{ window.addEventListener('scroll', markScroll, {passive:true}); }catch(_){}
+try{ document.addEventListener('scroll', markScroll, {passive:true, capture:true}); }catch(_){}
+const ICON_URI = /^data:image\/(png|webp|jpeg|gif);base64,/;
+
+function applyIcon(pkg, ph, uri, detached){
+  if(!uri || !ICON_URI.test(uri) || !ph) return;
+  // 异步回来时元素可能已经跟着旧列表被换掉了，连不上的就别画。
+  // 但行构造时（还没 append 进文档）要允许画：缓存命中走的就是这条路。
+  if(!detached && !ph.isConnected) return;
+  const img = document.createElement('img');
+  img.className = 'ico';
+  img.alt = '';
+  img.src = uri;
+  // 解不开就退回色块，不留破图占位
+  img.onerror = () => { if(img.parentNode) img.parentNode.replaceChild(ph, img); };
+  /* 取到了但可能不是桌面图标（见 makeIconEl）。保留 title 说明，
+     让用户能区分"图标出来了"和"图标是对的"。 */
+  img.title = pkg + '\n这是从 APK 里挑出的一张方图。\n' +
+    '若它不是桌面上的那个图标，属正常：资源名被缩短的包只能靠尺寸猜。';
+  ph.replaceWith(img);
+}
+
+function loadIcon(pkg, ph){
+  if(ICONS[pkg] !== undefined){ applyIcon(pkg, ph, ICONS[pkg]); return; }
+  (ICON_Q[pkg] = ICON_Q[pkg] || []).push(ph);
+  clearTimeout(iconT);
+  iconT = setTimeout(flushIcons, 40);
+}
+
+async function flushIcons(){
+  /* 还在滑动：先把这一批留在队列里，停手后再发。 */
+  if(Date.now() - scrollStamp < 200){
+    clearTimeout(iconT);
+    iconT = setTimeout(flushIcons, 200);
+    return;
+  }
+  const all = Object.keys(ICON_Q);
+  if(!all.length) return;
+  const batch = all.slice(0, 8);
+  const wait = {};
+  batch.forEach(p=>{ wait[p] = ICON_Q[p]; delete ICON_Q[p]; });
+  const got = {};
+  let ok = false;
+  try{
+    const out = await api.apply(null, ['icons'].concat(batch));
+    out.split('\n').forEach(l=>{
+      const i = l.indexOf('\t');
+      // 回包里每个请求过的包都有一行（没图是空 URI），所以"没这行"本身就是异常
+      if(i > 0) got[l.slice(0, i)] = l.slice(i + 1).trim();
+    });
+    ok = true;
+  }catch(_){ /* 超时 / 桥接错误：整批当作没取到 */ }
+  batch.forEach(p=>{
+    if(ok && got[p] !== undefined){
+      ICONS[p] = got[p];                       // 空串 = 后端确认没有图
+      (wait[p] || []).forEach(ph=>applyIcon(p, ph, ICONS[p]));
+      return;
+    }
+    const n = (ICON_TRY[p] || 0) + 1;
+    ICON_TRY[p] = n;
+    if(n >= 2){
+      ICONS[p] = '';                           // 两次都不行：会话内留色块
+      (wait[p] || []).forEach(ph=>applyIcon(p, ph, ''));
+    }else{
+      ICON_Q[p] = (ICON_Q[p] || []).concat(wait[p] || []);
+    }
+  });
+  if(Object.keys(ICON_Q).length) setTimeout(flushIcons, 0);
+}
+
+async function loadGames(){
+  try{
+    const out = await api('games_list');
+    gpkgs = out.split('\n').map(s=>s.trim()).filter(s=>s && s[0] !== '#');
+    const box = document.getElementById('glist');
+    box.innerHTML = '';
+    document.getElementById('gcount').textContent = gpkgs.length;
+    if(!gpkgs.length){
+      box.innerHTML = '<div class="empty">这台机上没有已安装且在名单里的应用<br>在上方输入包名添加</div>';
+      return;
+    }
+    gpkgs.forEach(p=>{
+      // 包名放到 data-pkg，不拼 onclick：onclick 里塞带引号的包名会截断 HTML 属性。
+      const row = pkgRow(p);
+      const btn = document.createElement('button');
+      btn.className = 'rm';
+      btn.textContent = '×';
+      btn.dataset.pkg = p;
+      row.el.appendChild(btn);
+      box.appendChild(row.el);
+    });
+    box.querySelectorAll('button.rm').forEach(b=>{
+      b.onclick = ()=>delGame(b.dataset.pkg);
+    });
+    ensureLabels(gpkgs);
+  }catch(e){ toast(e.message, true); }
+}
+
+async function addGame(){
+  const inp = document.getElementById('gadd');
+  const v = inp.value.trim();
+  if(!v) return toast('请输入包名', true);
+  try{
+    await api('games_add', v);
+    inp.value = '';
+    toast('已添加');
+    loadGames();
+  }catch(e){ toast(e.message, true); }
+}
+
+async function delGame(pkg){
+  try{
+    await api('games_del', pkg);
+    toast('已移除');
+    loadGames();
+  }catch(e){ toast(e.message, true); }
+}
+
+/* 候选列表（发行商词典）。
+ * 这一栏只是建议：守护前台匹配只认 games.txt 的整串包名，
+ * 词典命中不等于它是游戏，必须用户点 ＋ 才写进名单。
+ * 每行把命中的词显示在旁边，便于判断是否误收。 */
+async function loadSuggest(){
+  const box = document.getElementById('gsug');
+  try{
+    const out = await api('games_suggest');
+    const rows = out.split('\n').map(s=>s.trim()).filter(Boolean);
+    box.innerHTML = '';
+    if(!rows.length){
+      box.innerHTML = '<div class="empty">没有新候选<br>这台机上的游戏都已经在名单里了</div>';
+      return;
+    }
+    // 这一栏自己攒一份包名清单，渲染完一次点名要名字。
+    // 不复用 gpkgs：候选栏里的包还没进名单，两者不同。
+    const _gp = [];
+    rows.forEach(r=>{
+      const t = r.split('\t');
+      const pkg = (t[0] || '').trim(), why = (t[1] || '').trim();
+      if(!pkg) return;
+      _gp.push(pkg);
+      const row = pkgRow(pkg);
+      if(why){
+        const tag = document.createElement('span');
+        tag.className = 'chip';
+        tag.textContent = why;
+        tag.title = '发行商词典里命中的段';
+        row.el.appendChild(tag);
+      }
+      const btn = document.createElement('button');
+      // 不复用 .rm：那是"删除"的外观（点下去会变红），这里是"加进来"。
+      btn.className = 'add';
+      btn.textContent = '＋';
+      btn.dataset.pkg = pkg;
+      row.el.appendChild(btn);
+      box.appendChild(row.el);
+    });
+    box.querySelectorAll('button.add').forEach(b=>{
+      b.onclick = ()=>{
+        api('games_add', b.dataset.pkg)
+           .then(()=>{ toast('已加进名单'); loadGames(); loadSuggest(); })
+           .catch(e=>toast(e.message, true));
+      };
+    });
+    ensureLabels(_gp);
+  }catch(e){
+    // 扫描失败要显示出来，避免空栏被当成"没有候选"（实际可能是 pm 没返回包列表）。
+    box.innerHTML = '<div class="empty">扫描失败：' +
+      String(e.message || e).replace(/[<>]/g,'') + '</div>';
+  }
+}
+
+/* ── 分应用档位 ──
+ * 数据在 app_modes.conf：pkg=full / pkg=NN / pkg=NN:NN。
+ * 入口是"从已安装列表里挑"，不是"当前前台"——这一页是在管理器里打开的，
+ * 那一刻守护抓到的前台永远是管理器自己，按前台设等于只能给管理器设档位。 */
+const MODE_OPTS = [['full','满血'],['keep','熄屏也封顶'],['90','90%'],['80','80%'],
+                   ['70','70%'],['60','60%'],['50','50%'],['40','40%'],['30','30%']];
+const GPU_MODE_OPTS = [['','GPU 跟随全局'],['90','GPU 90%'],['80','GPU 80%'],
+                       ['70','GPU 70%'],['60','GPU 60%'],['50','GPU 50%'],
+                       ['40','GPU 40%'],['30','GPU 30%']];
+let APPS = null, MODED = {};
+/* 分应用档位多一份清单：第三方 + 系统里有桌面的应用（相机、设置…）。
+   深睡豁免仍只用 APPS（第三方）：把系统常驻应用加进 Doze 白名单没有意义。 */
+let APPS_MODE = null;
+/* 选择器一次只画 80 行；滚动到底点「显示更多」再追加。
+   400 行一起画 + 每个图标一次 root 调用，在管理器里滑起来就是卡。 */
+let PK_LIMIT = 80;
+
+/* 档位值四种写法：full / keep / 70 / 70:40（GPU 段可空）。 */
+function parseModeVal(v){
+  if(v === 'full') return {full:true, keep:false, cpu:'', gpu:''};
+  if(v === 'keep') return {full:false, keep:true, cpu:'keep', gpu:''};
+  const i = String(v).indexOf(':');
+  if(i >= 0) return {full:false, keep:false, cpu:String(v).slice(0,i).trim(),
+                     gpu:String(v).slice(i+1).trim()};
+  return {full:false, keep:false, cpu:String(v), gpu:''};
+}
+function joinModeVal(cpu, gpu){
+  if(cpu === 'full' || cpu === 'keep') return cpu;
+  return gpu ? cpu + ':' + gpu : cpu;
+}
+function modeText(v){
+  const p = parseModeVal(v);
+  if(p.full) return '满血';
+  if(p.keep) return '熄屏也封顶';
+  const out = [];
+  if(p.cpu) out.push('CPU ' + p.cpu + '%');
+  if(p.gpu) out.push('GPU ' + p.gpu + '%');
+  return out.join(' · ') || v;
+}
+
+function modeSelect(pkg, cur){
+  // 原来是 <select>，弹的是系统对话框；换成自绘下拉后，
+  // 容器上照样有 .value，调用处 sel.onchange = … 也照旧生效。
+  const p = parseModeVal(cur);
+  const cv = p.full ? 'full' : (p.keep ? 'keep' : p.cpu);
+  // 当前值必须能在下拉里出现：手写过 75% 这种非预设值时，
+  // 若不加入选项，一打开就显示第一项，随手一点就改掉了原值。
+  const opts = MODE_OPTS.some(o => o[0] === cv)
+    ? MODE_OPTS : [[cv, cv === 'full' ? '满血'
+                        : cv === 'keep' ? '熄屏也封顶'
+                        // 下面的 map 会统一加 "CPU " 前缀，这里只写纯值
+                        : cv ? cv + '%' : '跟随全局']].concat(MODE_OPTS);
+  const sel = ddEl(opts.map(([v,t]) =>
+    [v, (v === 'full' || v === 'keep' || v === 'custom') ? t : 'CPU ' + t]), cv, 'md-sel');
+  sel.dataset.pkg = pkg;
+  return sel;
+}
+
+function modeGpuSelect(pkg, cur){
+  const p = parseModeVal(cur);
+  const gv = p.gpu;
+  const opts = GPU_MODE_OPTS.some(o => o[0] === gv)
+    ? GPU_MODE_OPTS : [[gv, 'GPU ' + gv + '%']].concat(GPU_MODE_OPTS);
+  const sel = ddEl(opts, gv, 'md-sel');
+  sel.dataset.pkg = pkg;
+  return sel;
+}
+
+/* modes_list 的值后面可能跟一个 learn 词尾（这条是学习写回来的）。
+   不剥掉的话下拉框的当前值就成了 "75 learn"，在选项表里认不出来就回落成
+   第一项——表现是"明明写着 75%，一打开显示 80%"。 */
+function splitMode(r){
+  const i = r.indexOf('=');
+  if(i < 1) return null;
+  const pkg = r.slice(0, i).trim();
+  let v = r.slice(i + 1).trim();
+  const learned = /(^|\s)learn$/.test(v);
+  if(learned) v = v.replace(/\s*learn$/, '').trim();
+  return pkg && v ? { pkg, val: v, learned } : null;
+}
+
+async function loadModes(){
+  try{
+    const out = await api('modes_list');
+    const rows = out.split('\n').map(s=>s.trim()).filter(s=>s && s.indexOf('#') !== 0)
+                    .map(splitMode).filter(Boolean);
+    const box = document.getElementById('mode-rows');
+    box.innerHTML = '';
+    MODED = {};
+    rows.forEach(r=>{ MODED[r.pkg] = r.val; });
+    if(!rows.length){
+      box.innerHTML = '<div class="empty">还没有专属档位<br>下面「＋ 添加应用」从已安装列表里挑</div>';
+    }
+    rows.forEach(r=>{
+      const row = pkgRow(r.pkg);
+      row.el.classList.add('pk-mode');
+      const pv = parseModeVal(r.val);
+      const sel = modeSelect(r.pkg, r.val);
+      const gsel = (pv.full || pv.keep) ? null : modeGpuSelect(r.pkg, r.val);
+      sel.onchange = ()=>setMode(r.pkg, joinModeVal(sel.value, gsel ? gsel.value : ''));
+      if(gsel) gsel.onchange = ()=>setMode(r.pkg, joinModeVal(sel.value, gsel.value));
+      if(r.learned){
+        /* 学习写回来的那条给个来源标。点一下按当前值重写一遍（走 modes_set
+           就不带 #learn 了），这条从此归你管，学习不会再动它。 */
+        const tag = document.createElement('div');
+        tag.className = 'src';
+        tag.textContent = '学出来';
+        tag.title = '学习写回来的值，点一下改成你自己定的';
+        tag.onclick = ()=>setMode(r.pkg, r.val);
+        row.el.appendChild(tag);
+      }
+      const btn = document.createElement('button');
+      btn.className = 'rm';
+      btn.textContent = '×';
+      btn.onclick = ()=>delMode(r.pkg);
+      row.el.appendChild(sel);
+      if(gsel) row.el.appendChild(gsel);
+      row.el.appendChild(btn);
+      box.appendChild(row.el);
+    });
+    renderPicker();
+    // MODED 就是这一屏要点名的那批：档位通常只有几个，一趟就够
+    ensureLabels(Object.keys(MODED));
+  }catch(e){ toast(e.message, true); }
+}
+
+async function setMode(pkg, val){
+  try{
+    await api('modes_set', pkg, val);
+    toast('已设为' + modeText(val) + '：' + pkg);
+    loadModes();
+    setTimeout(loadStatus, 900);   /* 守护一个巡检周期内就按新档位封顶 */
+  }catch(e){ toast(e.message, true); loadModes(); }
+}
+
+async function delMode(pkg){
+  try{
+    await api('modes_del', pkg);
+    toast('已移除该应用档位');
+    loadModes();
+    setTimeout(loadStatus, 900);
+  }catch(e){ toast(e.message, true); }
+}
+
+/* 应用选择器：图标 + 包名，点一下就按上面选好的档位写入。
+ * 列表只在第一次展开时拉一次（apps_list 走一趟 pm），之后缓存；
+ * 图标滚进可视区才取，节点数可控。 */
+function togglePicker(){
+  const p = document.getElementById('picker');
+  const show = p.style.display === 'none';
+  p.style.display = show ? '' : 'none';
+  document.getElementById('pk-btn').textContent = show ? '－ 收起' : '＋ 添加应用';
+  if(show && (APPS === null || APPS_MODE === null)) loadApps();
+}
+
+let SHOW_ALL_APPS = false;
+/* 一进入搜索就后台补全全部应用名（分页只画 80 行，但搜索要匹配全量）。
+   只补一次；每批 labels 回来 paintLabels 会重排当前搜索结果。 */
+let SEARCH_LABELS_ARMED = false, SEARCH_LABELS_DS_ARMED = false;
+function setAppsAll(on){
+  SHOW_ALL_APPS = !!on;
+  const a = document.getElementById('pk-all'), b = document.getElementById('ds-all');
+  if(a) a.checked = SHOW_ALL_APPS;
+  if(b) b.checked = SHOW_ALL_APPS;
+  loadApps(SHOW_ALL_APPS);
+}
+
+async function loadApps(forceAll){
+  const all = (forceAll === undefined) ? SHOW_ALL_APPS : !!forceAll;
+  SHOW_ALL_APPS = all;
+  const a = document.getElementById('pk-all'), b = document.getElementById('ds-all');
+  if(a) a.checked = all;
+  if(b) b.checked = all;
+  const list = document.getElementById('pk-list');
+  list.innerHTML = '<div class="empty">正在读取已安装应用…</div>';
+  try{
+    await loadBuiltinLabels();
+    /* 默认只列第三方 + 有桌面入口的系统应用；勾选后连服务/组件一起列，
+       给"要选某个系统包但列表里没有"的机器兜底。后端在 query-activities
+       被裁掉时也会自动回退到全部系统包。 */
+    const [third, mode] = await Promise.all([
+      all ? api('apps_list', 'all') : api('apps_list'),
+      all ? api('mode_apps', 'all') : api('mode_apps')
+    ]);
+    const parse = out => out.split('\n').map(s=>s.trim()).filter(Boolean);
+    APPS = parse(third);
+    APPS_MODE = parse(mode);
+    PK_LIMIT = 80; DS.limit = 80;
+    SEARCH_LABELS_ARMED = false; SEARCH_LABELS_DS_ARMED = false;
+    renderPicker();
+    renderDsPicker();
+  }catch(e){
+    /* 已经读到列表却在渲染阶段抛错时，别说成"读不到应用"——两种问题的排查方向完全不同。 */
+    const had = (APPS && APPS.length) || (APPS_MODE && APPS_MODE.length);
+    APPS = []; APPS_MODE = [];
+    const msg = String(e.message || e).replace(/[<>]/g,'');
+    const what = had ? '应用列表渲染失败' : '读不到已安装应用';
+    list.innerHTML = '<div class="empty">' + what + '：' + msg + '</div>';
+    const dl = document.getElementById('ds-list');
+    if(dl) dl.innerHTML = '<div class="empty">' + what + '：' + msg + '</div>';
+  }
+}
+
+function pkVal(){
+  const m = document.getElementById('pk-mode').value;
+  if(m === 'full' || m === 'keep') return m;
+  let cv = m;
+  if(m === 'custom'){
+    const v = parseInt(document.getElementById('pk-custom').value, 10);
+    if(!(v >= 1 && v <= 100)) return null;
+    cv = String(v);
+  }
+  let gv = document.getElementById('pk-gpu').value;
+  if(gv === 'custom'){
+    const v = parseInt(document.getElementById('pk-gpu-custom').value, 10);
+    if(!(v >= 1 && v <= 100)) return null;
+    gv = String(v);
+  }
+  return joinModeVal(cv, gv);
+}
+
+function pkModeChange(){
+  const m = document.getElementById('pk-mode').value;
+  const noGpu = m === 'full' || m === 'keep';
+  document.getElementById('pk-custom-row').style.display =
+    (!noGpu && m === 'custom') ? '' : 'none';
+  document.getElementById('pk-gpu-row').style.display = noGpu ? 'none' : '';
+  document.getElementById('pk-gpu-custom-row').style.display =
+    (!noGpu && document.getElementById('pk-gpu').value === 'custom') ? '' : 'none';
+}
+
+/* 系统应用在 APK 里的名字常是英文（相机 = Camera、设置 = Settings），
+   用户搜的是中文。这里只做**搜索**的同义词，不改显示名 ——
+   名字仍以 APK 里的 android:label 为准，不替厂商翻译。 */
+const SEARCH_ALIAS = {
+  '相机': 'camera', '设置': 'settings', '时钟': 'clock alarm',
+  '日历': 'calendar', '相册': 'gallery photo', '联系人': 'contacts',
+  '信息': 'message mms', '短信': 'message mms', '电话': 'dialer phone',
+  '计算器': 'calculator', '文件': 'file documents', '天气': 'weather',
+  '音乐': 'music', '视频': 'video', '录音': 'record', '笔记': 'note',
+  '浏览器': 'browser', '商店': 'market store', '钱包': 'wallet',
+  '邮件': 'mail email', '健康': 'health', '游戏': 'game gamecenter',
+};
+function searchTerms(q){
+  const t = [q];
+  for (const k in SEARCH_ALIAS) {
+    // 输入"相"也认"相机"：用户不用把词打全
+    if (k.indexOf(q) >= 0 || q.indexOf(k) >= 0)
+      t.push.apply(t, SEARCH_ALIAS[k].split(' '));
+  }
+  return t;
+}
+function searchHit(p, terms){
+  const hay = p.toLowerCase() + '\n' + ((LABELS[p] || (typeof FALLBACK_LABELS === 'undefined' ? '' : FALLBACK_LABELS[p]) || '')).toLowerCase();
+  return terms.some(t => hay.indexOf(t) >= 0);
+}
+
+/* 搜索框每敲一个键就重画：攒 150ms，并且回到第一页 80 行。 */
+let pkQT = 0;
+function queuePicker(){
+  clearTimeout(pkQT);
+  pkQT = setTimeout(()=>{
+    PK_LIMIT = 80;
+    if(!SEARCH_LABELS_ARMED && (document.getElementById('pk-q').value || '').trim()){
+      SEARCH_LABELS_ARMED = true;
+      if(APPS_MODE && APPS_MODE.length) ensureLabels(APPS_MODE);
+    }
+    renderPicker();
+  }, 150);
+}
+
+function renderPicker(){
+  if(APPS_MODE === null) return;
+  const list = document.getElementById('pk-list');
+  const q = (document.getElementById('pk-q').value || '').trim().toLowerCase();
+  const terms = q ? searchTerms(q) : null;
+  // 已经设过档位的应用在上面的列表里改；候选栏只放还没设的。
+  const shown = APPS_MODE.filter(p => !MODED[p] && (!terms || searchHit(p, terms)));
+  const left = APPS_MODE.filter(p => !MODED[p]).length;
+  document.getElementById('pk-count').textContent =
+    '已安装应用 ' + APPS_MODE.length + ' 个' +
+    (SHOW_ALL_APPS ? '（含全部系统应用）' : '（含桌面系统应用）') +
+    '，未设档位 ' + left + ' 个' +
+    (q ? '（已按"' + q + '"过滤）' : '');
+  list.innerHTML = '';
+  if(!APPS_MODE.length){
+    list.innerHTML = '<div class="empty">这台机上没读到应用</div>';
+    return;
+  }
+  if(!shown.length){
+    list.innerHTML = '<div class="empty">' + (q ? '没有匹配的应用' : '应用都设过档位了') + '</div>';
+    return;
+  }
+  const page = shown.slice(0, PK_LIMIT);
+  page.forEach(p=>{
+    const row = pkgRow(p);
+    const btn = document.createElement('button');
+    btn.className = 'add';
+    btn.textContent = '＋';
+    btn.onclick = ()=>{
+      const v = pkVal();
+      if(!v){ toast('自定义百分比要在 1~100 之间', true); return; }
+      setMode(p, v);
+    };
+    row.el.appendChild(btn);
+    list.appendChild(row.el);
+  });
+  if(shown.length > PK_LIMIT){
+    const more = document.createElement('button');
+    more.className = 'more';
+    more.style.cssText = 'width:100%;margin:8px 0;padding:10px';
+    more.textContent = '显示更多（还有 ' + (shown.length - PK_LIMIT) + ' 个）';
+    more.onclick = ()=>{ PK_LIMIT += 80; renderPicker(); };
+    list.appendChild(more);
+  }
+  /* 只给这一页点名要名字：一次解几百个包会顶到调用超时，
+     滚动时也不该再发 root 调用。 */
+  ensureLabels(page);
+}
+
+/* ── 深度睡眠 ──
+ * 数据来自 api.sh：ds_get 带白名单（首次加载），ds_state 只给状态与榜单（2 秒轮询）。
+ * 唤醒榜格式 pkg:次数:是否白名单，逗号分隔，最多 12 条。 */
+const DS = {enable:0, alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[], limit:80};
+
+function dsBoard(v){
+  if(!v) return [];
+  return v.split(',').map(x=>{
+    const m = /^([^:]+):(\d+):([01])$/.exec(x);
+    return m ? {pkg:m[1], cnt:+m[2], wl:m[3] === '1'} : null;
+  }).filter(Boolean);
+}
+
+function parseDs(text){
+  const o = {enable:0, alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[]};
+  String(text || '').split('\n').forEach(l=>{
+    const i = l.indexOf('=');
+    if(i < 0) return;
+    const k = l.slice(0, i), v = l.slice(i + 1).trim();
+    if(k === 'white'){ if(v) o.white[v] = 1; }
+    else if(k === 'dsw') o.run = dsBoard(v);
+    else if(k === 'dswc') o.cur = dsBoard(v);
+    else if(k === 'dsactive') o.active = +v || 0;
+    else if(k === 'enable' || k === 'alive' || k === 'paused' || k === 'wcsince') o[k] = +v || 0;
+  });
+  return o;
+}
+
+function paintDsStatus(){
+  const box = document.getElementById('ds-st');
+  if(!box) return;
+  const t = document.getElementById('ds-stxt'), m = document.getElementById('ds-meta');
+  box.className = 'ds-st';
+  /* 开关动作要等守护拉起/退出（1~2 秒）。这段时间先按用户点的方向画，
+     否则开关看着像没点动；pending 也用来挡住这期间回来的旧轮询。 */
+  if(DS.pending){
+    box.classList.add('wait');
+    t.textContent = DS.pending > 0 ? '正在开启…' : '正在关闭…';
+    m.textContent = DS.pending > 0 ? '正在启动后台冻结' : '正在解冻并还原';
+    document.getElementById('ds_enable').checked = !!DS.enable;
+    return;
+  }
+  if(!DS.enable){
+    box.classList.add('off'); t.textContent = '未启用'; m.textContent = '打开后熄屏 20 秒开始冻结后台';
+  }else if(DS.paused){
+    box.classList.add('off'); t.textContent = '模块已暂停'; m.textContent = '恢复后自动接上';
+  }else if(!DS.alive){
+    box.classList.add('off'); t.textContent = '守护没在跑'; m.textContent = '关掉再打开开关';
+  }else if(DS.active){
+    box.classList.add('on'); t.textContent = '深度睡眠中'; m.textContent = '亮屏或插电立即解冻';
+  }else{
+    box.classList.add('wait'); t.textContent = '监测中'; m.textContent = '熄屏 20 秒后开始压制后台';
+  }
+  document.getElementById('ds_enable').checked = !!DS.enable;
+}
+
+function paintDsWhite(){
+  const box = document.getElementById('ds-white');
+  if(!box) return;
+  const list = Object.keys(DS.white);
+  box.innerHTML = '';
+  if(!list.length){
+    box.innerHTML = '<div class="empty">还没有豁免应用<br>深睡时它们也会被一起压住</div>';
+    return;
+  }
+  list.forEach(p=>{
+    const row = pkgRow(p);
+    const btn = document.createElement('button');
+    btn.className = 'rm';
+    btn.textContent = '×';
+    btn.onclick = ()=>delDsWhite(p);
+    row.el.appendChild(btn);
+    box.appendChild(row.el);
+  });
+  ensureLabels(list);
+  if(document.getElementById('ds-picker').style.display !== 'none') renderDsPicker();
+}
+
+function paintDsBoard(id, items){
+  const box = document.getElementById(id);
+  if(!box) return;
+  box.innerHTML = '';
+  if(!items.length){
+    box.innerHTML = '<div class="empty">' +
+      (DS.active ? '深睡期间还没有应用唤醒系统' : '还没有记录') + '</div>';
+    return;
+  }
+  const max = items[0].cnt || 1;
+  items.slice(0, 12).forEach((it, i)=>{
+    const row = document.createElement('div'); row.className = 'ds-row';
+    const r = document.createElement('span');
+    r.className = 'ds-rank' + (i < 3 ? ' top' : '');
+    r.textContent = String(i + 1);
+    const n = document.createElement('span'); n.className = 'ds-name'; n.title = it.pkg;
+    n.dataset.pkg = it.pkg;
+    n.textContent = (LABELS[it.pkg] || (typeof FALLBACK_LABELS === 'undefined' ? '' : FALLBACK_LABELS[it.pkg])) || it.pkg;
+    if(it.wl){
+      const w = document.createElement('span'); w.className = 'wl'; w.textContent = '白名单';
+      n.appendChild(w);
+    }
+    const bw = document.createElement('span'); bw.className = 'ds-barw';
+    const b = document.createElement('span'); b.className = 'ds-bar' + (it.wl ? ' wl' : '');
+    b.style.width = (it.cnt / max * 100).toFixed(1) + '%';
+    bw.appendChild(b);
+    const c = document.createElement('span'); c.className = 'ds-cnt'; c.textContent = it.cnt;
+    row.appendChild(r); row.appendChild(n); row.appendChild(bw); row.appendChild(c);
+    box.appendChild(row);
+  });
+  ensureLabels(items.map(x=>x.pkg));
+}
+
+function paintDsMeta(){
+  const n = document.getElementById('ds-run-n');
+  if(n) n.textContent = DS.active ? '累计中' : '上次记录';
+  const s = document.getElementById('ds-since');
+  if(!s) return;
+  if(!DS.wcsince){ s.textContent = ''; return; }
+  const d = new Date(DS.wcsince * 1000);
+  s.textContent = '自 ' + (d.getMonth() + 1) + '/' + d.getDate() + ' ' +
+    String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+let DS_BOARD_SIG = '';
+function paintDsBoards(){
+  // 2 秒轮询大多数时候数据没变；重建 DOM 会把柱条的过渡和列表滚动位置冲掉。
+  const sig = JSON.stringify([DS.active, DS.wcsince, DS.run, DS.cur]);
+  if(sig === DS_BOARD_SIG) return;
+  DS_BOARD_SIG = sig;
+  paintDsBoard('ds-run', DS.run);
+  paintDsBoard('ds-cur', DS.cur);
+  paintDsMeta();
+}
+
+function applyDs(st, full){
+  if(full) DS.white = st.white;
+  DS.enable = st.enable; DS.alive = st.alive; DS.paused = st.paused;
+  DS.active = st.active;
+  DS.wcsince = st.wcsince; DS.run = st.run; DS.cur = st.cur;
+  paintDsStatus();
+  paintDsBoards();
+  if(full) paintDsWhite();
+}
+
+async function loadDs(full){
+  const my = dsSeq;
+  try{
+    const out = await api(full ? 'ds_get' : 'ds_state');
+    // 请求发出后用户点了开关：这份是旧状态，画回去会让开关自己弹回来。
+    if(my !== dsSeq || DS.pending) return;
+    applyDs(parseDs(out), !!full);
+  }catch(e){
+    if(full && document.getElementById('ds-stxt')){
+      document.getElementById('ds-stxt').textContent = '读不到深度睡眠状态';
+    }
+  }
+}
+
+/* 开关切的是"以后要不要常驻"，后端要先写配置、再拉起/停掉 shell 守护，
+   不可能瞬时完成。这里先把开关和状态条按用户点的方向画出来，再等回执；
+   失败才弹回去。 */
+let dsBusy = false, dsSeq = 0;
+async function setDsEnable(on){
+  if(dsBusy){
+    // 忙碌期间再点：不排队（第二次点击只会把目标状态绕一圈），把开关拨回当前目标。
+    document.getElementById('ds_enable').checked = !!DS.enable;
+    return;
+  }
+  dsBusy = true;
+  dsSeq++;
+  DS.pending = on ? 1 : -1;
+  DS.enable = on ? 1 : 0;
+  paintDsStatus();
+  try{
+    await api('ds_set', 'enable', on ? '1' : '0');
+    DS.pending = 0;
+    toast(on ? '已开启深度睡眠' : '已关闭深度睡眠');
+    await loadDs(true);
+  }catch(e){
+    DS.pending = 0;
+    DS.enable = on ? 0 : 1;
+    paintDsStatus();
+    toast(e.message, true);
+    loadDs(true);
+  }finally{ dsBusy = false; }
+}
+
+async function addDsWhite(p){
+  try{
+    await api('ds_white_add', p);
+    DS.white[p] = 1;
+    toast('已加入豁免：' + p);
+    paintDsWhite();
+    loadDs(false);
+  }catch(e){ toast(e.message, true); }
+}
+
+async function delDsWhite(p){
+  try{
+    await api('ds_white_del', p);
+    delete DS.white[p];
+    toast('已移出豁免');
+    paintDsWhite();
+    loadDs(false);
+  }catch(e){ toast(e.message, true); }
+}
+
+function toggleDsPicker(){
+  const p = document.getElementById('ds-picker');
+  const show = p.style.display === 'none';
+  p.style.display = show ? '' : 'none';
+  document.getElementById('ds-add-btn').textContent = show ? '－ 收起' : '＋ 添加应用';
+  if(show){
+    if(APPS === null) loadApps(); else renderDsPicker();
+  }
+}
+
+let dsQT = 0;
+function queueDsPicker(){
+  clearTimeout(dsQT);
+  dsQT = setTimeout(()=>{
+    DS.limit = 80;
+    if(!SEARCH_LABELS_DS_ARMED && (document.getElementById('ds-q').value || '').trim()){
+      SEARCH_LABELS_DS_ARMED = true;
+      if(APPS && APPS.length) ensureLabels(APPS);
+    }
+    renderDsPicker();
+  }, 150);
+}
+
+function renderDsPicker(){
+  const list = document.getElementById('ds-list');
+  if(!list) return;
+  if(APPS === null){
+    list.innerHTML = '<div class="empty">点「添加应用」加载已安装列表</div>';
+    return;
+  }
+  const q = (document.getElementById('ds-q').value || '').trim().toLowerCase();
+  const terms = q ? searchTerms(q) : null;
+  const shown = APPS.filter(p => !DS.white[p] && (!terms || searchHit(p, terms)));
+  const left = APPS.filter(p => !DS.white[p]).length;
+  document.getElementById('ds-count').textContent =
+    '已安装应用 ' + APPS.length + ' 个' +
+    ((typeof SHOW_ALL_APPS !== 'undefined' && SHOW_ALL_APPS) ? '（含系统应用）' : '（第三方）') +
+    '，未加入豁免 ' + left + ' 个' +
+    (q ? '（已按"' + q + '"过滤）' : '');
+  list.innerHTML = '';
+  if(!shown.length){
+    list.innerHTML = '<div class="empty">' + (q ? '没有匹配的应用' : '都加进豁免了') + '</div>';
+    return;
+  }
+  const page = shown.slice(0, DS.limit);
+  page.forEach(p=>{
+    const row = pkgRow(p);
+    const btn = document.createElement('button');
+    btn.className = 'add';
+    btn.textContent = '＋';
+    btn.onclick = ()=>addDsWhite(p);
+    row.el.appendChild(btn);
+    list.appendChild(row.el);
+  });
+  if(shown.length > DS.limit){
+    const more = document.createElement('button');
+    more.className = 'more';
+    more.style.cssText = 'width:100%;margin:8px 0;padding:10px';
+    more.textContent = '显示更多（还有 ' + (shown.length - DS.limit) + ' 个）';
+    more.onclick = ()=>{ DS.limit += 80; renderDsPicker(); };
+    list.appendChild(more);
+  }
+  ensureLabels(page);
+}
+
+/* ── 维护 ── */
+async function ctl(cmd){
+  try{
+    await api(cmd);
+    const m = {restart:'守护已重启', pause:'已暂停', resume:'已恢复', stop:'已停止并恢复频率'};
+    toast(m[cmd] || '完成');
+    setTimeout(loadStatus, 900);
+  }catch(e){ toast(e.message, true); }
+}
+
+async function loadAbout(){
+  // 模块信息在一次 WebUI 会话里不会变：重进关于页直接画上次的结果，
+  // 少一次桥接往返（版本更新会重开页面，缓存不会跨版本）。
+  const box = document.getElementById('about');
+  if(loadAbout.cache){ box.innerHTML = loadAbout.cache; return; }
+  try{
+    const out = await api('about');
+    let body;
+    const i = out.indexOf('---PROP---');
+    if(i >= 0){
+      body = out.slice(i + 10);
+    }else{
+      /* 标记没打出来（有的 ROM 的 sh 会把 printf -- 的 -- 当格式串）：
+         直接从 module.prop 的第一行开始。-- 被吃掉时首行剩 "--id="，
+         下面统一剥掉行首减号。 */
+      const m = /(^|\n)-*(id|name|version|versionCode|author|description)=/.exec(out);
+      if(!m) throw new Error('about 输出里没有模块信息（后端版本可能不匹配）');
+      body = out.slice(m.index + (m[1] ? 1 : 0));
+    }
+    body = body.replace(/^-+(?=(?:id|name|version|versionCode|author|description)=)/gm, '');
+    const s = parse(body);
+    // module.prop 的键名是英文，这里映射成中文标签。
+    const LABEL = {name:'模块名称', version:'版本', author:'作者', id:'模块 ID',
+                   versionCode:'版本号'};
+    // 作者放第一行并带主页入口，便于用户找到更新。
+    const esc = t => String(t).replace(/[<>&"]/g,
+      c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    const ORDER = ['name','version','versionCode','id'];
+    let html = '';
+    if(s.author){
+      html += '<a class="kv author" href="' + AUTHOR_URL +
+              '" target="_blank" rel="noopener noreferrer">' +
+              '<div class="k">' + LABEL.author + '</div>' +
+              '<div class="v">' + esc(s.author) +
+              '<span class="go">点击进入主页查看更新</span></div></a>';
+    }
+    html += ORDER.filter(k=>s[k]).map(k=>
+      '<div class="kv" style="margin-bottom:7px"><div class="k">' + LABEL[k] + '</div>' +
+      '<div class="v">' + esc(s[k]) + '</div></div>'
+    ).join('');
+    // 图标取图状态：色块看不出是没装、资源名被缩短还是解不开，
+    // 显示最近一次的原因码，便于不用 adb 就能定位。
+    html += iconRow(out);
+    loadAbout.cache = html;
+    box.innerHTML = html;
+  }catch(e){ toast(e.message, true); }
+}
+
+/* ── 芯片适配 ── */
+/* 探测不到的机器只能人工适配，而适配是作者那一侧的事：
+   用户这边只做一件事 —— 把这台机的现场打包发出去。
+   改好的节点表随下一个模块版本一起发布，装机时落到数据目录，
+   守护在自动探测扑空时才按它兜底。页面上因此只有只读状态 + 导出。 */
+function ovrNote(t){
+  const d = document.createElement('div');
+  d.className = 'hint';
+  d.style.marginBottom = '7px';
+  d.textContent = t;
+  return d;
+}
+
+async function loadOvr(){
+  const box = document.getElementById('ovr');
+  if(!box) return;
+  let txt = '';
+  // 适配表状态在一次会话里是常量；重进关于页不重复问，但正文每次按
+  // 最新 lastSt 重画（核心数、GPU 是否接上这些来自 status）。
+  if(loadOvr.txt !== undefined) txt = loadOvr.txt;
+  else try{ txt = await api('ovr_show'); loadOvr.txt = txt; }
+  catch(e){ box.innerHTML = ''; box.appendChild(ovrNote('读不到适配状态：' + e.message)); return; }
+  const lines = txt.split('\n').filter(l => l !== '');
+  const on = /^ovr=1/.test(lines[0] || '');
+  const body = lines.slice(1);
+  box.innerHTML = '';
+  const st = lastSt || {};
+  box.appendChild(ovrNote('这台机现在：核心 ' + (st.ncores || '?') + ' 颗、档位 ' + (st.ntier || '?') +
+    ' 档、GPU 限频' + (st.gpu_ok === '1' ? '已接上' : (st.gpu_ok === '0' ? '没接上' : '未知'))));
+  if(on){
+    box.appendChild(ovrNote('在用作者适配的节点表（' + body.length + ' 条，随模块版本发布）：'));
+    body.forEach(l=>{
+      const d = document.createElement('div');
+      d.className = 'kv';
+      d.style.cssText = 'margin-bottom:5px;font-family:monospace;font-size:11.5px;word-break:break-all';
+      d.textContent = l;
+      box.appendChild(d);
+    });
+  } else {
+    box.appendChild(ovrNote('这台机的节点全靠自动探测，没用到适配表。'));
+  }
+}
+
+async function exportPkg(){
+  toast('正在打包这台机的现场…');
+  try{
+    const out = await api('pkg');
+    const hit = out.split('\n').filter(l => l.indexOf('OK ') === 0)[0];
+    if(!hit) throw new Error('没拿到落盘路径');
+    toast('已导出：' + hit.slice(3));
+  }catch(e){ toast('导出失败：' + e.message, true); }
+}
+
+/* 取图标的状态码，来自守护 stderr 或 api.sh 判定，含义：
+ *   NOSQUARE  没挑中方图候选 —— 常见于资源路径被缩短（res/aK.png），按特征也没找到方图
+ *   BADIMAGE  挑中候选但 base64 解不出（数据损坏或超出大小上限）
+ *   NOICON    有候选也没取到，原因不在上述两类
+ *   NOTINST   这个包没装
+ *   NODIR     缓存目录建不起来（ICON_DIR 默认在 /data/adb/soc_freqcap/icon，root 私有；
+ *             少数 ROM 限制 /data/adb，可用 SOCFREQ_ICON_DIR 换目录）
+ *   OK        取到了但来源没记上（老缓存或 .via 被清）
+ *   OK=DAEMON 守护解析 APK 给的
+ *   OK=UNZIP  unzip 兜底给的（主路失败）
+ *   UNKNOWN   还没取过 */
+const ICON_STATE = {
+  // 裸 OK 单独占一档：不写成 OK=DAEMON，否则 .via 丢失时无法区分守护给还是兜底给。
+  OK:       ['ok',   '图标正常（来源未记录：缓存是旧版写的）'],
+  'OK=DAEMON': ['ok','图标正常（守护解析 APK）'],
+  // OK=UNZIP 是诊断线索：兜底生效说明主路（守护解析中央目录）失败，出现得多需排查。
+  // 缓存命中时 api.sh 会读 .b64 旁边的 .via 带回这个后缀，否则只剩裸 OK。
+  'OK=UNZIP': ['ok', '图标正常（unzip 兜底：守护解析 APK 这条路失败了，值得看一眼这行）'],
+  NOTINST:  ['warn', '上一个包没安装，留色块'],
+  NODIR:    ['bad',  '缓存目录建不起来（/data/local/tmp 被限制？）'],
+  NOSQUARE: ['bad',  '没找到方图：包很可能把资源名缩短了（如 res/aK.png）'],
+  BADIMAGE: ['bad',  '找到候选但解不出图（文件损坏或超出 4MB 上限）'],
+  NOICON:   ['bad',  '取图失败，原因未知'],
+  OPENFAIL: ['bad',  'APK 打不开（路径或权限异常）'],
+  // 4GB 是硬边界：cdsz/cdoff 是 uint32_t，超过后偏移会被截断，
+  // 截断反而容易误判成"装得下"从而静默读错数据。
+  TOOBIG:   ['bad',  'APK 超过 4GB，没读中央目录'],
+  UNKNOWN:  ['',     '还没取过图标'],
+};
+// 兜底文案带上原码，而不是只显示"未知状态 X"：状态码本身有诊断价值。
+const iconStateOf = c => ICON_STATE[c] || ['bad', '未预期的图标状态：' + c];
+function iconRow(out){
+  const m = /^\s*ICONLAST=(\S*)\s*$/m.exec(out || '');
+  if(!m) return '';
+  // 主码和可选的 via 分开取，文案按合成后的完整码查表。
+  // 拆开是为了 via 段在有别的后缀时也能单独显示（目前仅 =UNZIP 一种）。
+  const whole = m[1];
+  const v = /=([A-Z]+)$/.exec(whole);
+  const st = iconStateOf(whole);
+  let extra = '';
+  if(v && v[1] && !ICON_STATE[whole]){
+    extra = '（via ' + v[1] + '）';
+  }
+  return '<div class="kv" style="margin-bottom:7px"><div class="k">图标</div>' +
+         '<div class="v ' + (st[0] ? st[0] : '') + '">' + st[1] + extra + '</div></div>';
+}
+
+/* ── tab ── */
+// 只看 DOM 状态判断当前页，不另存一份 tab 名，避免两份状态漂移。
+const homeVisible = ()=> document.getElementById('p-home').classList.contains('on');
+const sleepVisible = ()=> document.getElementById('p-sleep').classList.contains('on');
+
+document.querySelectorAll('.tabbar button').forEach(b=>{
+  b.onclick = ()=>{
+    document.querySelectorAll('.tabbar button').forEach(x=>x.classList.remove('on'));
+    document.querySelectorAll('.pg').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');
+    document.getElementById('p-' + b.dataset.p).classList.add('on');
+    window.scrollTo(0,0);
+    /* 切页先画，再发 root 调用。
+       管理器的 exec 是同步的：紧跟着发调用，这一帧要等调用回来才画，
+       数据多的页面（应用页一次要读名单/候选/档位）看着就是点了好几秒没反应。
+       rAF 保证这一帧已经画出去，setTimeout 把随后的调用挪到下一轮事件循环。 */
+    requestAnimationFrame(()=>setTimeout(()=>{
+      /* 功能页的控件和配置页是同一份表单，由同一个 loadConf 填值 */
+      if(b.dataset.p === 'conf' || b.dataset.p === 'func') loadConf();
+      if(b.dataset.p === 'conf') loadCores();
+      /* 应用页三块都在这里刷新。应用名不统一在这里要：
+         三块各自在渲染完之后点名要自己那批（见 ensureLabels）。 */
+      if(b.dataset.p === 'game'){ loadGames(); loadSuggest(); loadModes(); }
+      if(b.dataset.p === 'sleep') loadDs(true);
+      if(b.dataset.p === 'about') loadAbout();
+      if(b.dataset.p === 'about') loadOvr();
+      // 切回首页补一次日志和建议：定时器在别的页时都没跑。
+      if(b.dataset.p === 'home'){ loadLog(true); refreshAdvice(); }
+    }, 0));
+  };
+});
+
+document.getElementById('gadd').addEventListener('keydown', e=>{
+  if(e.key === 'Enter') addGame();
+});
+
+/* 启动 */
+buildStaticDD();
+/* 档位按钮和那句总结先建一遍：loadConf 要等后端回来才填值，
+   桥接慢或失败时这一页也不能是空的三行。 */
+syncFunc();
+buildPctRows();
+syncSliders();
+/* 先把上次的徽标画出来（首次打开没有缓存时仍是"连接中"）：
+ * 首条 exec 的往返时间不短，别让首页每次都先黑着等它。 */
+paintCachedBadge();
+/* 首页数据也等首帧画完再读：管理器每轮 exec 都卡住渲染线程，
+   放在脚本末尾同步发会让整页（包括底部导航）白等几轮往返。
+   注意顺序：状态徽标排第一。它是首屏唯一在等结果的东西；应用名只用来给
+   名单补中文，晚一轮回来不影响任何一页——以前把 builtin_white 放在 await
+   最前面，徽标要多等两次桥往返才轮到自己。
+   第一次 exec 里同时完成"探模块根 + 取状态"，所以徽标只等一次往返；
+   写进 DOM 后再让出一帧，后面的 log / 建议 / 应用名才开始发——
+   exec 是同步的，紧跟着发会把这一帧一起卡住，徽标还是画不出来。 */
+requestAnimationFrame(()=>setTimeout(async ()=>{
+  await loadStatus();
+  requestAnimationFrame(()=>setTimeout(()=>{
+    loadLog(true);
+    refreshAdvice();
+    loadBuiltinNames();
+  }, 0));
+}, 0));
+
+/* 有控件正在输入/拖动时，后台轮询先停一轮：管理器的 exec 是同步的，
+   一次 cores / status 调用就能让按键和滑杆卡一下。失焦/停手后下一拍自动恢复。 */
+let lastPointer = 0;
+['pointerdown', 'pointermove', 'touchstart', 'touchmove'].forEach(ev=>{
+  document.addEventListener(ev, function(){ lastPointer = Date.now(); }, {passive:true});
+});
+/* 滑杆松手后主动失焦：拖动期间暂停轮询，松手后实时曲线马上恢复。
+   不这么做的话 range 会一直占着焦点，页面看着像"冻住了"。 */
+['pointerup', 'touchend', 'change'].forEach(ev=>{
+  document.addEventListener(ev, function(e){
+    const t = e.target;
+    if(t && t.tagName === 'INPUT' && t.type === 'range')
+      setTimeout(()=>{ try{ t.blur(); }catch(_){} }, 0);
+  }, {passive:true});
+});
+function formBusy(){
+  // 最近 800ms 有触摸/拖动：优先保证滚动和拖滑杆的手感
+  if(Date.now() - lastPointer < 800) return true;
+  const a = document.activeElement;
+  if(!a) return false;
+  const t = (a.tagName || '').toUpperCase();
+  if(t === 'TEXTAREA' || a.isContentEditable === true || t === 'SELECT') return true;
+  if(t === 'INPUT'){
+    const ty = (a.type || 'text').toLowerCase();
+    // 开关/单选点完还会留着焦点，不能因此把实时曲线冻住；滑杆松手会失焦
+    return ty !== 'checkbox' && ty !== 'radio' && ty !== 'button';
+  }
+  return false;
+}
+
+/* 日志定时器只在首页可见时刷（每次都要过一遍 root shell，别浪费）。
+   句柄存进 timers：桥接判定不可用时 setDead 要把它们全停掉。
+   建议不进这个定时器：样本每 5 分钟才落一次盘，每 5 秒重算一遍只是白起 root shell。 */
+timers.push(setInterval(()=>{
+  if(homeVisible()) loadLog(true);
+}, 5000));
+timers.push(setInterval(()=>{
+  if(!document.hidden && !formBusy()) loadStatus();
+}, 5000));
+/* 配置页的逐核柱形每秒刷新；页面不可见/正在输入时不发 root 调用。 */
+timers.push(setInterval(()=>{
+  if(!document.hidden && !formBusy()) loadCores();
+}, 1000));
+/* 深睡的榜单和状态每 2 秒刷一次；只在睡眠页可见时发 root 调用。 */
+timers.push(setInterval(()=>{
+  if(!document.hidden && sleepVisible()) loadDs(false);
+}, 2000));
+</script>
+</body>
+</html>

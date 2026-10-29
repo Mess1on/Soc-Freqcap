@@ -1,0 +1,17 @@
+# 打包产物
+*.zip
+build/
+out/
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+*.orig
+
+# 系统 / 编辑器噪音
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

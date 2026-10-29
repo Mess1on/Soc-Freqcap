@@ -1,0 +1,59 @@
+# Soc智能限频 · 内置"满血"清单（相机类）
+#
+# 装机时只给**本机已安装**的包追加 `pkg=full  #builtin`，写进
+# /data/adb/soc_freqcap/app_modes.conf。用户改过值、或自己删掉的行不会被覆盖/塞回：
+# 升级只补"上一版清单里没有、这一版新增"的包（基准存在
+# /data/adb/soc_freqcap/builtin_modes.base.txt）。
+#
+# 为什么相机要满血：取景、快门、连拍、4K 录像都吃 CPU/GPU 的瞬时响应，
+# 这些应用在前台时本来就不在"日常待机节流"的目标里。
+#
+# 一行一个包名=full。这里只写各家相机的包名（不同 ROM 叫法不同），
+# 没装的条目不会产生任何效果，也不会出现在页面列表里。
+
+# AOSP / Google / 公版
+com.android.camera=full
+com.android.camera2=full
+com.google.android.GoogleCamera=full
+com.google.android.GoogleCameraEng=full
+org.codeaurora.snapcam=full
+com.mediatek.camera=full
+
+# OPPO / OnePlus / realme（ColorOS 12 起统一 oplus，旧机型还是 coloros/oppo/oneplus）
+com.oplus.camera=full
+com.coloros.camera=full
+com.oppo.camera=full
+com.oneplus.camera=full
+
+# vivo / iQOO
+com.vivo.camera=full
+com.bbk.camera=full
+
+# Huawei / Honor
+com.huawei.camera=full
+com.hihonor.camera=full
+
+# Samsung
+com.sec.android.app.camera=full
+
+# Meizu
+com.meizu.media.camera=full
+
+# Motorola
+com.motorola.camera=full
+com.motorola.camera2=full
+com.motorola.camera3=full
+
+# Sony
+com.sonyericsson.android.camera=full
+com.sonymobile.android.camera=full
+
+# Asus
+com.asus.camera=full
+
+# Nubia / ZTE
+cn.nubia.camera=full
+com.zte.camera=full
+
+# 第三方相机（Open Camera 等常用手动相机）
+net.sourceforge.opencamera=full

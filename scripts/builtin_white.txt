@@ -1,0 +1,98 @@
+# Soc智能限频 · 内置「深睡永久豁免」清单
+#
+# 深睡会强制进 Doze。下面这些应用被一起压住会出现"锁屏收不到消息 / 音乐被掐 /
+# 步数不动 / 闹钟不响"这类问题，所以装机时给**本机已安装**的包写入
+# `white=包名`（等同系统电量设置里的「无限制」）。
+#
+# 只写 dsleep.conf，不影响分应用档位；不想要就在睡眠页删掉，
+# 升级不会塞回来（基准 builtin_white.base.txt 只补"新版清单新增"的包）。
+#
+# 一行一个包名；# 后面是给人看的名字，安装脚本不读，页面用它显示中文名。
+
+# ── 即时通讯 ──────────────────────────────────────────────────
+com.tencent.mm                    # 微信
+com.tencent.mobileqq              # 手机QQ
+com.tencent.tim                   # TIM
+com.tencent.wework                # 企业微信
+com.alibaba.android.rimet         # 钉钉
+
+# ── 音乐 / 音频 ───────────────────────────────────────────────
+com.netease.cloudmusic            # 网易云音乐
+com.tencent.qqmusic               # QQ音乐
+com.luna.music                    # 汽水音乐
+com.kugou.android                 # 酷狗音乐
+cn.kuwo.player                    # 酷我音乐
+cmcc.music                        # 咪咕音乐
+com.ximalaya.ting.android         # 喜马拉雅
+com.huawei.music                  # 华为音乐
+com.miui.player                   # 小米音乐
+com.oplus.music                   # OPPO 音乐
+com.coloros.music                 # ColorOS 音乐
+com.oppo.music                    # OPPO 音乐（旧版）
+com.oneplus.music                 # OnePlus 音乐
+com.vivo.music                    # vivo 音乐
+com.sec.android.app.music         # 三星音乐
+com.spotify.music                 # Spotify
+com.google.android.apps.youtube.music  # YouTube Music
+com.apple.android.music           # Apple Music
+com.maxmpz.audioplayer            # Poweramp
+org.videolan.vlc                  # VLC
+
+# ── 运动健康 ──────────────────────────────────────────────────
+com.mi.health                     # 小米运动健康
+com.xiaomi.hm.health              # 小米运动（Zepp Life）
+com.huawei.health                 # 华为运动健康
+com.hihonor.health                # 荣耀运动健康
+com.heytap.health                 # OPPO 健康
+com.heytap.health.international   # OHealth
+com.oplus.healthservice           # OPPO 健康服务
+com.vivo.health                   # vivo 健康
+com.sec.android.app.shealth       # 三星健康
+com.google.android.apps.fitness   # Google Fit
+com.huami.watch.hmwatchmanager    # Zepp
+com.garmin.android.apps.connectmobile  # Garmin Connect
+com.fitbit.FitbitMobile           # Fitbit
+
+# ── 系统关键应用（闹钟/电话/信息/日历，防止锁屏后不响/不来电） ──
+com.android.deskclock             # 时钟
+com.coloros.alarmclock            # 时钟
+com.oplus.alarmclock              # 时钟
+com.oplus.deskclock               # 时钟
+com.sec.android.app.clockpackage  # 时钟
+com.huawei.deskclock              # 时钟
+com.hihonor.deskclock             # 时钟
+com.vivo.alarmclock               # 时钟
+com.bbk.alarmclock                # 时钟
+com.android.BBKClock              # 时钟（vivo 旧版）
+com.android.dialer                # 电话
+com.google.android.dialer         # 电话
+com.samsung.android.dialer        # 电话
+com.hihonor.phone                 # 荣耀电话
+com.huawei.phone                  # 华为电话
+com.oplus.phone                   # OPPO 电话
+com.coloros.phone                 # ColorOS 电话
+com.vivo.phone                    # vivo 电话
+com.android.phone                 # 电话服务（AOSP）
+com.android.incallui              # 通话界面
+com.android.server.telecom        # 电话服务
+com.android.mms                   # 信息
+com.hihonor.mms                   # 荣耀信息
+com.huawei.mms                    # 华为信息
+com.oplus.mms                     # OPPO 信息
+com.coloros.mms                   # ColorOS 信息
+com.miui.mms                      # 小米信息
+com.vivo.mms                      # vivo 信息
+com.google.android.apps.messaging # 信息
+com.samsung.android.messaging     # 信息
+com.android.contacts              # 联系人
+com.hihonor.contacts              # 荣耀联系人
+com.huawei.contacts               # 华为联系人
+com.oplus.contacts                # OPPO 联系人
+com.coloros.contacts              # ColorOS 联系人
+com.android.calendar              # 日历
+com.google.android.calendar       # 日历
+com.coloros.calendar              # 日历
+com.hihonor.calendar              # 荣耀日历
+com.oplus.calendar                # OPPO 日历
+com.huawei.calendar               # 日历
+com.samsung.android.calendar      # 日历

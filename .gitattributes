@@ -1,0 +1,20 @@
+# games.txt 必须以 LF 存。
+# CRLF 的行尾带 \r，api.sh 的 grep -x 整行比对时一条都匹配不上，
+# 表现是"本机已装 0 个"——名单里几百条却一个都列不出来。
+# Windows 上编辑后默认存成 CRLF，这里钉死。
+*.txt text eol=lf
+
+# 模块内所有脚本 / 配置同理，落盘必须 LF，否则设备上 sh 会报 bad interpreter
+*.sh   text eol=lf
+*.conf text eol=lf
+*.prop text eol=lf
+*.c    text eol=lf
+*.h    text eol=lf
+META-INF/com/google/android/* text eol=lf
+
+# 二进制按原样存取，别做行尾转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.zip  binary
+socfreqd binary

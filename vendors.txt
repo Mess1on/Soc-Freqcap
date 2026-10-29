@@ -1,0 +1,102 @@
+# Soc智能限频 · 发行商词典（只用来找候选，不参与前台匹配）
+#
+# 这个文件不会让任何应用自动变成游戏：前台匹配只认 games.txt 里的整串包名。
+# 它唯一的作用是，在 WebUI「游戏」页多列一栏
+# "这台机上装了、包名里带着这些发行商标记、但还没进名单" 的候选，
+# 你点一下才真的加进名单。名单覆盖不到的新游戏可以随时手动添加。
+#
+# 语法（一行一条，# 开头是注释）
+#   +词   命中。不带点的词 = 包名按点切开后**某一段正好等于它**（不分大小写）；
+#         带点的词 = 包名以它开头（如 +com.tencent.tmgp）。
+#   -词   排除，判据和 + 完全一样。命中 + 之后再过一遍 -，被 - 打中的整个作废。
+#   行首不带 +/- 的按 + 处理。
+#
+# 判据只收包名中游戏专用的那一段（如 +com.tencent.tmgp）：
+#   通用公司名（tencent / netease / bilibili 等整站段）不作命中项，
+#   同一公司的社区、音乐、工具类一律走排除表。
+#   漏掉的候选可以在名单页直接输入包名添加。
+
+# ── 命中 ────────────────────────────────────────────────────────
+# 腾讯手游平台：代理发行的手游都在这一段下（不是整个 com.tencent）
++com.tencent.tmgp
++qqgame
++tencentgame
+# 米哈游（原神 / 星穹铁道 / 绝区零）；米游社那类走下面的排除
++mihoyo
+# 鹰角网络（明日方舟 / Endfield）
++hypergryph
+# 库洛游戏（战双帕弥什 / 鸣潮）
++kurogames
+# 悠星（碧蓝航线等代理）
++yostar
+# 阿里系手游（阿里游戏 / 灵犀互娱）
++aligames
++lingxigames
+# 紫龙游戏
++zlongame
+# B 站代理手游专用段（不是 bilibili 主站）
++bilibigame
+# 散爆（少女前线）
++sunborngame
+# 乐元素（开心消消乐一类）
++happyelements
+# 贪玩 / 盛趣 / 恺英
++tanwan
++shengqugames
++kaiyingshuma
+# 海外：拳头 / Supercell
++riotgames
++supercell
+# 通用游戏段兜底：正好有一段叫 game / games / mobilegame
++game
++games
++mobilegame
+
+# ── 排除（同一家公司既有游戏也有非游戏的那些）────────────────────
+# 腾讯社交与视频
+-com.tencent.mm
+-mm
+-mobileqq
+-qqlive
+-weixin
+-tim
+-wemeet
+# 网易的音乐 / 邮箱 / 加速器 / 云信
+-cloudmusic
+-music
+-mail
+-yunxin
+-uu
+# 米哈游的社区侧
+-bbs
+-community
+-comic
+-miaodang
+# B 站主站与直播
+-bilibili
+-dalou
+-live
+# 阿里系工具
+-dingtalk
+-taobao
+-alipay
+-amap
+# 游戏助手 / 渠道客户端 / 工具（这些不是游戏本体）
+-gamecenter
+-gamebooster
+-gameassistant
+-center
+-assistant
+-accelerator
+-emulator
+-simulator
+-toolkit
+-browser
+-reader
+-wallpaper
+-keyboard
+-launcher
+-shop
+-mall
+-vpn
+-plus

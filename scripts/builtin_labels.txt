@@ -1,0 +1,134 @@
+# Soc智能限频 · 系统应用显示名兜底
+#
+# APK 的 android:label 解析不出来（引用型 label / 资源被裁）时，用这里的名字。
+# 只影响显示和搜索；不参与 Doze 白名单、分应用档位、任何匹配判断。
+# 已有 APK label 的包不会被覆盖（英文 Camera 仍显示 Camera，搜索靠中文别名）。
+# 一行一个 "包名 # 中文名"。
+
+# 设置 / 桌面 / 相机 / 相册 / 文件
+com.android.settings                    # 设置
+com.hihonor.settings                    # 设置
+com.oplus.settings                      # 设置
+com.coloros.settings                    # 设置
+com.android.launcher                    # 桌面
+com.hihonor.android.launcher            # 桌面
+com.oplus.launcher                      # 桌面
+com.coloros.launcher                    # 桌面
+com.miui.home                           # 桌面
+com.vivo.launcher                       # 桌面
+com.sec.android.app.launcher            # 桌面
+com.android.camera                      # 相机
+com.android.camera2                     # 相机
+com.oplus.camera                        # 相机
+com.coloros.camera                      # 相机
+com.hihonor.camera                      # 相机
+com.huawei.camera                       # 相机
+com.miui.camera                         # 相机
+com.vivo.camera                         # 相机
+com.samsung.android.camera              # 相机
+com.android.gallery3d                   # 相册
+com.oplus.gallery3d                     # 相册
+com.coloros.gallery3d                   # 相册
+com.hihonor.gallery                     # 相册
+com.huawei.gallery                      # 相册
+com.miui.gallery                        # 相册
+com.vivo.gallery                        # 相册
+com.google.android.apps.photos          # 相册
+com.android.documentsui                 # 文件
+com.coloros.filemanager                 # 文件管理
+com.hihonor.filemanager                 # 文件管理
+com.huawei.hidisk                       # 文件管理
+com.miui.fileexplorer                   # 文件管理
+com.vivo.filemanager                    # 文件管理
+
+# 通讯 / 时钟 / 日历 / 联系人
+com.android.dialer                      # 电话
+com.hihonor.phone                       # 电话
+com.huawei.phone                        # 电话
+com.oplus.phone                         # 电话
+com.coloros.phone                       # 电话
+com.vivo.phone                          # 电话
+com.android.mms                         # 信息
+com.hihonor.mms                         # 信息
+com.huawei.mms                          # 信息
+com.oplus.mms                           # 信息
+com.coloros.mms                         # 信息
+com.miui.mms                            # 信息
+com.vivo.mms                            # 信息
+com.android.contacts                    # 联系人
+com.hihonor.contacts                    # 联系人
+com.huawei.contacts                     # 联系人
+com.oplus.contacts                      # 联系人
+com.coloros.contacts                    # 联系人
+com.android.calendar                    # 日历
+com.hihonor.calendar                    # 日历
+com.huawei.calendar                     # 日历
+com.oplus.calendar                      # 日历
+com.coloros.calendar                    # 日历
+com.android.deskclock                   # 时钟
+com.hihonor.deskclock                   # 时钟
+com.huawei.deskclock                    # 时钟
+com.coloros.alarmclock                  # 时钟
+com.oplus.alarmclock                    # 时钟
+com.miui.clock                          # 时钟
+com.vivo.alarmclock                     # 时钟
+
+# 浏览器 / 商店 / 音乐 / 视频
+com.android.browser                     # 浏览器
+com.heytap.browser                      # 浏览器
+com.hihonor.browser                     # 浏览器
+com.huawei.browser                      # 浏览器
+com.miui.browser                        # 浏览器
+com.vivo.browser                        # 浏览器
+com.android.chrome                      # 浏览器
+com.heytap.market                       # 应用商店
+com.hihonor.appmarket                   # 应用商店
+com.huawei.appmarket                    # 应用商店
+com.xiaomi.market                       # 应用商店
+com.bbk.appstore                        # 应用商店
+com.android.vending                     # 应用商店
+com.oplus.music                         # 音乐
+com.coloros.music                       # 音乐
+com.hihonor.music                       # 音乐
+com.huawei.music                        # 音乐
+com.miui.player                         # 音乐
+com.vivo.music                          # 音乐
+com.heytap.media                        # 视频
+com.hihonor.video                       # 视频
+com.huawei.hwvideo                      # 视频
+com.miui.video                          # 视频
+com.vivo.video                          # 视频
+
+# 计算器 / 录音 / 笔记 / 天气 / 游戏 / 钱包
+com.android.calculator2                 # 计算器
+com.coloros.calculator                  # 计算器
+com.hihonor.calculator                  # 计算器
+com.huawei.calculator                   # 计算器
+com.miui.calculator                     # 计算器
+com.vivo.calculator                     # 计算器
+com.android.soundrecorder               # 录音
+com.coloros.recorder                    # 录音
+com.hihonor.recorder                    # 录音
+com.huawei.recorder                     # 录音
+com.miui.recorder                       # 录音
+com.vivo.recorder                       # 录音
+com.coloros.note                        # 便签
+com.hihonor.notepad                     # 便签
+com.huawei.notepad                      # 便签
+com.miui.notes                          # 便签
+com.vivo.notes                          # 便签
+com.coloros.weather2                    # 天气
+com.hihonor.weather                     # 天气
+com.huawei.android.totemweather         # 天气
+com.miui.weather2                       # 天气
+com.vivo.weather                        # 天气
+com.oplus.games                         # 游戏中心
+com.hihonor.gamecenter                  # 游戏中心
+com.huawei.gamebox                      # 游戏中心
+com.xiaomi.gamecenter                   # 游戏中心
+com.vivo.game                           # 游戏中心
+com.coloros.wallet                      # 钱包
+com.hihonor.wallet                      # 钱包
+com.huawei.wallet                       # 钱包
+com.miui.wallet                         # 钱包
+com.vivo.wallet                         # 钱包
