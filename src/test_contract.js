@@ -44,6 +44,19 @@ const iconSrc = fs.readFileSync(process.argv[8], 'utf8');
 
 const MOD0 = require('path').join(__dirname, '..'); // 路径里有中文，别用 file:// URL（会被百分号编码）
 
+// README 已压缩：细节拆到 docs/。文档类断言统一读 README + docs/*.md，
+// 免得把"文档里写了"绑死在某一个文件上。
+const DOC = (() => {
+  let all = fs.readFileSync(process.argv[6], 'utf8');
+  const dir = MOD0 + '/docs';
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir).sort()) {
+      if (/\.md$/.test(f)) all += '\n' + fs.readFileSync(dir + '/' + f, 'utf8');
+    }
+  }
+  return all;
+})();
+
 let fail = 0, pass = 0;
 function ok(c, n, e){
   if(c){ console.log('  ok   ' + n); pass++; }
@@ -857,7 +870,7 @@ console.log('\n== 默认值 ==');
   // 示例数字和实际显示不一致的话，用户按 README 对不上号，
   // 会以为是算错了而不是文档过期。
   {
-    const rd = fs.readFileSync(process.argv[6], 'utf8');
+    const rd = DOC;
     ok(/1901 MHz\s*→\s*1292 MHz/.test(rd), 'README 示例：1901 → 1292（不是 1293）');
     ok(/3187 MHz\s*→\s*2103 MHz/.test(rd), 'README 示例：3187 → 2103（不是 2104）');
     ok(!/→\s*1293 MHz/.test(rd), 'README 没有向上溢出的封顶值');
@@ -1693,7 +1706,7 @@ ok(/"webp"\)\s*\)?\s*return\s*"image\/webp"/.test(iconBody), '守护给 webp 发
   // 不写清楚，用户只会以为图标功能坏了。
   // 正式的包过了 AGP 资源名缩短，只能靠"res/ 下的正方形图"去挑，
   // 挑到的未必是桌面图标——这是设计上的边界，不是故障。
-  const rd2 = fs.readFileSync(process.argv[6], 'utf8');
+  const rd2 = DOC;
   ok(/resources\.arsc/.test(rd2), 'README 说清要准确得解析 resources.arsc');
   ok(/不保证是桌面图标/.test(rd2), 'README 直说图标不保证是桌面图标');
   ok(/ph\.title = p \+ '\\n还没取到桌面图标/.test(html),
@@ -1986,7 +1999,7 @@ ok(/"webp"\)\s*\)?\s*return\s*"image\/webp"/.test(iconBody), '守护给 webp 发
      兜底只有"按名字挑"，没有第二轮（按图片尺寸猜）——
      缩短过的包（res/aK.png）喂给 score 是 0 条候选，只有主路能出图。
      谁以为"有兜底就万无一失"，就会把主路的第二轮当冗余删掉。 */
-  const readme = fs.readFileSync(process.argv[6], 'utf8');
+  const readme = DOC;
   // 判据用"命令表里只有 zcat/gzip/gunzip"那半句：它只在把"没有 unzip"
   // 当成事实陈述时才会出现。README 里保留了一句带引号的历史说法
   // （"早先这里写的是…这条前提是错的"），那是纠正不是断言，
@@ -3089,7 +3102,7 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
                           ['src/test_func_ui.js', '功能页档位的测试（档位值要过后端校验区间）'],
                           ['tools/sandbox_probe.sh', '探测扑空时的兜底路径（chroot 沙箱，要 root）']]) {
     ok(fs.existsSync(MOD0 + '/' + f), '存在 ' + f + '（' + why + '）');
-    ok(fs.readFileSync(MOD0 + '/README.md', 'utf8').includes(f.split('/').pop()),
+    ok(DOC.includes(f.split('/').pop()),
        'README 的自检清单里点了 ' + f + ' 的名字');
   }
   ok(/pkg_import\) shift; cmd_pkg_import/.test(apiSrc),
@@ -3145,8 +3158,8 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
     ? fs.readFileSync(MOD0 + '/adapt/_TEMPLATE.conf', 'utf8') : '';
   ok(/^#match model=__NO_SUCH_MODEL__$/m.test(tpl), '包内模板的 #match 命中不了任何机器');
   ok(!/^(cpu-dir|gpu-max|gpu-min|gpu-freqs) /m.test(tpl), '模板里的节点行是注释状态（不会被装上）');
-  ok(/adapt\//.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
-     'README 写了 adapt/ 这条发布通道');
+  ok(/adapt\//.test(DOC),
+     '文档写了 adapt/ 这条发布通道');
 }
 
 /* ── V1.2 实时偏移：PSI 借 / 温控压 / 充电抬 ─────────────────────
