@@ -10,6 +10,39 @@
 
 所以强杀守护不会让手机一直卡在低频上。
 
+### 装不上：`Installation Blocked` / `A metamodule with custom installer is active`
+
+红框里写着 `Current state: Disabled`，`Action required: Re-enable or uninstall it, then reboot`。
+**这跟本模块无关**，是管理器（KernelSU / Magisk 等）自己的闸门：
+
+你在设备上装了一个声明了 `metamodule=1` 的模块（最常见是 **Hybrid Mount**），
+又把它**停用**了。管理器于是拒绝安装任何新模块，直到它被重新启用或卸载。
+拦截发生在解包之前，所以换哪个 zip 都一样，模块自己的安装脚本根本没机会执行。
+
+查一下是谁：
+
+```sh
+su -c 'grep -l "^metamodule=" /data/adb/modules/*/module.prop | while read f; do d=${f%/module.prop}; echo "${d##*/}  disabled=$([ -f "$d/disable" ] && echo yes || echo no)"; done'
+```
+
+**修复（二选一）：**
+
+```sh
+# 1) 重新启用那个 metamodule，然后重启，再去装本模块
+su -c 'rm -f /data/adb/modules/hybrid_mount/disable' && reboot
+
+# 2) 或者干脆卸掉它（管理器里点卸载 / 或删目录），重启后再装
+```
+
+模块里带了同一套逻辑的脚本，装好之后也能用：
+
+```sh
+su -c 'sh /data/adb/modules/soc_freqcap/tools/fix_metamodule.sh'          # 只检查
+su -c 'sh /data/adb/modules/soc_freqcap/tools/fix_metamodule.sh --fix'    # 重新启用，然后重启
+```
+
+它只删一个 `disable` 标记文件，不改系统分区、不碰任何配置。
+
 ### 卸载后频率没回原厂 / 出现“限制性能的组件”弹窗
 
 模块只写 CPU/GPU 的 `scaling_max_freq` 等节点，**重启后内核会把这些节点重置**。

@@ -26,6 +26,12 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 
 升级不会覆盖 `/data/adb/soc_freqcap` 里的配置和名单。WebUI 需要管理器注入 root 桥：KernelSU / APatch 已验证；Magisk 的 WebUI 很可能不可用，命令行仍可用。
 
+> **装不上、提示 `Installation Blocked / A metamodule with custom installer is active`？**
+> 这不是本模块的问题：你装过声明 `metamodule=1` 的模块（常见是 Hybrid Mount）又把它停用了，
+> 管理器会拒绝安装任何新模块。重新启用或卸载它、重启后再装即可。
+> 详细步骤见 [docs/troubleshooting.md](docs/troubleshooting.md)（「装不上：Installation Blocked」一节），
+> 模块内也带了修复脚本 `tools/fix_metamodule.sh`。
+
 ## 最小运行示例
 
 ```sh
