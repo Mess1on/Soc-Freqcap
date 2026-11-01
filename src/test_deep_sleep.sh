@@ -46,7 +46,17 @@ case "$1" in
         case "$3" in
           +*) p=${3#+}; grep -qx -- "$p" "$d/whitelist" 2>/dev/null || echo "$p" >> "$d/whitelist" ;;
           -*) p=${3#-}; grep -vx -- "$p" "$d/whitelist" > "$d/whitelist.n" 2>/dev/null; mv "$d/whitelist.n" "$d/whitelist" ;;
-          '') cat "$d/whitelist" 2>/dev/null ;;
+          '')
+            # 线上 ColorOS 的白名单 dump 是 "类型,包名,uid"：
+            #   user,com.android.contacts,10107
+            # AOSP 老格式才是裸包名。台架默认按 ColorOS 输出 ——
+            # 夹具用裸包名的话，"解析器只认 $1" 那个 bug 在台架上永远看不见。
+            # STUB_WL_RAW=1 时改回裸包名，用来覆盖老格式。
+            if [ "${STUB_WL_RAW:-0}" = "1" ]; then
+              cat "$d/whitelist" 2>/dev/null
+            else
+              sed 's/^/user,/; s/$/,10000/' "$d/whitelist" 2>/dev/null
+            fi ;;
         esac ;;
       force-idle) echo 1 > "$d/forced" ;;
       unforce)    echo 0 > "$d/forced" ;;
@@ -328,6 +338,55 @@ ds_doze_checked=$(( $(date +%s) - 301 ))
 ds_tick
 ok "$(cat "$STATE/forced")" "1" "闹钟消失后的下一轮补收口"
 printf 'enable=0\n' > "$DSLEEP_CONF"; ds_tick
+
+echo
+echo "== 与系统冻结器 / 系统 Doze 共存 =="
+# 夹具的白名单 dump 默认就按 ColorOS 输出（user,pkg,uid）。模块早先只认裸包名，
+# 在真机上快照恒为空：分不清"这个包本来就在白名单里"，每次进入都重加一遍。
+: > "$STATE/whitelist"
+printf 'com.a\ncom.b\n' > "$STATE/whitelist"
+ok "$(ds_white_snapshot)" "com.a,com.b," "ColorOS 的 type,pkg,uid 格式能解析出包名"
+STUB_WL_RAW=1
+ok "$(ds_white_snapshot)" "com.a,com.b," "AOSP 裸包名的老格式也能解析"
+unset STUB_WL_RAW
+
+# 已经在白名单里的包不该再 dumpsys 加一次（上面那个 bug 的直接后果）
+: > "$STATE/calls"
+ds_white_add com.a "$(ds_white_snapshot)"
+ok "$(grep -c 'whitelist +com.a' "$STATE/calls")" "0" "已在白名单的包不再重复加"
+
+# 没 force 过的 Doze 不能去 unforce：那会把系统自己的深度空闲打断
+: > "$STATE/calls"
+ds_active=1; ds_added=""; ds_doze_sent=0
+ds_exit "台架-未force" >/dev/null 2>&1
+ok "$(grep -c 'deviceidle unforce' "$STATE/calls")" "0" "没 force 过就不 unforce"
+: > "$STATE/calls"
+ds_active=1; ds_added=""; ds_doze_sent=1
+ds_exit "台架-force过" >/dev/null 2>&1
+ok "$(grep -c 'deviceidle unforce' "$STATE/calls")" "1" "自己 force 过的才 unforce"
+
+# 快照要记 dozed；崩溃还原时只在真的 force 过才 unforce
+ds_doze_sent=1; ds_added=""; ds_snap_write
+ok "$(awk -F= '$1=="dozed"{print $2}' "$DS_SNAP")" "1" "快照记下本轮的 dozed 状态"
+: > "$STATE/calls"
+printf 'dozed=0\nadded=com.a\n' > "$DS_SNAP"
+ds_snap_restore_if_any >/dev/null 2>&1
+ok "$(grep -c 'deviceidle unforce' "$STATE/calls")" "0" "快照 dozed=0 时崩溃还原也不 unforce"
+rm -f "$DS_SNAP"
+
+echo "== freeze / appops 能从配置单独关（做开/关对照用）=="
+# 这两项以前只认环境变量，配置文件里写了也不生效，用户没法自己做对照。
+printf 'enable=1\nfreeze=0\nappops=0\n' > "$DSLEEP_CONF"
+ds_conf_load
+ok "$DS_FREEZE_ENABLED" "0" "freeze=0 生效"
+ok "$DS_APPOPS_ENABLED" "0" "appops=0 生效"
+printf 'enable=1\nfreeze=1\n' > "$DSLEEP_CONF"
+ds_conf_load
+ok "$DS_FREEZE_ENABLED" "1" "freeze=1 生效"
+ok "$DS_APPOPS_ENABLED" "$DS_APPOPS" "appops 没写时退回环境默认（台架是 $DS_APPOPS）"
+printf 'enable=1\nfreeze=abc\n' > "$DSLEEP_CONF"
+ds_conf_load
+ok "$DS_FREEZE_ENABLED" "${DS_FREEZE:-1}" "非法值退回环境默认（台架 DS_FREEZE=$DS_FREEZE）"
 
 echo "== dsleep.log 裁剪（这份日志以前是全模块唯一没人裁的）=="
 # 裁剪口径必须和 service.sh / socfreqd 一致：超 256KB 只留最近 128KB，

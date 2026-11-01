@@ -296,6 +296,13 @@ ds_conf_write() {
 # 深度睡眠配置
 # enable=1 打开；0 关闭。关闭只停止干预，不会保留任何系统改动。
 enable=0
+# freeze=1 熄屏后冻结第三方后台进程；0 只做 Doze/白名单，不冻结。
+# 有的 ROM 自带冻结器（如 ColorOS 的 HANS 就在同一个 /dev/freezer 上跑），
+# 两套一起冻会互相把对方刚冻上的进程解开。想对比待机耗电就把它设 0 跑一晚。
+# freeze=1
+# appops=1 冻结时顺手把后台应用的唤醒锁权限设成 ignore，退出时按账本还原；
+# 0 完全不碰唤醒锁。对比耗电时也可以单独关它。
+# appops=1
 # 每行一条 white=包名：完全豁免（不冻结/不限 CPU/不碰唤醒锁），并加入 Doze 白名单。
 # white=com.tencent.mm
 # nice=包名：不冻结、不碰唤醒锁（保活类应用；深睡不碰 CPU）。
@@ -309,6 +316,23 @@ EOF
 
 DS_WHITE=""
 ds_conf_raw=""
+# 读一个 0/1 的标量键；缺省或值不合法就退回默认值。
+# 有了它，冻结和唤醒锁这两项可以在不动代码、不改环境变量的前提下单独关掉，
+# 用来做"开/关"对照 —— 待机耗电这种问题，只有对照才说得清是谁的账。
+ds_conf_opt() {
+    local k="$1" d="$2" v
+    [ -f "$DSLEEP_CONF" ] || { echo "$d"; return 0; }
+    v=$(awk -v k="$k" '
+        $0 ~ "^[[:space:]]*" k "[[:space:]]*=" {
+            v = $0
+            sub(/^[^=]*=/, "", v)
+            sub(/#.*/, "", v)
+            gsub(/[[:space:]]/, "", v)
+            print v
+            exit
+        }' "$DSLEEP_CONF" 2>/dev/null)
+    case "$v" in 0|1) echo "$v" ;; *) echo "$d" ;; esac
+}
 # 按内容热重载。不用 mtime：/data 下面 stat 的秒级时间戳会让
 # "同一秒内连改两下"的第二下永远读不到（开关刚开又加白名单就会漏）。
 ds_conf_load() {
@@ -330,6 +354,9 @@ ds_conf_load() {
     DS_WHITE=$(ds_conf_list white)
     DS_NICE=$(ds_conf_list nice)
     DS_PUSH=$(ds_conf_list push)
+    # 这两项以前只能靠环境变量给，配置里改不了，用户没法自己做开关对照。
+    DS_FREEZE_ENABLED=$(ds_conf_opt freeze "${DS_FREEZE:-1}")
+    DS_APPOPS_ENABLED=$(ds_conf_opt appops "${DS_APPOPS:-1}")
     return 0
 }
 
@@ -380,9 +407,19 @@ ds_push_pkg_list() {
 # ============================ Doze 原语 =======================================
 
 # 只收像包名的行，滤掉 dumpsys 的段头。
+# 两种格式都要认：AOSP 老格式是裸包名，ColorOS/新 AOSP 是 "类型,包名,uid"，
+# 例：user,com.android.contacts,10107。只认 $1 的话后者一个都匹配不上，
+# 整个快照恒为空 —— 模块就分不清"这个包本来就在白名单里"，
+# 每次进入都重新加一遍，退出时再按自己的账本删，
+# 连用户自己手动加的白名单也会被当成"我们加的"撤掉。
 ds_white_snapshot() {
     timeout 3 dumpsys deviceidle whitelist 2>/dev/null | tr -d '\r' | \
-      awk 'NF>0 && $1 ~ /^[A-Za-z0-9][A-Za-z0-9_.]*$/ && index($1,".")>1 {print $1}' | tr '\n' ','
+      awk '
+        BEGIN { FS = "[,[:space:]]+" }
+        NF == 0 { next }
+        $1 ~ /^[A-Za-z0-9][A-Za-z0-9_.]*$/ && index($1,".") > 1 { print $1; next }
+        $2 ~ /^[A-Za-z0-9][A-Za-z0-9_.]*$/ && index($2,".") > 1 { print $2 }
+      ' | tr '\n' ','
 }
 
 ds_white_add() {
@@ -404,20 +441,25 @@ ds_white_del() {
 ds_snap_write() {
     {
         for p in $ds_added; do echo "added=$p"; done
+        # 记下这一轮有没有真的 force-idle 过。退出/崩溃还原时只撤销我们自己
+        # 发起的 Doze：无条件 unforce 会把系统自己的（或者别的工具发起的）
+        # 深度空闲一起取消，等于替别人反复重置 Doze 状态机。
+        echo "dozed=${ds_doze_sent:-0}"
     } | atomic_write "$DS_SNAP" 0644
 }
 
 # 快照还在 = 上次没走正常退出。启动时立即还原并删除。
 ds_snap_restore_if_any() {
-    local c="" a added=""
+    local c="" a added="" dozed=""
     [ -f "$DS_SNAP" ] || return 0
     while IFS='=' read -r k v; do
         case "$k" in
             constants) c="$v" ;;
             added) [ -n "$v" ] && added="$added $v" ;;
+            dozed) dozed="$v" ;;
         esac
     done <"$DS_SNAP" 2>/dev/null
-    timeout 2 dumpsys deviceidle unforce >/dev/null 2>&1
+    [ "$dozed" = "1" ] && timeout 2 dumpsys deviceidle unforce >/dev/null 2>&1
     if [ "$c" = "@none" ]; then
         settings delete global device_idle_constants >/dev/null 2>&1
     elif [ -n "$c" ]; then
@@ -621,6 +663,29 @@ ds_freeze_move_root() {
     esac
 }
 
+# pid 是不是还待在我们自己建的那个组里。
+# 解冻不能只看账本：ColorOS 自带的冻结器（HANS）在同一个 /dev/freezer 层级上
+# 运转，会把进程在 frozen/thaw/根组之间搬。账本记着"这个 pid 是我冻的"，
+# 它其实早被系统搬走了；这时再按账本搬一次，等于把系统刚冻上的进程解开，
+# 系统下一轮又冻回去 —— 两边对着搬，待机时反复进出冻结最费电。
+ds_pid_in_group() {
+    local pid="$1" g="$2"
+    [ -n "$pid" ] && [ -n "$g" ] && [ -f "$g/cgroup.procs" ] || return 1
+    grep -qx -- "$pid" "$g/cgroup.procs" 2>/dev/null
+}
+
+# 这个 pid 是不是已经被别的冻结器（系统 HANS）冻住了。
+# 两边都冻同一个进程没有意义，只会多一次 cgroup 迁移和一次调度等待。
+ds_freeze_frozen_elsewhere() {
+    local pid="$1" f
+    [ -n "$ds_freeze_root" ] || return 1
+    for f in "$ds_freeze_root/frozen/cgroup.procs" "$ds_freeze_root/frozen/tasks"; do
+        [ -r "$f" ] || continue
+        grep -qx -- "$pid" "$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+
 # 清掉自己的残留组：先解冻，再把组里的进程迁回根组，最后删组。
 ds_freeze_group_reset() {
     local g="$ds_freeze_group" p
@@ -772,7 +837,9 @@ EOF
         if [ "$b" = "sigstop" ]; then
             kill -CONT "$pid" 2>/dev/null
         else
-            ds_freeze_move_root "$pid"
+            # 只搬还在我们组里的。被系统冻结器搬走的就别抢回来：
+            # 那不是我们的冻结，解了它等于逼系统重新冻一遍。
+            ds_pid_in_group "$pid" "$g" && ds_freeze_move_root "$pid"
         fi
     done
     # 账本可能漏掉后来进组的子进程：按组里的实际 PID 再搬一遍，否则组删不掉，
@@ -952,6 +1019,9 @@ EOF
         # 于是这个进程一直不入组，用户看到"后台应用还在跑"。
         # pid 在上面已校验为纯数字，进 grep 的模式没有元字符风险。
         printf '%s\n' "$ds_frozen" | grep -q "^$pid|" && continue
+        # 系统冻结器已经冻住的就别再入组：同一个进程被两套机制各冻一次，
+        # 解冻时两边记账不同步，会互相把对方刚冻上的进程解开。
+        ds_freeze_frozen_elsewhere "$pid" && continue
         cur="$(ds_proc_start "$pid")"
         [ "$cur" = "$st" ] || continue
         case " $DS_FREEZE_SKIP " in *" $pkg "*) continue ;; esac
@@ -1008,7 +1078,7 @@ EOF
         if [ "$ds_freeze_backend" = "sigstop" ]; then
             kill -CONT "$pid" 2>/dev/null
         else
-            ds_freeze_move_root "$pid"
+            ds_pid_in_group "$pid" "$ds_freeze_group" && ds_freeze_move_root "$pid"
         fi
     done
     ds_frozen="$keep"
@@ -1269,7 +1339,9 @@ ds_exit() {
     ds_ops_restore_all
     ds_freeze_thaw_all
     [ -f "$DS_OPS_LEDGER" ] && ds_ops_restore_all
-    timeout 2 dumpsys deviceidle unforce >/dev/null 2>&1
+    # 只撤销我们自己发起的 Doze。没 force 过还去 unforce 的话，
+    # 会把系统正在进行的深度空闲打断，下一轮它又从头进 —— 来回收口最耗电。
+    [ "$ds_doze_sent" = "1" ] && timeout 2 dumpsys deviceidle unforce >/dev/null 2>&1
     for pkg in $ds_added; do ds_white_del "$pkg"; done
     ds_wakes_update
     [ -n "$ds_run_list" ] && echo "$ds_run_list" | awk '{print "A "$1"="$2}' \
@@ -1399,10 +1471,14 @@ ds_tick() {
 
     # ---- 已在深睡中 ----
     # 深睡期间新加入的用户白名单立即生效，不用等下一次熄屏。
+    # 白名单快照每轮只取一次：它是一次完整 dumpsys，按包名各取一次
+    # 等于同一轮里把同一份清单 dump 了 N 遍。
+    _snap=""; _snap_done=0
     for pkg in $(echo "$DS_WHITE" | tr ',' ' '); do
         [ -n "$pkg" ] || continue
         case " $ds_added " in *" $pkg "*) continue ;; esac
-        ds_white_add "$pkg" "$(ds_white_snapshot)"
+        [ "$_snap_done" = "1" ] || { _snap="$(ds_white_snapshot)"; _snap_done=1; }
+        ds_white_add "$pkg" "$_snap"
         ds_freeze_thaw_pkg "$pkg"
         ds_snap_write
         log_ds "新加入白名单的应用已加白"

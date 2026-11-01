@@ -186,6 +186,48 @@ fi
 ok "$(has "$DS_FREEZE_QUEUE" com.android.systemui)" "no" "系统 UI 不在候选里"
 : > "$DS_FREEZE_QUEUE"
 
+echo "== 识别系统冻结器：已经被别处冻住的进程不再重复入组 =="
+# 用假目录验纯逻辑，不碰真的 /dev/freezer/frozen
+FAKE="$TMP/fakeroot"; mkdir -p "$FAKE/frozen"
+printf '424242\n' > "$FAKE/frozen/cgroup.procs"
+_save_root="$ds_freeze_root"
+ds_freeze_root="$FAKE"
+ok "$(ds_freeze_frozen_elsewhere 424242 && echo y || echo n)" "y" "系统冻结组里的 pid 能认出来"
+ok "$(ds_freeze_frozen_elsewhere 424243 && echo y || echo n)" "n" "不在系统冻结组里的 pid 不误判"
+ds_freeze_root="$_save_root"
+
+echo "== 解冻只动自己的组：系统管着的进程不能被抢回来 =="
+# ColorOS 的 HANS 和我们共用 /dev/freezer 层级。它把自己的进程放在
+# frozen/thaw 里；我们按账本解冻时如果不先看"还在不在我们组里"，
+# 会把它刚冻上的进程搬回根组（等于替它解冻），它下一轮又冻回去 ——
+# 待机时两边对着搬正是最费电的形态。
+case "$ds_freeze_backend" in
+  v1|v2)
+    sleep 300 & P1=$!
+    sleep 300 & P2=$!
+    OTHER="$ds_freeze_root/socfreq_ds_other"
+    rmdir "$OTHER" 2>/dev/null; mkdir -p "$OTHER" 2>/dev/null
+    rm -f "$DS_FREEZE_LEDGER" 2>/dev/null
+    ds_freeze_group_init
+    ds_freeze_frozen=0
+    printf '%s\n' "$P1" > "$ds_freeze_group/cgroup.procs" 2>/dev/null
+    printf '%s\n' "$P2" > "$OTHER/cgroup.procs" 2>/dev/null
+    ok "$(ds_pid_in_group "$P1" "$ds_freeze_group" && echo y || echo n)" "y" "P1 已进我们自己的组"
+    ok "$(ds_pid_in_group "$P2" "$OTHER" && echo y || echo n)" "y" "P2 在别人（系统）的组里"
+    ds_frozen="${P1}|$(ds_proc_start "$P1")|com.test.mine
+${P2}|$(ds_proc_start "$P2")|com.test.other
+"
+    ds_freeze_thaw_all >/dev/null 2>&1
+    ok "$(ds_pid_in_group "$P1" "$ds_freeze_group" && echo y || echo n)" "n" "自己的 pid 被移出组（正常解冻）"
+    ok "$(ds_pid_in_group "$P2" "$OTHER" && echo y || echo n)" "y" "系统管着的 pid 原地不动（没被抢回来）"
+    for p in "$P1" "$P2"; do printf '%s\n' "$p" > "$ds_freeze_root/cgroup.procs" 2>/dev/null; done
+    kill "$P1" "$P2" 2>/dev/null
+    wait "$P1" "$P2" 2>/dev/null
+    rmdir "$OTHER" 2>/dev/null
+    ;;
+  *) echo "  （后端是 $ds_freeze_backend，跳过）" ;;
+esac
+
 echo "== 收尾 =="
 ds_freeze_restore_if_any
 ok "$([ -d "$ds_freeze_group" ] && echo yes || echo no)" "no" "没有残留冻结组"
