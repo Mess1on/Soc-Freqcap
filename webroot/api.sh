@@ -1407,6 +1407,32 @@ _ds_enable() {
     }' "$DS_CONF" 2>/dev/null | awk '{print ($1 == "1") ? 1 : 0; f = 1} END {if (!f) print 0}'
 }
 
+# 读一个 0/1 的开关键（enable / freeze / appops），缺省用给的默认值。
+_ds_switch() {
+  _k=${1:-}; _d=${2:-1}
+  [ -f "$DS_CONF" ] || { echo "$_d"; return 0; }
+  _v=$(awk -v k="$_k" '
+    $0 ~ "^[[:space:]]*" k "[[:space:]]*=" {
+      v = $0
+      sub(/^[^=]*=/, "", v)
+      sub(/#.*/, "", v)
+      gsub(/[[:space:]]/, "", v)
+      print v
+      exit
+    }' "$DS_CONF" 2>/dev/null)
+  case "$_v" in 0|1) echo "$_v" ;; *) echo "$_d" ;; esac
+}
+
+# 当前会选哪个冻结后端：v2（原地）/ v1（独立层级）/ sigstop / off。
+# 用真脚本探一次，不自己抄一份判断 —— 抄的那份迟早和后端逻辑对不上。
+_ds_freezer() {
+  [ -f "$DS_SH" ] || { echo off; return 0; }
+  ( . "$DS_SH" >/dev/null 2>&1
+    DS_FREEZE_ENABLED=1
+    ds_freeze_probe
+    printf '%s\n' "${ds_freeze_backend:-off}" ) 2>/dev/null
+}
+
 # pid 文件只能当线索：kill -9 后文件会残留，真正判据是 /proc 里的 cmdline。
 _ds_alive() {
   _p=$(cat "$DS_PID" 2>/dev/null)
@@ -1478,6 +1504,21 @@ _ds_stop() {
 _ds_dump() {
   _ds_conf_init
   printf 'enable=%s\n' "$(_ds_enable)"
+  printf 'freeze=%s\n' "$(_ds_switch freeze 1)"
+  printf 'appops=%s\n' "$(_ds_switch appops 1)"
+  # 后端只报"实际会选哪个"，不报用户愿望：用户看到的必须是真在用的那一套。
+  # 2 秒轮询走状态文件里缓存的那份（守护每轮会写），只有 full 才现场探一次 ——
+  # 现场探要 source 一遍整份脚本，没必要每 2 秒做一次。
+  if [ "$(_ds_enable)" = "1" ] && [ "$(_ds_switch freeze 1)" = "1" ]; then
+    if [ "${1:-}" = "full" ]; then
+      printf 'fzb=%s\n' "$(_ds_freezer)"
+    else
+      _fzb=$(sed -n 's/^fzb=//p' "$DS_STATE" 2>/dev/null | head -n 1)
+      printf 'fzb=%s\n' "${_fzb:-}"
+    fi
+  else
+    printf 'fzb=off\n'
+  fi
   printf 'alive=%s\n' "$(_ds_alive)"
   printf 'paused=%s\n' "$([ -f "$PAUSE" ] && echo 1 || echo 0)"
   if [ -f "$DS_STATE" ]; then
@@ -1504,26 +1545,32 @@ cmd_ds_state() { _ds_dump; }
 
 cmd_ds_set() {
   _k=${1:-}; _v=${2:-}
-  [ "$_k" = "enable" ] || die "BAD_KEY"
+  case "$_k" in
+    enable|freeze|appops) ;;
+    *) die "BAD_KEY" ;;
+  esac
   is_switch "$_v" || die "RANGE"
   _ds_conf_init || die "WRITE" 5
-  if grep -q '^[[:space:]]*enable[[:space:]]*=' "$DS_CONF" 2>/dev/null; then
-    awk -v v="$_v" '
-      /^[[:space:]]*enable[[:space:]]*=/ { print "enable=" v; next } { print }' \
+  # 三个开关键走同一套写入；只有 enable 需要拉起/停掉守护。
+  if grep -q "^[[:space:]]*$_k[[:space:]]*=" "$DS_CONF" 2>/dev/null; then
+    awk -v k="$_k" -v v="$_v" '
+      $0 ~ "^[[:space:]]*" k "[[:space:]]*=" { print k "=" v; next } { print }' \
       "$DS_CONF" | write_atomic "$DS_CONF" || die "WRITE" 5
   else
     ensure_final_newline "$DS_CONF"
-    { cat "$DS_CONF"; printf 'enable=%s\n' "$_v"; } | write_atomic "$DS_CONF" \
+    { cat "$DS_CONF"; printf '%s=%s\n' "$_k" "$_v"; } | write_atomic "$DS_CONF" \
       || die "WRITE" 5
   fi
-  [ "$(_ds_enable)" = "$_v" ] || die "VERIFY" 6
-  # 打开时立即拉起；关闭时直接停掉，避免"刚关又开"时旧的空转进程和新进程抢 pid。
-  if [ "$_v" = "1" ]; then
-    _ds_start
-  else
-    _ds_stop
+  [ "$(_ds_switch "$_k")" = "$_v" ] || die "VERIFY" 6
+  if [ "$_k" = "enable" ]; then
+    # 打开时立即拉起；关闭时直接停掉，避免"刚关又开"时旧的空转进程和新进程抢 pid。
+    if [ "$_v" = "1" ]; then
+      _ds_start
+    else
+      _ds_stop
+    fi
   fi
-  printf 'OK enable=%s\n' "$_v"
+  printf 'OK %s=%s\n' "$_k" "$_v"
 }
 
 cmd_ds_white_add() {

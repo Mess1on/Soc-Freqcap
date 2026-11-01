@@ -77,9 +77,17 @@
   `full` / `keep` 档位、正在放媒体的应用、本模块和管理器、Scene 都不冻。
   厂商自带应用（`com.coloros.` / `com.oplus.` / `com.hihonor.` / `com.google.` 等前缀）
   整片不冻：ColorOS 的时钟/健康/天气在 `-3` 清单里，冻了就是闹钟不响。
-- 后端按 `/dev/freezer`（cgroup v1）→ `cgroup.freeze`（v2）→ `SIGSTOP` 依次降级；
-  唤醒锁账本 `run/ops.saved` 和冻结账本一起还原。
-  冻结账本 `run/freeze.saved` 每批落盘；亮屏、关开关、守护启动、卸载都按账本解冻。
+- 后端顺序：**v2 `cgroup.freeze`（优先）→ v1 独立 freezer 层级 → `SIGSTOP`（最后的兼容兜底）**。
+  现代 Android 是混合布局：统一 v2 层级在 `/sys/fs/cgroup`，app 各自待在
+  `/sys/fs/cgroup/apps/uid_X/pid_Y`；而 `/dev/freezer` 这类 v1 挂载是旧路径。
+  v2 里冻结是核心功能，`cgroup.freeze` 在每个 cgroup 里都有，**不会**出现在
+  `cgroup.controllers` 里 —— 按 controllers 找 `freezer` 永远找不到，会一路掉到 SIGSTOP。
+  v2 的做法是**原地冻**：读 `/proc/<pid>/cgroup` 拿到它自己的组，只写那个组，
+  不搬家（搬出 uid 组会让 LMKD / PSI 看不见这个进程的内存）。
+  页面「深度睡眠」页会显示当前实际用的是哪一套（V2 / V1 / SIGSTOP）。
+- 唤醒锁账本 `run/ops.saved` 和冻结账本一起还原。
+  冻结账本 `run/freeze.saved` 每批落盘，v2 下每行还记着该进程自己的 cgroup 路径；
+  亮屏、关开关、守护启动、卸载都按账本解冻。
   解冻用 `cgroup.procs` 把整个进程搬回根组再删自己的组——`tasks` 只搬主线程，
   别的线程会留在冻结点上。
 - **不再改 `device_idle_constants`**：进入不再靠调低全局门槛，而是冻结 + 延迟收口。

@@ -617,8 +617,14 @@ ds_proc_start() {
     printf '%s\n' "$s" | awk '{print $20}'
 }
 
-# 选冻结后端：v1 的 freezer 挂载点（这台机是 /dev/freezer），
-# 其次 v2 的 cgroup.freeze，最后才 SIGSTOP。
+# 选冻结后端：优先 v2（每进程原地冻结），其次 v1（独立 freezer 层级），最后 SIGSTOP。
+#
+# 为什么 v2 优先：cgroup v2 里冻结是**核心功能**（cgroup.freeze），它不会出现在
+# cgroup.controllers 里 —— 拿 controllers 去找 'freezer' 在任何 v2 系统上都不成立，
+# 老代码就是这么一路掉到 SIGSTOP 的。判据改成"某个真实 cgroup 的 cgroup.freeze 可写"。
+#
+# 为什么 v2 上不另建顶层组：Android 已经按 uid / 进程分好了组，把进程搬出自己的
+# uid 组会让 LMKD / PSI 看不见它的内存。v2 只能原地冻它自己那个 cgroup。
 ds_freeze_probe() {
     ds_freeze_backend=""
     ds_freeze_root=""
@@ -627,7 +633,16 @@ ds_freeze_probe() {
         ds_freeze_backend="off"
         return 0
     fi
-    local m
+    local p m
+    if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+        for p in /sys/fs/cgroup/apps/cgroup.freeze /sys/fs/cgroup/cgroup.freeze; do
+            if [ -w "$p" ]; then
+                ds_freeze_backend="v2"
+                ds_freeze_root="/sys/fs/cgroup"
+                return 0
+            fi
+        done
+    fi
     m="$(awk '$3=="cgroup" && $4 ~ /(^|,)freezer(,|$)/ {print $2; exit}' /proc/mounts 2>/dev/null)"
     if [ -n "$m" ] && [ -d "$m" ] && [ -w "$m" ]; then
         ds_freeze_backend="v1"
@@ -635,15 +650,39 @@ ds_freeze_probe() {
         ds_freeze_group="$m/$DS_FREEZE_GROUP_NAME"
         return 0
     fi
-    if [ -r /sys/fs/cgroup/cgroup.controllers ] \
-       && grep -q 'freezer' /sys/fs/cgroup/cgroup.controllers 2>/dev/null; then
-        ds_freeze_backend="v2"
-        ds_freeze_root="/sys/fs/cgroup"
-        ds_freeze_group="$ds_freeze_root/$DS_FREEZE_GROUP_NAME"
-        return 0
-    fi
     ds_freeze_backend="sigstop"
     return 0
+}
+
+# ── v2：原地冻结 ────────────────────────────────────────────────────
+# 只写进程自己那个 cgroup 的 cgroup.freeze，不迁移、不建组。
+# 路径来自 /proc/<pid>/cgroup 里 "0::/..." 那一行（v2 统一层级）。
+ds_v2_path_of() {
+    awk -F: '$1 == "0" { print $3; exit }' "/proc/$1/cgroup" 2>/dev/null
+}
+ds_v2_file_of() {
+    case "${1:-}" in ''|/) return 1 ;; esac
+    printf '%s%s/cgroup.freeze\n' "${ds_freeze_root:-/sys/fs/cgroup}" "$1"
+}
+# 「现在是否真的冻住了」看 cgroup.events 的 frozen，而不是看 cgroup.freeze：
+# 后者只是我们写下去的请求值；前者才是内核回报的实际状态。
+# 也不能看 /proc 的进程状态 —— 本来就在睡眠的进程被冻住后仍然是 S。
+ds_v2_is_frozen() {
+    local cg="$1" f
+    case "$cg" in ''|/) return 1 ;; esac
+    f="${ds_freeze_root:-/sys/fs/cgroup}${cg}/cgroup.events"
+    if [ -r "$f" ]; then
+        grep -q '^frozen 1' "$f" 2>/dev/null && return 0
+        return 1
+    fi
+    f="$(ds_v2_file_of "$cg")" || return 1
+    [ -r "$f" ] && [ "$(cat "$f" 2>/dev/null)" = "1" ]
+}
+ds_v2_write() {
+    local f
+    f="$(ds_v2_file_of "$1")" || return 1
+    [ -w "$f" ] || return 1
+    printf '%s\n' "$2" > "$f" 2>/dev/null
 }
 
 ds_freeze_move_root() {
@@ -674,11 +713,17 @@ ds_pid_in_group() {
     grep -qx -- "$pid" "$g/cgroup.procs" 2>/dev/null
 }
 
-# 这个 pid 是不是已经被别的冻结器（系统 HANS）冻住了。
-# 两边都冻同一个进程没有意义，只会多一次 cgroup 迁移和一次调度等待。
+# 这个 pid 是不是已经被别的冻结器冻住了。
+# 两边都冻同一个进程没有意义，只会互相把对方刚冻上的解开。
 ds_freeze_frozen_elsewhere() {
     local pid="$1" f
     [ -n "$ds_freeze_root" ] || return 1
+    if [ "$ds_freeze_backend" = "v2" ]; then
+        # v2 上系统（CachedAppOptimizer / ColorOS 的 HANS）就是往进程自己的
+        # cgroup.freeze 写 1。已经是 1 就说明它先冻了。
+        ds_v2_is_frozen "$(ds_v2_path_of "$pid")" && return 0
+        return 1
+    fi
     for f in "$ds_freeze_root/frozen/cgroup.procs" "$ds_freeze_root/frozen/tasks"; do
         [ -r "$f" ] || continue
         grep -qx -- "$pid" "$f" 2>/dev/null && return 0
@@ -710,47 +755,42 @@ ds_freeze_group_reset() {
 
 ds_freeze_group_init() {
     case "$ds_freeze_backend" in
-        off|sigstop) return 0 ;;
+        # v2 不建组：每个进程在自己原来的 cgroup 里原地冻。
+        off|sigstop|v2) return 0 ;;
     esac
     ds_freeze_group_reset
-    if [ "$ds_freeze_backend" = "v2" ]; then
-        echo '+freezer' > "$ds_freeze_root/cgroup.subtree_control" 2>/dev/null
-    fi
     mkdir -p "$ds_freeze_group" 2>/dev/null || {
         ds_freeze_backend="sigstop"
         return 0
     }
-    case "$ds_freeze_backend" in
-        v1)
-            if [ ! -w "$ds_freeze_group/freezer.state" ]; then
-                rmdir "$ds_freeze_group" 2>/dev/null
-                ds_freeze_backend="sigstop"
-                return 0
-            fi
-            echo THAWED > "$ds_freeze_group/freezer.state" 2>/dev/null
-            ;;
-        v2)
-            if [ ! -w "$ds_freeze_group/cgroup.freeze" ]; then
-                rmdir "$ds_freeze_group" 2>/dev/null
-                ds_freeze_backend="sigstop"
-                return 0
-            fi
-            echo 0 > "$ds_freeze_group/cgroup.freeze" 2>/dev/null
-            ;;
-    esac
+    if [ ! -w "$ds_freeze_group/freezer.state" ]; then
+        rmdir "$ds_freeze_group" 2>/dev/null
+        ds_freeze_backend="sigstop"
+        return 0
+    fi
+    echo THAWED > "$ds_freeze_group/freezer.state" 2>/dev/null
 }
 
 ds_freeze_add_pid() {
-    local pid="$1"
+    local pid="$1" cg
+    ds_freeze_last_cg=""
     case "$ds_freeze_backend" in
         v1)
             if [ -w "$ds_freeze_group/cgroup.procs" ]; then
-                printf '%s\n' "$pid" > "$ds_freeze_group/cgroup.procs" 2>/dev/null && return 0
+                printf '%s\n' "$pid" > "$ds_freeze_group/cgroup.procs" 2>/dev/null \
+                    && { ds_freeze_last_cg="$ds_freeze_group"; return 0; }
             fi
-            printf '%s\n' "$pid" > "$ds_freeze_group/tasks" 2>/dev/null && return 0
+            printf '%s\n' "$pid" > "$ds_freeze_group/tasks" 2>/dev/null \
+                && { ds_freeze_last_cg="$ds_freeze_group"; return 0; }
             ;;
         v2)
-            printf '%s\n' "$pid" > "$ds_freeze_group/cgroup.procs" 2>/dev/null && return 0
+            # v2 只确认"这个进程有自己的 cgroup 且能写 freeze"，
+            # 真正的置位统一在 ds_freeze_set FROZEN 里做（和 v1 同一套节奏）。
+            cg="$(ds_v2_path_of "$pid")"
+            case "$cg" in ''|/) return 1 ;; esac
+            [ -w "$(ds_v2_file_of "$cg")" ] || return 1
+            ds_freeze_last_cg="$cg"
+            return 0
             ;;
         sigstop)
             kill -STOP "$pid" 2>/dev/null && return 0
@@ -760,20 +800,24 @@ ds_freeze_add_pid() {
 }
 
 ds_freeze_set() {
+    local line pid st pkg cg
     case "$ds_freeze_backend" in
         v1) echo "$1" > "$ds_freeze_group/freezer.state" 2>/dev/null ;;
         v2)
-            if [ "$1" = "FROZEN" ]; then
-                echo 1 > "$ds_freeze_group/cgroup.freeze" 2>/dev/null
-            else
-                echo 0 > "$ds_freeze_group/cgroup.freeze" 2>/dev/null
-            fi
+            for line in $ds_frozen; do
+                IFS='|' read -r pid st pkg cg <<EOF
+$line
+EOF
+                [ -n "$cg" ] || continue
+                if [ "$1" = "FROZEN" ]; then ds_v2_write "$cg" 1
+                else ds_v2_write "$cg" 0; fi
+            done
             ;;
     esac
 }
 
 ds_freeze_verify() {
-    local i=0
+    local i=0 all line pid st pkg cg
     case "$ds_freeze_backend" in
         sigstop|off) return 0 ;;
         v1)
@@ -785,7 +829,15 @@ ds_freeze_verify() {
             ;;
         v2)
             while [ "$i" -lt 6 ]; do
-                grep -q '^frozen 1' "$ds_freeze_group/cgroup.events" 2>/dev/null && return 0
+                all=1
+                for line in $ds_frozen; do
+                    IFS='|' read -r pid st pkg cg <<EOF
+$line
+EOF
+                    [ -n "$cg" ] || continue
+                    ds_v2_is_frozen "$cg" || { all=0; break; }
+                done
+                [ "$all" = "1" ] && return 0
                 sleep 0.2; i=$((i+1))
             done
             return 1
@@ -806,7 +858,7 @@ ds_freeze_ledger_save() {
 # 按账本/当前内存解冻。启动时也走这里：先 THAWED，再把进程迁回根组，
 # 最后删自己的组；SIGSTOP 后端只发 CONT。
 ds_freeze_thaw_all() {
-    local b r g line pid led=""
+    local b r g line pid st pkg cg led=""
     b="$ds_freeze_backend"; r="$ds_freeze_root"; g="$ds_freeze_group"
     if [ -f "$DS_FREEZE_LEDGER" ]; then
         b="$(awk -F= '$1=="backend"{print $2; exit}' "$DS_FREEZE_LEDGER" 2>/dev/null)"
@@ -820,22 +872,23 @@ ds_freeze_thaw_all() {
         [ -n "$led" ] && ds_frozen="$led"
     fi
     ds_freeze_backend="$b"; ds_freeze_root="$r"; ds_freeze_group="$g"
-    case "$b" in
-        v1)
-            [ -n "$g" ] && [ -w "$g/freezer.state" ] && echo THAWED > "$g/freezer.state" 2>/dev/null
-            ;;
-        v2)
-            [ -n "$g" ] && [ -w "$g/cgroup.freeze" ] && echo 0 > "$g/cgroup.freeze" 2>/dev/null
-            ;;
-    esac
+    [ "$b" = "v1" ] && [ -n "$g" ] && [ -w "$g/freezer.state" ] \
+        && echo THAWED > "$g/freezer.state" 2>/dev/null
     for line in $ds_frozen; do
         # 不能用 ${line%%|*}：mksh 把 | 当成 ksh 模式的“或”，会切出空串。
-        IFS='|' read -r pid _ <<EOF
+        # 第 4 段是 cgroup 路径（v2 原地冻结靠它，v1 记的是自己的组）。
+        IFS='|' read -r pid st pkg cg <<EOF
 $line
 EOF
         case "$pid" in ''|*[!0-9]*) continue ;; esac
         if [ "$b" = "sigstop" ]; then
             kill -CONT "$pid" 2>/dev/null
+        elif [ "$b" = "v2" ]; then
+            # 只解冻我们当初冻的那个 cgroup，且只在这个 pid 还是当初那个进程时
+            # （pid 会被回收，starttime 变了就不是它了）。
+            [ -n "$cg" ] || continue
+            if [ -n "$st" ] && [ "$(ds_proc_start "$pid")" != "$st" ]; then continue; fi
+            ds_v2_write "$cg" 0
         else
             # 只搬还在我们组里的。被系统冻结器搬走的就别抢回来：
             # 那不是我们的冻结，解了它等于逼系统重新冻一遍。
@@ -843,7 +896,7 @@ EOF
         fi
     done
     # 账本可能漏掉后来进组的子进程：按组里的实际 PID 再搬一遍，否则组删不掉，
-    # 下一轮深睡会把这些进程连带冻上。
+    # 下一轮深睡会把这些进程连带冻上。（v1 专有，v2 没有组）
     if [ -n "$g" ] && [ -d "$g" ]; then
         for pid in $(cat "$g/cgroup.procs" 2>/dev/null; cat "$g/tasks" 2>/dev/null); do
             case "$pid" in ''|*[!0-9]*) continue ;; esac
@@ -1028,7 +1081,7 @@ EOF
         # 先掐唤醒锁，再冻；push 包整包不动 appops。
         ds_ops_apply "$pkg"
         ds_freeze_add_pid "$pid" || continue
-        ds_frozen="${ds_frozen}${pid}|${st}|${pkg}
+        ds_frozen="${ds_frozen}${pid}|${st}|${pkg}|${ds_freeze_last_cg}
 "
         n=$((n+1))
     done
@@ -1054,25 +1107,45 @@ EOF
     fi
 }
 
-# 媒体/新豁免应用需要跑：整组先 THAWED，移出这个包的 PID 后重新 FROZEN。
+# 媒体/新豁免应用需要跑：把它从这个包里单独解冻，其余保持冻结。
 ds_freeze_thaw_pkg() {
-    local pkg="$1" line keep="" thaw="" pid
+    local want="$1" line keep="" thaw="" pid st pkg cg tcg
     [ -n "$ds_frozen" ] || return 0
-    case "$pkg" in ''|*[!A-Za-z0-9._]*) return 0 ;; esac
+    case "$want" in ''|*[!A-Za-z0-9._]*) return 0 ;; esac
     while IFS= read -r line; do
         [ -n "$line" ] || continue
-        IFS='|' read -r pid _ <<EOF
+        IFS='|' read -r pid st pkg cg <<EOF
 $line
 EOF
-        case "$line" in
-            *"|$pkg") thaw="$thaw $pid" ;;
-            *) keep="$keep$line
-" ;;
-        esac
+        # 按字段比，不能按行尾子串：第 4 段是 cgroup 路径，行尾早不是包名了。
+        if [ "$pkg" = "$want" ]; then
+            thaw="$thaw $pid"
+        else
+            keep="$keep$line
+"
+        fi
     done <<EOF
 $ds_frozen
 EOF
     [ -n "$thaw" ] || return 0
+    if [ "$ds_freeze_backend" = "v2" ]; then
+        # v2 原地冻：只把要放行的那几个进程自己的 cgroup.freeze 写回 0，
+        # 其余不动，也就不需要"整组解冻再重冻"。
+        for pid in $thaw; do
+            tcg="$(printf '%s\n' "$ds_frozen" | awk -F'|' -v p="$pid" -v w="$want" \
+                   '$1 == p && $3 == w { print $4; exit }')"
+            [ -n "$tcg" ] && ds_v2_write "$tcg" 0
+        done
+        ds_frozen="$keep"
+        ds_freeze_ledger_save
+        if [ -n "$ds_frozen" ]; then
+            ds_freeze_verify || ds_freeze_thaw_all
+        else
+            ds_freeze_frozen=0
+        fi
+        log_ds "已解冻 $want 的后台进程（媒体/新豁免）"
+        return 0
+    fi
     ds_freeze_set THAWED
     for pid in $thaw; do
         if [ "$ds_freeze_backend" = "sigstop" ]; then
@@ -1090,7 +1163,7 @@ EOF
         [ -n "$ds_freeze_group" ] && rmdir "$ds_freeze_group" 2>/dev/null
         ds_freeze_frozen=0
     fi
-    log_ds "已解冻 $pkg 的后台进程（媒体/新豁免）"
+    log_ds "已解冻 $want 的后台进程（媒体/新豁免）"
 }
 
 # 7:30 一次性收口：cmd 优先，失败补发 dumpsys 兼容命令，仍失败不再重试。
@@ -1373,6 +1446,8 @@ ds_state_write() {
           printf "%s%s:%d:%d", sep, $1, $2, flag }')"
     new="enable=$ds_enabled
 dsactive=$ds_active
+freeze=${DS_FREEZE_ENABLED:-0}
+fzb=${ds_freeze_backend:-off}
 wcsince=$ds_wcsince
 dsw=$dsw
 dswc=$dswc"

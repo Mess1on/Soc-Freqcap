@@ -27,11 +27,48 @@ has(){ grep -qx -- "$2" "$1" 2>/dev/null && echo yes || echo no; }
 ds_proc_state(){ ds_proc_stat_after_comm "$1" 2>/dev/null | awk '{print $1}'; }
 ds_proc_adj(){ cat "/proc/$1/oom_score_adj" 2>/dev/null; }
 
+# v2 下 root 进程待在 v2 的 "/" 根组里，产品代码正确地拒绝冻它（冻了整机都停）。
+# 真实第三方应用都在 /apps/uid_X/pid_Y 各自的组里，所以台架也得把 dummy 放进
+# 一个 apps 子组 —— 否则测的是一个产品永远不会去冻的位置，测出来的红绿都没意义。
+V2G=""
+fz_place(){
+    case "$ds_freeze_backend" in
+        v2)
+            if [ -z "$V2G" ]; then
+                V2G=/sys/fs/cgroup/apps/socfreq_ds_test_b
+                rmdir "$V2G" 2>/dev/null
+                mkdir -p "$V2G" 2>/dev/null
+            fi
+            [ -d "$V2G" ] && printf '%s\n' "$1" > "$V2G/cgroup.procs" 2>/dev/null
+            ;;
+    esac
+}
+fz_frozen(){
+    case "$ds_freeze_backend" in
+        v2) ds_v2_is_frozen "$(ds_v2_path_of "$1")" && echo y || echo n ;;
+        v1) [ "$(cat "$ds_freeze_group/freezer.state" 2>/dev/null)" = "FROZEN" ] && echo y || echo n ;;
+        *)  echo n ;;
+    esac
+}
+fz_group_left(){
+    case "$ds_freeze_backend" in
+        v1) [ -d "$ds_freeze_group" ] && echo yes || echo no ;;
+        *)  echo no ;;
+    esac
+}
+
 P=""
 cleanup(){
     ds_freeze_thaw_all >/dev/null 2>&1
     ds_snap_restore_if_any >/dev/null 2>&1
     [ -n "$P" ] && kill "$P" 2>/dev/null
+    if [ -n "$V2G" ] && [ -d "$V2G" ]; then
+        echo 0 > "$V2G/cgroup.freeze" 2>/dev/null
+        for _p in $(cat "$V2G/cgroup.procs" 2>/dev/null); do
+            printf '%s\n' "$_p" > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+        done
+        rmdir "$V2G" 2>/dev/null
+    fi
     rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -52,53 +89,47 @@ P=$!
 DS_FREEZE_TEST_PID=$P
 DS_FREEZE_TEST_PKG=com.test.freeze
 export DS_FREEZE_TEST_PID DS_FREEZE_TEST_PKG
+fz_place "$P"
 
 ds_freeze_group_init
-ok "$([ "$ds_freeze_frozen" = "0" ] && echo y || echo n)" "y" "建组后未冻结"
+ok "$([ "$ds_freeze_frozen" = "0" ] && echo y || echo n)" "y" "开始前未冻结"
 ds_freeze_build_queue
 ok "$(grep -c . "$DS_FREEZE_QUEUE")" "1" "候选队列里有 dummy 进程"
 ok "$(cat "$DS_FREEZE_QUEUE")" "$P|$(ds_proc_start "$P")|com.test.freeze" \
    "队列记下 pid|starttime|包名"
 ds_freeze_step
-ok "$ds_freeze_frozen" "1" "第一批后组状态为 FROZEN"
+ok "$ds_freeze_frozen" "1" "第一批后进入冻结态"
 ok "$([ -f "$DS_FREEZE_LEDGER" ] && echo y || echo n)" "y" "账本已落盘"
 ok "$(grep -c "^$P|" "$DS_FREEZE_LEDGER")" "1" "账本里有 dummy 的 pid"
 ok "$(kill -0 "$P" 2>/dev/null && echo y || echo n)" "y" "冻结后进程还在（没被杀）"
+ok "$(fz_frozen "$P")" "y" "dummy 真的被冻住"
 case "$ds_freeze_backend" in
-    v1)
-        ok "$(cat "$ds_freeze_group/freezer.state")" "FROZEN" "freezer.state=FROZEN"
-        case "$(ds_proc_state "$P")" in
-            D|T) ok y y "进程状态变成 $(ds_proc_state "$P")（停住了）" ;;
-            *) ok "$(ds_proc_state "$P")" "D/T" "冻结后进程应该是停止态" ;;
-        esac ;;
-    v2)
-        ok "$(grep -c '^frozen 1' "$ds_freeze_group/cgroup.events")" "1" "cgroup.events frozen=1" ;;
+    v1) ok "$(cat "$ds_freeze_group/freezer.state")" "FROZEN" "freezer.state=FROZEN" ;;
+    v2) ok "$(awk -F'|' -v p="$P" '$1==p{print $4}' "$DS_FREEZE_LEDGER")" \
+            "$(ds_v2_path_of "$P")" "账本记下了它自己的 cgroup 路径" ;;
 esac
 
 echo "== 单包解冻（媒体/新豁免走这条路）=="
 ds_freeze_thaw_pkg com.test.freeze
 ok "$ds_frozen" "" "解冻后不再挂账"
 ok "$(kill -0 "$P" 2>/dev/null && echo y || echo n)" "y" "解冻后进程还在"
-case "$ds_freeze_backend" in
-    v1|v2)
-        ok "$([ -d "$ds_freeze_group" ] && echo yes || echo no)" "no" "组里没进程后删掉" ;;
-esac
+ok "$(fz_frozen "$P")" "n" "dummy 真的解冻了"
+ok "$(fz_group_left)" "no" "没有残留组"
 
 echo "== 崩溃后按账本还原 =="
 ds_freeze_group_init
 ds_freeze_build_queue
 ds_freeze_step
-ok "$ds_freeze_frozen" "1" "再次冻住 dummy"
+ok "$(fz_frozen "$P")" "y" "再次冻住 dummy"
 # 新进程（模拟守护被 kill 后重启）：内存状态是空的，只能靠账本
 ( unset DS_FREEZE_TEST_PID DS_FREEZE_TEST_PKG
   . "$MOD/scripts/deep_sleep.sh"
   ds_freeze_restore_if_any ) >/dev/null 2>&1
 ok "$([ -f "$DS_FREEZE_LEDGER" ] && echo yes || echo no)" "no" "账本已删除"
 ok "$(kill -0 "$P" 2>/dev/null && echo y || echo n)" "y" "还原后进程还在"
-case "$ds_freeze_backend" in
-    v1|v2)
-        ok "$([ -d "$ds_freeze_group" ] && echo yes || echo no)" "no" "残留组已清理" ;;
-esac
+ok "$(fz_group_left)" "no" "残留组已清理"
+ok "$(ds_v2_is_frozen "$(ds_v2_path_of "$P")" && echo y || echo n)" "n" \
+   "v2 下按账本也真的解冻了"
 ds_frozen=""; ds_freeze_frozen=0
 kill "$P" 2>/dev/null; P=""
 
@@ -111,6 +142,7 @@ P=$!
 DS_FREEZE_TEST_PID=$P
 DS_FREEZE_TEST_PKG=com.test.freeze
 export DS_FREEZE_TEST_PID DS_FREEZE_TEST_PKG
+fz_place "$P"
 ds_freeze_group_init
 ds_freeze_build_queue
 ok "$(grep -c "^$P|" "$DS_FREEZE_QUEUE" 2>/dev/null)" "1" "队列里是候选 pid 本身"
@@ -135,6 +167,7 @@ P=$!
 DS_FREEZE_TEST_PID=$P
 DS_FREEZE_TEST_PKG=com.test.freeze
 export DS_FREEZE_TEST_PID DS_FREEZE_TEST_PKG
+fz_place "$P"
 ALARM_GUARD_SEC=0
 ds_conf_write
 printf 'enable=1\n' > "$DSLEEP_CONF"
@@ -145,16 +178,16 @@ ok "$ds_active" "1" "ds_enter 进入深睡"
 ok "$ds_freeze_frozen" "1" "dummy 被冻住"
 ok "$([ -f "$DS_SNAP" ] && echo y || echo n)" "y" "进入时写了快照"
 ok "$(awk -F= '$1=="dsactive"{print $2}' "$STATE_FILE")" "1" "state 报深睡中"
+ok "$(fz_frozen "$P")" "y" "进入后 dummy 真的被冻住"
 case "$ds_freeze_backend" in
     v1) ok "$(cat "$ds_freeze_group/freezer.state")" "FROZEN" "组状态 FROZEN" ;;
-    v2) ok "$(grep -c '^frozen 1' "$ds_freeze_group/cgroup.events")" "1" "cgroup.events frozen=1" ;;
 esac
-ok "$(ds_proc_state "$P")" "D" "dummy 停住（D）"
 ds_exit "台架"
 ds_state_write
 sleep 1
 ok "$ds_active" "0" "ds_exit 退出"
-ok "$([ -d "$ds_freeze_group" ] && echo yes || echo no)" "no" "退出后组已删除"
+ok "$(fz_group_left)" "no" "退出后没有残留组"
+ok "$(fz_frozen "$P")" "n" "退出后 dummy 被解冻"
 ok "$(ds_proc_state "$P")" "S" "dummy 恢复运行（S）"
 ok "$([ -f "$DS_SNAP" ] && echo yes || echo no)" "no" "退出后快照已删"
 ok "$(awk -F= '$1=="dsactive"{print $2}' "$STATE_FILE")" "0" "state 报已退出"
@@ -187,22 +220,41 @@ ok "$(has "$DS_FREEZE_QUEUE" com.android.systemui)" "no" "系统 UI 不在候选
 : > "$DS_FREEZE_QUEUE"
 
 echo "== 识别系统冻结器：已经被别处冻住的进程不再重复入组 =="
-# 用假目录验纯逻辑，不碰真的 /dev/freezer/frozen
-FAKE="$TMP/fakeroot"; mkdir -p "$FAKE/frozen"
-printf '424242\n' > "$FAKE/frozen/cgroup.procs"
-_save_root="$ds_freeze_root"
-ds_freeze_root="$FAKE"
-ok "$(ds_freeze_frozen_elsewhere 424242 && echo y || echo n)" "y" "系统冻结组里的 pid 能认出来"
-ok "$(ds_freeze_frozen_elsewhere 424243 && echo y || echo n)" "n" "不在系统冻结组里的 pid 不误判"
-ds_freeze_root="$_save_root"
+case "$ds_freeze_backend" in
+  v1)
+    # 用假目录验纯逻辑，不碰真的 /dev/freezer/frozen
+    FAKE="$TMP/fakeroot"; mkdir -p "$FAKE/frozen"
+    printf '424242\n' > "$FAKE/frozen/cgroup.procs"
+    _save_root="$ds_freeze_root"
+    ds_freeze_root="$FAKE"
+    ok "$(ds_freeze_frozen_elsewhere 424242 && echo y || echo n)" "y" "系统冻结组里的 pid 能认出来"
+    ok "$(ds_freeze_frozen_elsewhere 424243 && echo y || echo n)" "n" "不在系统冻结组里的 pid 不误判"
+    ds_freeze_root="$_save_root"
+    ;;
+  v2)
+    # v2 上"已被系统冻住"就是进程自己的 cgroup.events 里 frozen 1
+    G0=/sys/fs/cgroup/apps/socfreq_ds_test_f
+    rmdir "$G0" 2>/dev/null; mkdir -p "$G0" 2>/dev/null
+    sleep 300 & P0=$!
+    printf '%s\n' "$P0" > "$G0/cgroup.procs" 2>/dev/null
+    ok "$(ds_freeze_frozen_elsewhere "$P0" && echo y || echo n)" "n" "没冻的不误判"
+    echo 1 > "$G0/cgroup.freeze" 2>/dev/null
+    sleep 0.4
+    ok "$(ds_freeze_frozen_elsewhere "$P0" && echo y || echo n)" "y" "系统已冻住的进程能认出来"
+    echo 0 > "$G0/cgroup.freeze" 2>/dev/null
+    sleep 0.4
+    printf '%s\n' "$P0" > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+    kill "$P0" 2>/dev/null; wait "$P0" 2>/dev/null
+    rmdir "$G0" 2>/dev/null
+    ;;
+esac
 
 echo "== 解冻只动自己的组：系统管着的进程不能被抢回来 =="
-# ColorOS 的 HANS 和我们共用 /dev/freezer 层级。它把自己的进程放在
-# frozen/thaw 里；我们按账本解冻时如果不先看"还在不在我们组里"，
-# 会把它刚冻上的进程搬回根组（等于替它解冻），它下一轮又冻回去 ——
+# ColorOS 的 HANS 和我们共用同一个 cgroup 层级。它管着的进程，我们解冻时
+# 如果不先看"这条记录还是不是我们的"，会替它解冻，它下一轮又冻回去 ——
 # 待机时两边对着搬正是最费电的形态。
 case "$ds_freeze_backend" in
-  v1|v2)
+  v1)
     sleep 300 & P1=$!
     sleep 300 & P2=$!
     OTHER="$ds_freeze_root/socfreq_ds_other"
@@ -225,12 +277,44 @@ ${P2}|$(ds_proc_start "$P2")|com.test.other
     wait "$P1" "$P2" 2>/dev/null
     rmdir "$OTHER" 2>/dev/null
     ;;
+  v2)
+    # v2 原地冻：账本里只该写我们记下的那几个 cgroup。
+    # 另一个"别人管着"的 cgroup 冻着不动，验证我们没去碰它。
+    G1=/sys/fs/cgroup/apps/socfreq_ds_test_c1
+    G2=/sys/fs/cgroup/apps/socfreq_ds_test_c2
+    rmdir "$G1" "$G2" 2>/dev/null
+    mkdir -p "$G1" "$G2" 2>/dev/null
+    sleep 300 & P1=$!
+    sleep 300 & P2=$!
+    printf '%s\n' "$P1" > "$G1/cgroup.procs" 2>/dev/null
+    printf '%s\n' "$P2" > "$G2/cgroup.procs" 2>/dev/null
+    echo 1 > "$G1/cgroup.freeze" 2>/dev/null
+    echo 1 > "$G2/cgroup.freeze" 2>/dev/null
+    sleep 0.4
+    rm -f "$DS_FREEZE_LEDGER" 2>/dev/null
+    ok "$(ds_v2_is_frozen /apps/socfreq_ds_test_c1 && echo y || echo n)" "y" "P1 冻住"
+    ok "$(ds_v2_is_frozen /apps/socfreq_ds_test_c2 && echo y || echo n)" "y" "P2 冻住"
+    ds_frozen="${P1}|$(ds_proc_start "$P1")|com.test.mine|/apps/socfreq_ds_test_c1
+"
+    ds_freeze_thaw_all >/dev/null 2>&1
+    ok "$(ds_v2_is_frozen /apps/socfreq_ds_test_c1 && echo y || echo n)" "n" "账本里的 pid 被解冻"
+    ok "$(ds_v2_is_frozen /apps/socfreq_ds_test_c2 && echo y || echo n)" "y" "没记账的进程原地不动（没被抢回来）"
+    for g in "$G1" "$G2"; do
+        echo 0 > "$g/cgroup.freeze" 2>/dev/null
+        for p in $(cat "$g/cgroup.procs" 2>/dev/null); do
+            printf '%s\n' "$p" > /sys/fs/cgroup/cgroup.procs 2>/dev/null
+        done
+        rmdir "$g" 2>/dev/null
+    done
+    kill "$P1" "$P2" 2>/dev/null
+    wait "$P1" "$P2" 2>/dev/null
+    ;;
   *) echo "  （后端是 $ds_freeze_backend，跳过）" ;;
 esac
 
 echo "== 收尾 =="
 ds_freeze_restore_if_any
-ok "$([ -d "$ds_freeze_group" ] && echo yes || echo no)" "no" "没有残留冻结组"
+ok "$(fz_group_left)" "no" "没有残留冻结组"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "全部通过 ($pass)"; else echo "$fail 项失败 / $pass 项通过"; fi

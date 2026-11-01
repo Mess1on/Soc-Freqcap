@@ -31,16 +31,18 @@ if (!searchChunk) {
 
 const FULL = [
   'enable=1', 'alive=1', 'dsactive=1', 'wcsince=1700000000',
+  'freeze=1', 'fzb=v2',
   'dsw=com.a:5:0,com.b:2:1,com.bad:oops:0',
   'dswc=com.a:9:0',
   'white=com.b', 'white=com.c',
 ].join('\n');
 const POLL = [
   'enable=1', 'alive=1', 'dsactive=1', 'wcsince=1700000000',
+  'freeze=1', 'fzb=v2',
   'dsw=com.a:7:0,com.b:3:1',
   'dswc=com.a:11:0',
 ].join('\n');
-const OFF = 'enable=0\nalive=0\ndsactive=0\nwcsince=0\ndsw=\ndswc=\n';
+const OFF = 'enable=0\nalive=0\ndsactive=0\nwcsince=0\nfreeze=1\nfzb=off\ndsw=\ndswc=\n';
 
 function mkEl(tag) {
   const el = {
@@ -125,6 +127,10 @@ function sandbox() {
     ok(box.classList.contains('on') && s.get('ds-stxt').textContent === '深度睡眠中',
        '深睡中状态条染成绿色并写「深度睡眠中」');
     ok(s.get('ds_enable').checked === true, '总开关跟着状态勾上');
+    ok(st.freeze === 1 && st.fzb === 'v2', 'parseDs 读出冻结开关和后端');
+    ok(s.get('ds_freeze').checked === true, '墓碑冻结开关跟着状态勾上');
+    ok(s.get('ds-fzb').textContent.indexOf('V2') >= 0,
+       '冻结方式写清是 V2（用户要能看到实际用哪套）');
     ok(s.get('ds-run').children.length === 2, '当次榜画两行（坏条目不算）');
     ok(s.get('ds-cur').children.length === 1, '累计榜画一行');
     const runTxt = textOf(s.get('ds-run'));
@@ -145,6 +151,23 @@ function sandbox() {
     ok(s.get('ds-run').children.length === 0
        && textOf(s.get('ds-run')).indexOf('还没有记录') >= 0,
        '没有记录时给一句人话，不画空柱');
+    ok(s.get('ds-fzb').textContent.indexOf('未开启') >= 0,
+       '没开深睡时冻结方式直接说明未开启');
+  }
+
+  {
+    // 后端回退时的文案：v1 / sigstop 也要能看懂
+    for (const [b, want] of [['v1', 'V1'], ['sigstop', 'SIGSTOP']]) {
+      const s = sandbox();
+      s.ctx.applyDs(s.ctx.parseDs(`enable=1\nfreeze=1\nfzb=${b}\n`), false);
+      ok(s.get('ds-fzb').textContent.indexOf(want) >= 0,
+         `后端 ${b} 时提示里带 ${want}`);
+    }
+    const s = sandbox();
+    s.ctx.applyDs(s.ctx.parseDs('enable=1\nfreeze=0\nfzb=off\n'), false);
+    ok(s.get('ds_freeze').checked === false, '关掉冻结时开关是关的');
+    ok(s.get('ds-fzb').textContent.indexOf('已关闭') >= 0,
+       '关掉冻结时说明只做 Doze 白名单');
   }
 
   {
