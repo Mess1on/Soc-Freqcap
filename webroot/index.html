@@ -1161,6 +1161,10 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
       <label class="sw"><input type="checkbox" id="ds_freeze" onchange="setDsFreeze(this.checked)"><i></i></label>
     </div>
     <div class="hint" id="ds-fzb" style="margin:-2px 0 6px">冻结方式：读取中…</div>
+    <div class="row">
+      <div class="lbl"><b>Doze 收口</b><span>熄屏后让系统进一次深度空闲，并把 push / 短信 / 媒体加进 Doze 白名单；关闭则完全不碰系统 Doze</span></div>
+      <label class="sw"><input type="checkbox" id="ds_doze" onchange="setDsDoze(this.checked)"><i></i></label>
+    </div>
     <div class="ds-st off" id="ds-st">
       <span class="dot"></span><span id="ds-stxt">读取中…</span><span class="meta" id="ds-meta"></span>
     </div>
@@ -3269,7 +3273,7 @@ function renderPicker(){
 /* ── 深度睡眠 ──
  * 数据来自 api.sh：ds_get 带白名单（首次加载），ds_state 只给状态与榜单（2 秒轮询）。
  * 唤醒榜格式 pkg:次数:是否白名单，逗号分隔，最多 12 条。 */
-const DS = {enable:0, freeze:1, fzb:'', alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[], limit:80};
+const DS = {enable:0, freeze:1, doze:1, fzb:'', alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[], limit:80};
 
 function dsBoard(v){
   if(!v) return [];
@@ -3280,7 +3284,7 @@ function dsBoard(v){
 }
 
 function parseDs(text){
-  const o = {enable:0, freeze:1, fzb:'', alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[]};
+  const o = {enable:0, freeze:1, doze:1, fzb:'', alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[]};
   String(text || '').split('\n').forEach(l=>{
     const i = l.indexOf('=');
     if(i < 0) return;
@@ -3290,6 +3294,7 @@ function parseDs(text){
     else if(k === 'dswc') o.cur = dsBoard(v);
     else if(k === 'dsactive') o.active = +v || 0;
     else if(k === 'freeze') o.freeze = +v || 0;
+    else if(k === 'doze') o.doze = +v || 0;
     else if(k === 'fzb') o.fzb = v;
     else if(k === 'enable' || k === 'alive' || k === 'paused' || k === 'wcsince') o[k] = +v || 0;
   });
@@ -3406,6 +3411,7 @@ function applyDs(st, full){
   DS.enable = st.enable; DS.alive = st.alive; DS.paused = st.paused;
   DS.active = st.active;
   DS.freeze = st.freeze; DS.fzb = st.fzb;
+  DS.doze = st.doze;
   DS.wcsince = st.wcsince; DS.run = st.run; DS.cur = st.cur;
   paintDsStatus();
   paintDsFreeze();
@@ -3418,6 +3424,8 @@ function applyDs(st, full){
 function paintDsFreeze(){
   const el = document.getElementById('ds_freeze');
   if(el) el.checked = !!DS.freeze;
+  const dz = document.getElementById('ds_doze');
+  if(dz) dz.checked = !!DS.doze;
   const h = document.getElementById('ds-fzb');
   if(!h) return;
   if(!DS.enable)          h.textContent = '冻结方式：未开启深度睡眠';
@@ -3449,6 +3457,28 @@ async function setDsFreeze(on){
     toast(e.message, true);
     loadDs(false);
   }finally{ dsFreezeBusy = false; }
+}
+
+let dsDozeBusy = false;
+async function setDsDoze(on){
+  if(dsDozeBusy){
+    document.getElementById('ds_doze').checked = !!DS.doze;
+    return;
+  }
+  dsDozeBusy = true;
+  const old = DS.doze;
+  DS.doze = on ? 1 : 0;
+  paintDsFreeze();
+  try{
+    await api('ds_set', 'doze', on ? '1' : '0');
+    toast(on ? '已开启 Doze 收口' : '已关闭 Doze 收口（不再碰系统 Doze）');
+    await loadDs(false);
+  }catch(e){
+    DS.doze = old;
+    paintDsFreeze();
+    toast(e.message, true);
+    loadDs(false);
+  }finally{ dsDozeBusy = false; }
 }
 
 async function loadDs(full){

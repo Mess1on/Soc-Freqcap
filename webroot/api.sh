@@ -1506,6 +1506,7 @@ _ds_dump() {
   printf 'enable=%s\n' "$(_ds_enable)"
   printf 'freeze=%s\n' "$(_ds_switch freeze 1)"
   printf 'appops=%s\n' "$(_ds_switch appops 1)"
+  printf 'doze=%s\n' "$(_ds_switch doze 1)"
   # 后端只报"实际会选哪个"，不报用户愿望：用户看到的必须是真在用的那一套。
   # 2 秒轮询走状态文件里缓存的那份（守护每轮会写），只有 full 才现场探一次 ——
   # 现场探要 source 一遍整份脚本，没必要每 2 秒做一次。
@@ -1546,7 +1547,7 @@ cmd_ds_state() { _ds_dump; }
 cmd_ds_set() {
   _k=${1:-}; _v=${2:-}
   case "$_k" in
-    enable|freeze|appops) ;;
+    enable|freeze|appops|doze) ;;
     *) die "BAD_KEY" ;;
   esac
   is_switch "$_v" || die "RANGE"

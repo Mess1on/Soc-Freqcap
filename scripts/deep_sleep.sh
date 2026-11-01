@@ -26,6 +26,9 @@ DS_ACTIVE_FALLBACK=30
 # 冻结时序：熄屏后先冻结后台，7:30 才一次性 force-idle。
 # 3 分钟内分批冻结，之后不再新增，减少冻结组里 D 状态进程把整组卡住的机会。
 DS_FREEZE_ENABLED=${DS_FREEZE:-1}
+# Doze 总闸。关掉后模块完全不碰 deviceidle：不加/删白名单、不 force-idle、不 unforce。
+# 留着它是因为"待机耗电"到底该记在冻结头上还是 Doze 头上，只有分开跑才说得清。
+DS_DOZE_ENABLED=${DS_DOZE:-1}
 DS_FREEZE_WINDOW=180
 DS_FREEZE_RESCAN=60
 DS_DOZE_AT=450
@@ -58,6 +61,9 @@ ds_enabled=0
 ds_active=0
 ds_screen_off_ts=0
 ds_added=""
+# 本轮深睡里"已经处理过的用户白名单包"。不能拿 ds_added 代替：
+# Doze 关掉时 ds_added 永远是空的，用它做守卫会让这段每轮都重跑一遍、每轮刷一行日志。
+ds_white_seen=""
 ds_alarm_checked=0
 ds_alarm_wait=0
 ds_game_checked=0
@@ -303,6 +309,10 @@ enable=0
 # appops=1 冻结时顺手把后台应用的唤醒锁权限设成 ignore，退出时按账本还原；
 # 0 完全不碰唤醒锁。对比耗电时也可以单独关它。
 # appops=1
+# doze=1 熄屏 7 分 30 秒后让系统 force-idle 一次，并把 push/短信/媒体加进 Doze 白名单；
+# 0 完全不碰 deviceidle（不加白名单、不 force-idle、不 unforce）。
+# 注意白名单是"包级豁免"：加进去等于整个应用不受 Doze 限制。
+# doze=1
 # 每行一条 white=包名：完全豁免（不冻结/不限 CPU/不碰唤醒锁），并加入 Doze 白名单。
 # white=com.tencent.mm
 # nice=包名：不冻结、不碰唤醒锁（保活类应用；深睡不碰 CPU）。
@@ -357,6 +367,7 @@ ds_conf_load() {
     # 这两项以前只能靠环境变量给，配置里改不了，用户没法自己做开关对照。
     DS_FREEZE_ENABLED=$(ds_conf_opt freeze "${DS_FREEZE:-1}")
     DS_APPOPS_ENABLED=$(ds_conf_opt appops "${DS_APPOPS:-1}")
+    DS_DOZE_ENABLED=$(ds_conf_opt doze "${DS_DOZE:-1}")
     return 0
 }
 
@@ -1168,6 +1179,7 @@ EOF
 
 # 7:30 一次性收口：cmd 优先，失败补发 dumpsys 兼容命令，仍失败不再重试。
 ds_doze_once() {
+    [ "$DS_DOZE_ENABLED" = "1" ] || return 0
     [ "$ds_doze_sent" = "1" ] && return 0
     ds_doze_sent=1
     if timeout 2 cmd deviceidle force-idle deep >/dev/null 2>&1; then
@@ -1347,37 +1359,45 @@ ds_policy_migrate_v3() {
 
 ds_enter() {
     local old_white pkg n=0 sms
-    old_white="$(ds_white_snapshot)"
+    old_white=""
     ds_added=""
+    ds_white_seen=""
+    # Doze 总闸关着就一个白名单都不动：白名单是"包级豁免"，加进去等于整包
+    # 不受 Doze 限制，这本身就是一条耗电来源，得能单独关掉做对照。
+    [ "$DS_DOZE_ENABLED" = "1" ] && old_white="$(ds_white_snapshot)"
     for pkg in $(echo "$DS_WHITE" | tr ',' ' '); do
         [ -n "$pkg" ] || continue
         n=$((n+1)); [ "$n" -gt "$MAX_WHITE" ] && break
+        ds_white_seen="$ds_white_seen $pkg"
+        [ "$DS_DOZE_ENABLED" = "1" ] || continue
         ds_white_add "$pkg" "$old_white"
     done
-    # push 列表的包也要进 Doze 白名单（只放行 push 进程，整包仍可能被冻结）。
-    for pkg in $(ds_push_pkg_list | tr ',' ' '); do
-        [ -n "$pkg" ] || continue
-        case " $ds_added " in *" $pkg "*) continue ;; esac
-        ds_white_add "$pkg" "$old_white"
-    done
-    # 默认短信应用不在名单里也要临时加白：否则 SMS 广播会被压到出 Doze 才发。
-    # 退出时按 ds_added 撤掉；用户名单里的那条不会被撤。
-    sms="$(ds_sms_pkg)"
-    if [ -n "$sms" ]; then
-        case ",$DS_WHITE," in
-            *",$sms,"*) : ;;
-            *) ds_white_add "$sms" "$old_white"
-               log_ds "短信应用 $sms 已临时加白" ;;
-        esac
+    if [ "$DS_DOZE_ENABLED" = "1" ]; then
+        # push 列表的包也要进 Doze 白名单（只放行 push 进程，整包仍可能被冻结）。
+        for pkg in $(ds_push_pkg_list | tr ',' ' '); do
+            [ -n "$pkg" ] || continue
+            case " $ds_added " in *" $pkg "*) continue ;; esac
+            ds_white_add "$pkg" "$old_white"
+        done
+        # 默认短信应用不在名单里也要临时加白：否则 SMS 广播会被压到出 Doze 才发。
+        # 退出时按 ds_added 撤掉；用户名单里的那条不会被撤。
+        sms="$(ds_sms_pkg)"
+        if [ -n "$sms" ]; then
+            case ",$DS_WHITE," in
+                *",$sms,"*) : ;;
+                *) ds_white_add "$sms" "$old_white"
+                   log_ds "短信应用 $sms 已临时加白" ;;
+            esac
+        fi
+        # 正在放媒体的应用（可能在 nice=）进入时也临时进 Doze 白名单，
+        # 否则 force-idle 后音乐会被压住；退出时按 ds_added 撤销。
+        for pkg in $(ds_media_playing); do
+            [ -n "$pkg" ] || continue
+            case " $ds_added " in *" $pkg "*) continue ;; esac
+            ds_white_add "$pkg" "$old_white"
+            log_ds "媒体应用 $pkg 已临时加白"
+        done
     fi
-    # 正在放媒体的应用（可能在 nice=）进入时也临时进 Doze 白名单，
-    # 否则 force-idle 后音乐会被压住；退出时按 ds_added 撤销。
-    for pkg in $(ds_media_playing); do
-        [ -n "$pkg" ] || continue
-        case " $ds_added " in *" $pkg "*) continue ;; esac
-        ds_white_add "$pkg" "$old_white"
-        log_ds "媒体应用 $pkg 已临时加白"
-    done
     ds_snap_write
     # ZenCore 时序：先冻结/限流后台，7:30 才一次性 force-idle，不再 20 秒就压 Doze。
     ds_doze_sent=0
@@ -1447,6 +1467,7 @@ ds_state_write() {
     new="enable=$ds_enabled
 dsactive=$ds_active
 freeze=${DS_FREEZE_ENABLED:-0}
+doze=${DS_DOZE_ENABLED:-1}
 fzb=${ds_freeze_backend:-off}
 wcsince=$ds_wcsince
 dsw=$dsw
@@ -1548,12 +1569,17 @@ ds_tick() {
     # 深睡期间新加入的用户白名单立即生效，不用等下一次熄屏。
     # 白名单快照每轮只取一次：它是一次完整 dumpsys，按包名各取一次
     # 等于同一轮里把同一份清单 dump 了 N 遍。
+    # 用 ds_white_seen 而不是 ds_added 做守卫：Doze 关着时 ds_added 恒空，
+    # 用它会每轮重跑一遍并刷日志。
     _snap=""; _snap_done=0
     for pkg in $(echo "$DS_WHITE" | tr ',' ' '); do
         [ -n "$pkg" ] || continue
-        case " $ds_added " in *" $pkg "*) continue ;; esac
-        [ "$_snap_done" = "1" ] || { _snap="$(ds_white_snapshot)"; _snap_done=1; }
-        ds_white_add "$pkg" "$_snap"
+        case " $ds_white_seen " in *" $pkg "*) continue ;; esac
+        ds_white_seen="$ds_white_seen $pkg"
+        if [ "$DS_DOZE_ENABLED" = "1" ]; then
+            [ "$_snap_done" = "1" ] || { _snap="$(ds_white_snapshot)"; _snap_done=1; }
+            ds_white_add "$pkg" "$_snap"
+        fi
         ds_freeze_thaw_pkg "$pkg"
         ds_snap_write
         log_ds "新加入白名单的应用已加白"
@@ -1564,7 +1590,8 @@ ds_tick() {
         media="$(ds_media_playing)"
         for pkg in $media; do
             case " $ds_added " in *" $pkg "*) continue ;; esac
-            ds_white_add "$pkg" "$(ds_white_snapshot)"
+            # Doze 关着就只解冻、不加白：加白是"整包豁免 Doze"，正是要能关掉的那部分。
+            [ "$DS_DOZE_ENABLED" = "1" ] && ds_white_add "$pkg" "$(ds_white_snapshot)"
             ds_freeze_thaw_pkg "$pkg"
             ds_snap_write
             log_ds "检测到媒体播放，已临时加白保护"
@@ -1589,7 +1616,8 @@ ds_tick() {
         fi
     fi
     # 闹钟快响就先不收口：Doze 会把闹钟广播压到维护窗口，和“准点响”冲突。
-    if [ $((t - ds_screen_off_ts)) -ge "$DS_DOZE_AT" ] && [ "$ds_doze_sent" != "1" ] \
+    if [ "$DS_DOZE_ENABLED" = "1" ] \
+       && [ $((t - ds_screen_off_ts)) -ge "$DS_DOZE_AT" ] && [ "$ds_doze_sent" != "1" ] \
        && [ $((t - ds_doze_checked)) -ge "$DS_DOZE_RETRY" ]; then
         ds_doze_checked=$t
         if ds_alarm_soon; then

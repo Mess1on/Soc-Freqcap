@@ -1282,7 +1282,13 @@ ok "$BADRC" "1" "开关只收 0/1"
 echo "-- 墓碑冻结开关与后端 --"
 ok "$(DSA ds_get | sed -n 's/^freeze=//p')" "1" "冻结默认开"
 ok "$(DSA ds_get | sed -n 's/^appops=//p')" "1" "唤醒锁默认开"
+ok "$(DSA ds_get | sed -n 's/^doze=//p')" "1" "Doze 默认开"
 ok "$(DSA ds_get | sed -n 's/^fzb=//p')" "off" "没开深睡时后端报 off"
+ok "$(DSA ds_set doze 0 | head -n 1)" "OK doze=0" "Doze 可以单独关"
+ok "$(grep -c '^doze=0' dsleep.conf)" "1" "关 Doze 落到配置里"
+ok "$(DSA ds_get | sed -n 's/^doze=//p')" "0" "读回来是 0"
+DSA ds_set doze 1 >/dev/null
+ok "$(DSA ds_get | sed -n 's/^doze=//p')" "1" "再打开读回来是 1"
 ok "$(DSA ds_set freeze 0 | head -n 1)" "OK freeze=0" "冻结可以单独关"
 ok "$(grep -c '^freeze=0' dsleep.conf)" "1" "关冻结落到配置里"
 ok "$(DSA ds_get | sed -n 's/^freeze=//p')" "0" "读回来是 0"
@@ -1304,7 +1310,7 @@ BADFZ=$(DSA ds_set freeze 2 2>&1); BADFZRC=$?
 ok "$BADFZRC" "1" "冻结开关也只收 0/1"
 
 BADKEY=$(DSA ds_set foo 1 2>&1)
-ok "$(printf '%s\n' "$BADKEY" | head -n 1)" "E/BAD_KEY" "只认 enable / freeze / appops"
+ok "$(printf '%s\n' "$BADKEY" | head -n 1)" "E/BAD_KEY" "只认 enable / freeze / appops / doze"
 reject_rc() { local o; o=$(DSA "$@" 2>&1); echo $?; }
 ok "$(reject_rc ds_white_add 'bad pkg')" "1" "豁免名单拒非法包名"
 ok "$(reject_rc ds_white_add 'nodots')" "1" "没有点的包名拒收"

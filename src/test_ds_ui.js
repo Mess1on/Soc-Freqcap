@@ -31,18 +31,18 @@ if (!searchChunk) {
 
 const FULL = [
   'enable=1', 'alive=1', 'dsactive=1', 'wcsince=1700000000',
-  'freeze=1', 'fzb=v2',
+  'freeze=1', 'doze=1', 'fzb=v2',
   'dsw=com.a:5:0,com.b:2:1,com.bad:oops:0',
   'dswc=com.a:9:0',
   'white=com.b', 'white=com.c',
 ].join('\n');
 const POLL = [
   'enable=1', 'alive=1', 'dsactive=1', 'wcsince=1700000000',
-  'freeze=1', 'fzb=v2',
+  'freeze=1', 'doze=1', 'fzb=v2',
   'dsw=com.a:7:0,com.b:3:1',
   'dswc=com.a:11:0',
 ].join('\n');
-const OFF = 'enable=0\nalive=0\ndsactive=0\nwcsince=0\nfreeze=1\nfzb=off\ndsw=\ndswc=\n';
+const OFF = 'enable=0\nalive=0\ndsactive=0\nwcsince=0\nfreeze=1\ndoze=1\nfzb=off\ndsw=\ndswc=\n';
 
 function mkEl(tag) {
   const el = {
@@ -129,6 +129,7 @@ function sandbox() {
     ok(s.get('ds_enable').checked === true, '总开关跟着状态勾上');
     ok(st.freeze === 1 && st.fzb === 'v2', 'parseDs 读出冻结开关和后端');
     ok(s.get('ds_freeze').checked === true, '墓碑冻结开关跟着状态勾上');
+    ok(st.doze === 1 && s.get('ds_doze').checked === true, 'Doze 收口开关跟着状态勾上');
     ok(s.get('ds-fzb').textContent.indexOf('V2') >= 0,
        '冻结方式写清是 V2（用户要能看到实际用哪套）');
     ok(s.get('ds-run').children.length === 2, '当次榜画两行（坏条目不算）');

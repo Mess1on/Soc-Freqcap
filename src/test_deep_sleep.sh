@@ -388,6 +388,40 @@ printf 'enable=1\nfreeze=abc\n' > "$DSLEEP_CONF"
 ds_conf_load
 ok "$DS_FREEZE_ENABLED" "${DS_FREEZE:-1}" "非法值退回环境默认（台架 DS_FREEZE=$DS_FREEZE）"
 
+echo "== Doze 总闸：关掉后一次 deviceidle 都不碰 =="
+# 白名单是"包级豁免"，加进去等于整包不受 Doze 限制。要判断待机耗电该记在
+# 冻结头上还是 Doze 头上，必须能把这一块整个摘掉。
+printf 'enable=1\ndoze=0\nwhite=com.test.sms\n' > "$DSLEEP_CONF"
+ds_conf_load
+ok "$DS_DOZE_ENABLED" "0" "doze=0 生效"
+: > "$STATE/calls"
+ds_active=0; ds_added=""; ds_white_seen=""; ds_doze_sent=0; ds_screen_off_ts=0
+ds_enter
+ok "$(grep -c 'whitelist +' "$STATE/calls")" "0" "进入时不往 Doze 白名单里加东西"
+ok "$ds_added" "" "临时白名单账是空的（退出时不会去删）"
+: > "$STATE/calls"
+ds_doze_sent=0; ds_doze_checked=0
+ds_doze_once
+ok "$(grep -c 'force-idle' "$STATE/calls")" "0" "不 force-idle"
+: > "$STATE/calls"
+ds_active=1
+ds_exit "台架-doze关" >/dev/null 2>&1
+ok "$(grep -c 'deviceidle unforce' "$STATE/calls")" "0" "退出时不 unforce"
+
+echo "== Doze 总闸：开着时行为不变 =="
+printf 'enable=1\ndoze=1\nwhite=com.test.sms\n' > "$DSLEEP_CONF"
+ds_conf_load
+ok "$DS_DOZE_ENABLED" "1" "doze=1 生效"
+: > "$STATE/calls"
+ds_active=0; ds_added=""; ds_white_seen=""; ds_doze_sent=0; ds_screen_off_ts=0
+ds_enter
+ok "$(grep -c 'whitelist +com.test.sms' "$STATE/calls")" "1" "开着时照常加白"
+ds_active=1; ds_doze_sent=1
+: > "$STATE/calls"
+ds_exit "台架-doze开" >/dev/null 2>&1
+ok "$(grep -c 'deviceidle unforce' "$STATE/calls")" "1" "自己 force 过的退出时 unforce"
+ds_active=0; ds_added=""; ds_white_seen=""
+
 echo "== dsleep.log 裁剪（这份日志以前是全模块唯一没人裁的）=="
 # 裁剪口径必须和 service.sh / socfreqd 一致：超 256KB 只留最近 128KB，
 # 留下的必须是**新的一半**。留成旧的一半的表现是 OLDSEG/MID 还在、END 没了
