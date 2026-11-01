@@ -43,15 +43,6 @@ run/heartbeat          守护每轮写一次的心跳 mtime；看门狗 >90s 未
 pause                  存在 = 看门狗不再拉起守护
 labels.tsv             应用名缓存（pkg<TAB>apk路径<TAB>名字）：按 APK 路径判新装/升级
                        （路径里那个随机后缀每次更新都会变），所以不需要时间型过期
-learn.tsv              智能学习的样本（一个采样对象一行，共 31 列：目录 档 采样ms
-                       顶帽ms 被压ms 24 个频率桶 天位图 配置帽%；档 0-3 是 CPU，4 是 GPU）
-                       删掉它 = 清零重学
-learn_app.tsv          按应用学习的样本，字段和上面那份同构（31 列），只是第一列
-                       从目录换成包名；专属帽的时段只记这里，全局帽的时段两层都记
-learn.tsv.since        学习计时起点（首次采样的 epoch 秒）。天数按它每满 24 小时加一，
-                       不按零点切；删样本时一起删，重置为下一次采样重新起算
-learn_meta.tsv         每档最近一次改帽的方向和时间（7 天反向冷却用）
-learn.tsv.v2reset      旧格式被清空的标记；新样本落盘后自动删除
 dsleep.conf            深度睡眠配置：enable=0/1 + 每行 white=包名（默认关）
 ds_state               深睡状态与两张唤醒榜（dsactive / dsw / dswc / wcsince）
 ds_wakes.conf          唤醒榜持久化（boot= / since= / A=当次 / S=累计）
@@ -101,7 +92,6 @@ sh src/test_hotinstall.sh # 热安装脚本：停旧/起新、暂停保持、深
 sh src/test_install_merge.sh  # 装机迁移段台架：配置搬家/补键 + 名单三方合并
 sh src/test_action_keys.sh    # action.sh 音量键状态机（假 getevent 喂剧本）
 node src/test_contract.js # 跨文件契约（导出键、协议、接线），要七个参数，见下
-node src/test_advice_ui.js webroot/index.html # 智能建议卡片：喂真 api.sh 的输出，验渲染与"应用"发几条写
 node src/test_ovr_ui.js webroot/index.html   # 芯片适配卡片：同样喂真 api.sh 的 ovr_show/pkg/pkg_import/ovr_clear
 node src/test_func_ui.js webroot/index.html webroot/api.sh  # 功能页档位：档位值要落在后端校验区间内
 node src/test_ds_ui.js webroot/index.html   # 睡眠页：state 解析、状态条、双榜、豁免名单与开关调用
@@ -221,13 +211,13 @@ su -c 'sh /data/local/tmp/smoke_ondevice.sh /data/adb/ap/modules/soc_freqcap'
 全都变成恒空判断，**代码全对也报 FAIL**。
 `api.sh` 是真脚本，那几处 `sh "$API"` 保留才对。
 
-只查八件事：游戏列表有没有内容、名单条数对不对、守护认不认得 SoC、
+只查七件事：游戏列表有没有内容、名单条数对不对、守护认不认得 SoC、
 逐核频率表读没读到（`ncores` / `coremax_0` / `corepol_*`）、
 新键接上了没有 + 守护读的是不是搬家后的配置、守护活着没有、
 **这台机上的真 APK 读不读得出应用名和声明的图标**（前六项 PC 上都能验，
 只有这一项必须上真机——酷安那种资源名被缩短过的包，
-在临时目录里造不出第二个来），
-以及**智能学习的样本文件和 advice 判据接上了没有**（列数对不对、有没有落盘）。
+在临时目录里造不出第二个来）。
+
 任何一项不合格就非零退出，并把接口的原样输出打出来。
 
 算法与前台包名解析的自检要跑 aarch64 二进制，在设备上执行：
@@ -236,7 +226,7 @@ su -c 'sh /data/local/tmp/smoke_ondevice.sh /data/adb/ap/modules/soc_freqcap'
 # 构建自检版（与守护同一批源文件，SF_TEST 下不编 main）
 aarch64-linux-android21-clang -DSF_TEST -static -s -O1 \
      -Wall -Wno-unused-function -Wl,-z,max-page-size=16384 -o test_real \
-     src/socfreqd.c src/icon.c src/appinfo.c src/learn.c src/adapt.c -lz
+     src/socfreqd.c src/icon.c src/appinfo.c src/adapt.c -lz
 # 必须过一遍 TLS 对齐，否则推上手机直接 Abort：
 #   executable's TLS segment is underaligned: alignment is 8, needs 64
 node tools/fix_tls_align.js test_real

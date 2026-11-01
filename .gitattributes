@@ -12,6 +12,18 @@
 *.h    text eol=lf
 META-INF/com/google/android/* text eol=lf
 
+# WebUI、台架与文档同样落盘 LF。core.autocrlf=true 时，这里没钉住的后缀
+# 在 clone / checkout 之后会变成 CRLF：index.html 是随包发布的文件，
+# 变成 CRLF 之后打出去的包就和设备上验过的那份不是同一个东西，
+# 台架里按 \n 和行尾 $ 写的正则也会跟着匹配不上。
+*.html text eol=lf
+*.js   text eol=lf
+*.md   text eol=lf
+*.ps1  text eol=lf
+# 这份文件自己也钉上：不钉的话 git diff 每次都要多报一条 CRLF 警告，
+# 而警告一多，真正该看的那条就被淹了。
+.gitattributes text eol=lf
+
 # 二进制按原样存取，别做行尾转换
 *.png  binary
 *.jpg  binary

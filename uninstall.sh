@@ -37,7 +37,7 @@ if [ -f "$DS_PID" ]; then
   esac
   rm -f "$DS_PID" 2>/dev/null
 fi
-[ -f "$DS_SH" ] && ( . "$DS_SH" >/dev/null 2>&1; ds_freeze_restore_if_any; ds_snap_restore_if_any )
+[ -f "$DS_SH" ] && ( . "$DS_SH" >/dev/null 2>&1; ds_ops_restore_if_any; ds_freeze_restore_if_any; ds_snap_restore_if_any )
 
 # 守护可能已被管理器删掉，或因 ELF 被 loader 拒绝而跑不起来，
 # 此时只剩 run/*.saved 里的原始值，逐条读回作为最后兜底。三本账都要兜：

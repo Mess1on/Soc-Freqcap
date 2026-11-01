@@ -40,7 +40,15 @@ case "$_p" in
     fi
     ;;
 esac
-rm -f "$DS_PID" 2>/dev/null
+# pid 文件只在"里面还是刚被停掉那个进程"时才删。
+# 无条件 rm 会踩看门狗：停旧实例的这几秒里，service.sh 的 60 秒轮询可能已经
+# 拉起了新的深睡、并且由它自己重写过 pid 文件；这一删把新实例的 pid 抹掉，
+# 之后每轮看门狗都判"没在跑"→ 再起一个抢不到运行锁的进程，每个都在
+# dsleep.log 里留一行"已有深睡实例在跑"（这台机上刷了 5692 行、一天涨 430KB，
+# 而且状态永远好不起来：真身在跑，pid 文件却是空的）。
+# 陈旧 pid 文件不用在这里清：ds_alive / ds_alive_pid 都会再核 /proc 和 cmdline，
+# service.sh 的 ds_start 起动前自己也 rm 一次。
+[ "$(cat "$DS_PID" 2>/dev/null)" = "$_p" ] && rm -f "$DS_PID" 2>/dev/null
 
 # 2) 主守护。restart 会等旧实例把频率节点恢复完再启动新版本；
 #    暂停状态只用 stop 清掉旧实例，不启动。

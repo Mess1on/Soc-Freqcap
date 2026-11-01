@@ -425,8 +425,13 @@ chmod 0644 "$DATA/socfreq.conf" "$DATA/games.txt" 2>/dev/null
 # 目标架构、ELF 头损坏），此时守护根本没启动，日志里一行都不会有。
 # version 是最轻的子命令：不碰 sysfs、不写文件，失败也不留残留。
 CHK=$("$MODPATH/socfreqd" version 2>&1)
-if [ -z "$CHK" ]; then
-  ui_print "!  守护无法执行，loader 原话："
+RC=$?
+# 成败要按退出码判，不能按"输出为空"判：loader 的拒绝信息（CANNOT LINK
+# EXECUTABLE / cannot locate symbol…）被 2>&1 一起收进了 CHK，
+# 真正失败的时候 CHK 反而是非空的。原来那条 [ -z "$CHK" ] 正好判反了：
+# 装不上时打印"自检通过：守护 CANNOT LINK…"，能跑起来时打印一句空的原话。
+if [ "$RC" != 0 ] || [ -z "$CHK" ]; then
+  ui_print "!  守护无法执行（退出码 $RC），loader 原话："
   ui_print "   $CHK"
   ui_print "!  常见原因是 ELF 头部对齐不满足本机要求（TLS / 页对齐）。"
   ui_print "!  请把这段报错反馈给作者。"

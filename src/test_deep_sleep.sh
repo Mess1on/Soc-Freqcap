@@ -89,7 +89,7 @@ bl 0
 export PATH="$STUB:$PATH" SOCFREQ_DATA_DIR="$DATA" STUB_STATE="$STATE" DS_BL="$BLD"
 export DS_STATUS="$TMP/status"
 # 台架不跑冻结（PC 没有 cgroup）；冻结本身在真机上用 src/test_freeze.sh 验。
-export DS_FREEZE=0
+export DS_FREEZE=0 DS_APPOPS=0
 # 台架默认不接任何电源节点：真机上 /sys/class/power_supply 正在充电，
 # 不隔离的话第一轮就会被“充电中”挡掉，后面的用例全跟着错。
 export DS_POWER_DIR="$TMP/power_none"
@@ -224,6 +224,12 @@ ds_tick
 ok "$(cat "$STATE/forced")" "0" "闹钟前 30 分钟不强制进 Doze"
 ok "$([ "$(grep -c '闹钟' "$LOG" 2>/dev/null)" -ge 1 ] && echo y || echo n)" "y" \
    "日志里说明是因为闹钟没进"
+# 闹钟等待态下不能每轮都掉进 ds_enter 再查一次 alarm：只允许每分钟一次。
+: > "$STATE/calls"
+ds_screen_off_ts=0; ds_alarm_checked=0; ds_alarm_wait=0; ds_active=0
+ds_tick; ds_tick; ds_tick
+ok "$(grep -c '^alarm' "$STATE/calls" 2>/dev/null)" "1" \
+   "闹钟等待态连续三轮只问一次 dumpsys alarm"
 : > "$STATE/alarm"; printf 'enable=0\n' > "$DSLEEP_CONF"
 
 echo "== 巡检开销（熄屏后不能每轮都进 system_server）=="
@@ -322,6 +328,46 @@ ds_doze_checked=$(( $(date +%s) - 301 ))
 ds_tick
 ok "$(cat "$STATE/forced")" "1" "闹钟消失后的下一轮补收口"
 printf 'enable=0\n' > "$DSLEEP_CONF"; ds_tick
+
+echo "== dsleep.log 裁剪（这份日志以前是全模块唯一没人裁的）=="
+# 裁剪口径必须和 service.sh / socfreqd 一致：超 256KB 只留最近 128KB，
+# 留下的必须是**新的一半**。留成旧的一半的表现是 OLDSEG/MID 还在、END 没了
+# —— socfreqd 那边的 log_trim 原先就是这么错的（ftruncate 砍的是尾巴）。
+_pad='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+: > "$LOG"
+awk -v p="$_pad" 'BEGIN{for(i=1;i<=3400;i++)printf "OLDSEG %06d %s\n",i,p}' >> "$LOG"
+printf 'ZZMARK-MID\n' >> "$LOG"
+awk -v p="$_pad" 'BEGIN{for(i=1;i<=6800;i++)printf "NEWSEG %06d %s\n",i,p}' >> "$LOG"
+printf 'ZZMARK-END\n' >> "$LOG"
+_big=$(wc -c < "$LOG")
+ok "$([ "$_big" -ge 262144 ] && echo y || echo n)" "y" "夹具确实越过 256KB 门槛（$_big 字节）"
+
+# 计数闸门：每 64 条才量一次大小。不满 64 条时必须一动不动，
+# 否则就是每条日志都在多跑一次 wc —— 那正是实现里写明要避免的。
+_ds_logn=0
+_i=0; while [ "$_i" -lt 63 ]; do log_ds "裁剪前填充 $_i"; _i=$((_i + 1)); done
+ok "$(grep -c OLDSEG "$LOG")" "3400" "不满 64 条：即使超门槛也不裁（不在每条上都量大小）"
+
+log_ds "触发裁剪的这一条"          # 第 64 条
+_after=$(wc -c < "$LOG")
+ok "$([ "$_after" -le 140000 ] && echo y || echo n)" "y" "第 64 条触发裁剪，体积掉到 128KB 量级（$_after 字节）"
+ok "$(grep -c OLDSEG "$LOG")" "0" "留下的是新的一半：旧段整段没了"
+ok "$(grep -c ZZMARK-MID "$LOG")" "0" "中间哨兵也没了（不是从头上截断）"
+ok "$(grep -c ZZMARK-END "$LOG")" "1" "末尾哨兵还在"
+_n=$(grep -c NEWSEG "$LOG")
+ok "$([ "$_n" -gt 1000 ] && [ "$_n" -lt 6800 ] && echo y || echo n)" "y" \
+   "新段只留下后半截（$_n 行，不是原来的 6800 行）"
+ok "$([ -f "$LOG.tmp" ] && echo y || echo n)" "n" "裁剪用的 .tmp 已 rename 掉，没留垃圾"
+
+# 裁完还要能继续追加：tail+mv 换掉了 inode，写入端必须跟上。
+_h1=$(head -n 1 "$LOG" | md5sum | cut -d' ' -f1)
+_s1=$(wc -c < "$LOG")
+log_ds "裁剪后第一条"; log_ds "裁剪后第二条"
+_s2=$(wc -c < "$LOG")
+ok "$([ "$_s2" -gt "$_s1" ] && echo y || echo n)" "y" "裁剪后仍在追加（$_s1 → $_s2 字节）"
+ok "$(head -n 1 "$LOG" | md5sum | cut -d' ' -f1)" "$_h1" "追加写在尾巴上，文件头没被覆盖"
+ok "$(tail -n 1 "$LOG" | grep -c '裁剪后第二条')" "1" "新内容就在最后一行"
+: > "$LOG"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "全部通过 ($pass)"; else echo "$fail 项失败 / $pass 项通过"; fi

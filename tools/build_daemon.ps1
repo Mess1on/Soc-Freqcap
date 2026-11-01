@@ -19,10 +19,9 @@ $check  = Join-Path $PSScriptRoot 'check_loadable.ps1'
 $srcMain = Join-Path $root 'src\socfreqd.c'
 $srcIcon = Join-Path $root 'src\icon.c'
 $srcInfo = Join-Path $root 'src\appinfo.c'
-$srcLearn = Join-Path $root 'src\learn.c'
 $srcAdapt = Join-Path $root 'src\adapt.c'
 
-foreach($f in @($srcMain,$srcIcon,$srcInfo,$srcLearn,$srcAdapt,$fix,$check)){
+foreach($f in @($srcMain,$srcIcon,$srcInfo,$srcAdapt,$fix,$check)){
   if(-not (Test-Path $f)){ "FAIL 缺少 $f"; exit 1 }
 }
 
@@ -72,7 +71,7 @@ if(-not $cc){
 "=== 编译 ==="
 "clang: $cc"
 $cflags = @('-O2','-s','-Wall','-Wextra','-Wl,-z,max-page-size=16384','-lz',
-            '-o',$out,$srcMain,$srcIcon,$srcInfo,$srcLearn,$srcAdapt)
+            '-o',$out,$srcMain,$srcIcon,$srcInfo,$srcAdapt)
 if($dynamic){
   "模式: 动态链接（不编 -static，不跑 TLS 补丁）"
 } else {
@@ -118,7 +117,7 @@ $ErrorActionPreference = 'Continue'
 # （g_app 就是典型：唯一的读点在施加密封那一块）。这不是真问题，
 # 和上面 -Wno-unused-function 同一个道理，一起关掉。
 $tstOut = & $cc -fsyntax-only -Wall -Wno-unused-function -Wno-unused-variable -DSF_TEST `
-              -I (Join-Path $root 'src') $srcMain $srcIcon $srcInfo $srcLearn $srcAdapt 2>&1
+              -I (Join-Path $root 'src') $srcMain $srcIcon $srcInfo $srcAdapt 2>&1
 $testRc = $LASTEXITCODE
 $ErrorActionPreference = 'Stop'
 if($testRc -ne 0 -or ($tstOut | Out-String).Trim()){

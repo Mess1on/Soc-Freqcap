@@ -2,15 +2,15 @@
 
 Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏自动交还系统；附带 WebUI 与深度睡眠。
 
-作者：梦笙Mess1on　　版本：V1.6　　适用：KernelSU / Magisk / APatch · arm64-v8a
+作者：梦笙Mess1on & Ktwo　　版本：V2.1　　适用：KernelSU / Magisk / APatch · arm64-v8a
 
 ## 核心特性
 
 | 特性 | 说明 |
 |---|---|
 | 按簇自动分档 | 读每个 `policy*` 的频率表自动分档，不写死 CPU 编号；封顶值向下吸附到频点，绝不超过设定百分比 |
+| 智能调度 | 首页可在「限频 / 智能」间切换；智能按空闲、轻载、中载、重载四档动态给目标，`CPU_PCT_*` 只当天花板 |
 | 游戏与分应用放开 | `games.txt` 认包名，进游戏解除封顶并把节点权限交还系统；`app_modes.conf` 支持 `full` / `keep` / 单独数值 |
-| 智能学习建议 | 按"封顶真正生效时"的采样，给每簇放宽或收紧建议；按应用学习可单独开启（默认关） |
 | GPU 多后端 | 高通 KGSL、MTK Mali devfreq，以及天玑 9500 这类无 GPU devfreq 机型的 `gpufreqv2 limit_table` |
 | WebUI + 深度睡眠 | 页面调参 / 名单 / 建议；熄屏 20 秒冻结第三方后台、7:30 一次性 Doze，可配豁免与唤醒榜 |
 
@@ -24,7 +24,7 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 | Magisk | 模块页「从本地安装」选 zip，重启生效 |
 | APatch | 模块页安装到 `/data/adb/ap/modules`，重启生效 |
 
-升级不会覆盖 `/data/adb/soc_freqcap` 里的配置、名单和学习样本。WebUI 需要管理器注入 root 桥：KernelSU / APatch 已验证；Magisk 的 WebUI 很可能不可用，命令行仍可用。
+升级不会覆盖 `/data/adb/soc_freqcap` 里的配置和名单。WebUI 需要管理器注入 root 桥：KernelSU / APatch 已验证；Magisk 的 WebUI 很可能不可用，命令行仍可用。
 
 ## 最小运行示例
 
@@ -45,11 +45,24 @@ WebUI：管理器模块页 → 打开 WebUI。首页徽标显示「常态限频�
 | `CPU_PCT_BIG` / `CPU_PCT_LITTLE` | 65 / 65 | 超大核 / 小核封顶百分比 |
 | `CPU_PCT_MID` / `CPU_PCT_MID2` | 66 / 64 | 中间两档（4 簇以上机型用） |
 | `GPU_PCT` | 45 | GPU 封顶百分比 |
+| `STRATEGY` | cap | `cap` 固定百分比封顶；`smart` 四档智能调度，百分比只当天花板 |
 | `SCREEN_POLICY` | uncap（新装）/ keep（升级） | 熄屏交还系统，或保持封顶 |
-| `LEARN` / `LEARN_APP` | 1 / 0 | 智能学习 / 按应用学习 |
 | `INTERVAL` | 5 | 巡检间隔（秒） |
 
 数值会被夹回合法区间，调速器名只认白名单。完整键表、分应用档位、实时偏移（PSI / 温控 / 电量阶梯）见 [配置文档](docs/configuration.md)。
+
+## 智能调度
+
+首页「调度策略」可在「限频 / 智能」间切换，对应 `socfreq.conf` 的 `STRATEGY=cap|smart`。
+
+| 负载状态 | 大核目标 | 其余档目标 |
+|---|---|---|
+| 空闲 | 30% | 40% |
+| 轻载 | 45% | 50% |
+| 中载 | 65% | 60% |
+| 重载 | 85% | 75% |
+
+实际目标 = `min(状态目标, CPU_PCT_*)`。默认 `CPU_PCT_BIG/LITTLE=65` 时，重载仍按 65% 封顶，智能模式主要在低负载时继续往下省；想让重载跑到 85/75，需要把对应的 `CPU_PCT_*` 提高到 85/75 以上。游戏、满血、熄屏交还三条路径两种策略完全一样。
 
 ## 文档
 
@@ -58,7 +71,6 @@ WebUI：管理器模块页 → 打开 WebUI。首页徽标显示「常态限频�
 | [设计与行为](docs/design.md) | 按簇分档、封顶吸附、与系统调度相处 |
 | [安装、升级与卸载](docs/install.md) | 兼容性、KernelSU 热安装、卸载 |
 | [配置](docs/configuration.md) | 全部配置键、分应用档位、实时偏移、SoC 频率表 |
-| [智能学习](docs/learning.md) | 采样口径、建议阈值、按应用学习 |
 | [深度睡眠](docs/deep-sleep.md) | 冻结 / Doze 时序、豁免、唤醒榜、待机耗电排查 |
 | [芯片适配包](docs/adaptation.md) | 自动探测扑空时怎么导出、修改、验证 |
 | [WebUI](docs/webui.md) | 页面、主题、发行商词典、图标边界 |

@@ -175,7 +175,7 @@ chk "$(sort "$T/data/games.txt" | grep -Ev '^\s*(#|$)' | uniq -d | wc -l | tr -d
     "名单里没有重复条目"
 
 echo "== 场景 7：按芯片套默认（单一来源 adapt/*.conf）=="
-# SM8750（8 Elite）→ 66 / 68，TH 75/68，PSI_GAIN 10
+# SM8750（8 Elite）→ 46 / 65，TH 75/68，PSI_GAIN 10
 # SM8850（8E5）→ 64 / 69
 # 只对全新安装生效；升级配置一个字节都不改（哪怕值刚好等于旧默认）。
 _g() { sed -n "s/^$2=//p" "$1" | head -n 1; }
@@ -199,7 +199,7 @@ preset_case() {   # $1=芯片代号 $2=期望BIG $3=期望LITTLE $4=no|yes|yes-d
   chk "$b" "$2" "芯片 $1（$4）→ CPU_PCT_BIG=$b 期望 $2"
   chk "$l" "$3" "芯片 $1（$4）→ CPU_PCT_LITTLE=$l 期望 $3"
 }
-preset_case SM8750 66 68 no
+preset_case SM8750 46 65 no
 preset_case SM8850 64 69 no
 preset_case MT6991 65 65 no          # 其它芯片保持通用默认
 preset_case SM8750 40 65 yes         # 升级 + 用户改过：40 必须活着
@@ -223,7 +223,7 @@ rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
 eval "getprop() { case \"\$1\" in ro.soc.model) echo '';; ro.board.platform) echo sm8750;; esac; }"
 mk_case; runcase
-chk "$(_g "$T/data/socfreq.conf" CPU_PCT_LITTLE)" "68" "属性为空时退到 board.platform，且大小写不敏感"
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_LITTLE)" "65" "属性为空时退到 board.platform，且大小写不敏感"
 # 升级时整个配置文件逐字节不变（连注释/空白都不许动）
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"

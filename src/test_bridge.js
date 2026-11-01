@@ -7,11 +7,18 @@
 // 用法：
 //   node src/test_bridge.js webroot/index.html          各管理器桥接
 //   node src/test_bridge.js webroot/index.html --api    模块根探测与失败提示
+//   node src/test_bridge.js                             路径省略即默认 webroot/index.html
 const fs = require('fs');
 const vm = require('vm');
 
 global.window = global;
-const html = fs.readFileSync(process.argv[2], 'utf8');
+// 路径可以省略：run_pc_benches.sh 是无参调用的，少了 argv[2] 就报
+// ERR_INVALID_ARG_TYPE，看上去像页面坏了，其实只是台架没喂参数。
+// 口径和 test_gpu_preview.js 一致。省了路径时 --api 会落到 argv[2]，
+// 所以按"是不是以 -- 开头"判，别把开关当成文件名去读。
+const _a2 = process.argv[2];
+const htmlPath = (!_a2 || _a2.startsWith('--')) ? 'webroot/index.html' : _a2;
+const html = fs.readFileSync(htmlPath, 'utf8');
 
 // 抠出 MODID 到 exec() 结束（含 q() 与 ROOTS）
 const m = html.match(/const MODID = [\s\S]*?function exec\(cmd\)\{[\s\S]*?\n\}/);
@@ -128,10 +135,17 @@ async function runBridge() {
   r = await exec('x');
   ok(r.errno !== 0 && /管理器/.test(r.stderr), '无桥接时提示明确指向管理器', JSON.stringify(r));
 
+  /* WebView 冷启动时管理器可能晚一点才注入 ksu：exec() 本身不能立刻
+   * 置位 nobridge，否则第一次打开会永远停在"无桥"。判断放在 api()
+   * 的探根重试全部结束之后。 */
+  ok(/if\(bridgeName\(\) === '无'\)\{[\s\S]*?setDead\('nobridge'\)/.test(html),
+     '探根重试结束仍无桥时才置 nobridge');
+
   /* 5b) 同时要把常驻提示条亮起来。
    * 这条是"页面顶部直接显示"那个需求的验收：光有 stderr 的话，
    * 每 5 秒一次失败会把 toast 刷成瀑布，用户只看到一闪一闪，
    * 不知道整台机器的这个管理器就是不支持。 */
+  setDead('nobridge');
   ok(dom.nobar && dom.nobar.style.display === '',
      '无桥接时顶部提示条显示出来', JSON.stringify(dom.nobar && dom.nobar.style));
   ok(dom['nobar-t'].textContent === '当前管理器不支持 WebUI，请用 action.sh 命令行操作',
@@ -309,4 +323,6 @@ async function runApi() {
   process.exit(fail ? 1 : 0);
 }
 
-(process.argv[3] === '--api' ? runApi() : runBridge());
+// --api 认开关本身、不认它的位置：路径现在可以省略，`test_bridge.js --api`
+// 会让开关落在 argv[2]，写死 argv[3] 就再也进不了 runApi。
+(process.argv.includes('--api') ? runApi() : runBridge());

@@ -30,19 +30,12 @@ DATA="${SOCFREQ_DATA_DIR:-/data/adb/soc_freqcap}"
 CONF="$DATA/socfreq.conf"
 LIST="$DATA/games.txt"
 MODES="$DATA/app_modes.conf"
-# 学习采样数据（守护每 5 分钟写一次，格式见 src/learn.c 的 learn_write）。
-# 两层两份：learn.tsv 一行一个 policy 目录（全局那道帽），
-# learn_app.tsv 一行一个 (包, 档)（这个应用自己那道帽）。字段数相同。
-LEARN="$DATA/learn.tsv"
-LEARN_APP="$DATA/learn_app.tsv"
 # 发行商词典。只在 games_suggest 里用；守护完全不读它。
 VENDORS="$DATA/vendors.txt"
 LOG="$DATA/socfreqd.log"
 RUN="$DATA/run"
 PAUSE="$DATA/pause"
 STATUS="$RUN/status"
-# 全局档位最近一次改帽的方向/时间：建议用来做 7 天反向冷却。
-LEARN_META="$DATA/learn_meta.tsv"
 BIN="$ROOT/socfreqd"          # 二进制仍然在模块目录里（那是解包出来的，不是用户数据）
 
 # ── 深度睡眠 ────────────────────────────────────────────────────
@@ -103,65 +96,8 @@ conf_read() {
     | sed "s/^\"\([^\"]*\)\"$/\1/; s/^'\([^']*\)'$/\1/"
 }
 
-# ── 学习改帽记录（反向冷却）──────────────────────────────────────
-# learn_meta.tsv 一行一档：tier dir cap ts
-#   dir = up/down/none（none = 第一次记录，没有方向）
-#   cap = 当时的配置百分比；与当前 conf 不一致时认为改过帽
-# 只有全局五档参与；按应用样本本身要 3 天，不需要再加冷却。
-_learn_tier_of_key() {
-  case "$1" in
-    CPU_PCT_BIG) echo 0 ;; CPU_PCT_MID2) echo 1 ;; CPU_PCT_MID) echo 2 ;;
-    CPU_PCT_LITTLE) echo 3 ;; GPU_PCT) echo 4 ;; *) echo "" ;;
-  esac
-}
-_lm_field() { # tier field(2=dir,3=cap,4=ts)
-  [ -f "$LEARN_META" ] || return 1
-  awk -v t="$1" -v f="$2" '$1 == t { print $f; exit }' "$LEARN_META" 2>/dev/null
-}
-_lm_write() { # tier dir cap ts
-  [ -f "$LEARN_META" ] || printf '#tier dir cap ts\n' > "$LEARN_META" 2>/dev/null
-  awk -v t="$1" -v d="$2" -v c="$3" -v ts="$4" '
-    BEGIN { done = 0 }
-    $1 == t { print t " " d " " c " " ts; done = 1; next }
-    { print }
-    END { if (!done) print t " " d " " c " " ts }' \
-    "$LEARN_META" > "$LEARN_META.tmp" 2>/dev/null \
-    && mv -f "$LEARN_META.tmp" "$LEARN_META" 2>/dev/null
-  return 0
-}
-# 写配置时用已知的旧值 → 新值记方向，时间从现在算。
-_learn_meta_note() { # tier old new
-  _lt=$1; _lo=$2; _ln=$3
-  [ -n "$_lt" ] || return 0
-  case "$_lo" in ''|*[!0-9]*) _lo=0 ;; esac
-  case "$_ln" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$_lo" = "$_ln" ] && return 0
-  _ld=none
-  if [ "$_lo" -gt 0 ]; then
-    if [ "$_ln" -gt "$_lo" ]; then _ld=up; else _ld=down; fi
-  fi
-  _lm_write "$_lt" "$_ld" "$_ln" "$(date +%s)"
-}
-# 建议读取前对账：手动改文件绕过了 conf_set 时，用记录里的旧帽推出方向。
-_learn_meta_sync() { # tier current_cap
-  _lt=$1; _lc=$2
-  [ -n "$_lt" ] || return 0
-  case "$_lc" in ''|*[!0-9]*) return 0 ;; esac
-  _lmd=$(_lm_field "$_lt" 2)
-  _lmc=$(_lm_field "$_lt" 3)
-  if [ -z "$_lmc" ]; then
-    _lm_write "$_lt" none "$_lc" "$(date +%s)"
-    return 0
-  fi
-  [ "$_lmc" = "$_lc" ] && return 0
-  _ld=up
-  [ "$_lc" -lt "$_lmc" ] && _ld=down
-  _lm_write "$_lt" "$_ld" "$_lc" "$(date +%s)"
-}
-
-# 可写的键。区间在 cfg_set 里按键名分支，键增删时这里必须同步，
-# 否则新键会被静默忽略；名单需与 WebUI 实际用到的键一致。
-KEYS='INTERVAL GAME_GRACE_SEC CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT GPU_MIN_LOCK SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S LEARN LEARN_APP LEARN_APP_MIN LEARN_APP_DAY PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT LEARN_MODE'
+# 可写的键。区间在 cfg_set 里按键名分支，键增删时这里必须同步。
+KEYS='STRATEGY INTERVAL GAME_GRACE_SEC CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT GPU_MIN_LOCK SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT'
 
 is_key() {
   for k in $KEYS; do [ "$1" = "$k" ] && return 0; done
@@ -297,6 +233,49 @@ st_log() {
   return 0
 }
 
+# 完整日志页：按来源读守护 / 深睡 / 启动看门狗 / 安装日志。
+# 以前的 UI 调的是 logs，但后端只有 log（单份守护日志），所以页面一直
+# 显示“读取失败”。这里补齐命令；缺失的文件直接跳过，不报错。
+cmd_logs() {
+  _src=${1:-all}
+  _n=${2:-200}
+  _full=0
+  [ "$_src" = "export" ] && { _src=all; _full=1; }
+  case "$_src" in
+    all|daemon|sleep|service|install) ;;
+    *) _src=all ;;
+  esac
+  is_uint "$_n" || _n=200
+  [ "$_n" -gt 4000 ] && _n=4000
+  # “全部”同时拼三份，单份上限收一收，避免一次吐出上万行。
+  [ "$_src" = "all" ] && [ "$_n" -gt 1000 ] && [ "$_full" = "0" ] && _n=1000
+
+  _emit() { # label file
+    [ -f "$2" ] || return 0
+    printf '===== %s =====\n' "$1"
+    if [ "$_full" = "1" ]; then
+      cat "$2" 2>/dev/null
+    else
+      tail -n "$_n" "$2" 2>/dev/null
+    fi
+    printf '\n'
+  }
+
+  case "$_src" in
+    daemon)  _emit 守护 "$LOG" ;;
+    sleep)   _emit 深睡 "$DATA/dsleep.log" ;;
+    service) _emit 启动看门狗 "$DATA/service.log" ;;
+    install) _emit 安装 "$DATA/install.log" ;;
+    all)
+      _emit 守护 "$LOG"
+      _emit 深睡 "$DATA/dsleep.log"
+      _emit 启动看门狗 "$DATA/service.log"
+      _emit 安装 "$DATA/install.log"
+      ;;
+  esac
+  return 0
+}
+
 st_about() {
   printf 'MOD=%s\n' "$ROOT"
   printf 'BIN=%s\n' "$([ -f "$BIN" ] && echo 1 || echo 0)"
@@ -356,12 +335,11 @@ cfg_get() {
 cfg_set() {
   _k=${1:-}; _v=${2:-}
   [ -f "$CONF" ] || die "NO_CONF" 4
-  _oldv=$(conf_read "$_k")
 
   if [ "$_k" = CPU_GOVERNOR ]; then
     is_governor "$_v" || die "BAD_GOVERNOR"
-  elif [ "$_k" = LEARN_MODE ]; then
-    case "$_v" in eco|balanced|performance) ;; *) die "BAD_MODE" ;; esac
+  elif [ "$_k" = STRATEGY ]; then
+    case "$_v" in cap|smart) ;; *) die "BAD_STRATEGY" ;; esac
   elif [ "$_k" = SCREEN_POLICY ]; then
     case "$_v" in uncap|keep) ;; *) die "BAD_POLICY" ;; esac
   elif [ "$_k" = SCREEN_STATE_PATH ] || [ "$_k" = BATT_CURRENT_PATH ]; then
@@ -383,12 +361,6 @@ cfg_set() {
       IDLE_HOLD_CYCLE) [ "$_v" -ge 1 ] && [ "$_v" -le 10 ] || die "RANGE" ;;
       IDLE_INTERVAL)  [ "$_v" -ge 10 ] && [ "$_v" -le 300 ] || die "RANGE" ;;
       WAKE_DELTA_MA)  [ "$_v" -ge 20 ] && [ "$_v" -le 2000 ] || die "RANGE" ;;
-      LEARN)          is_switch "$_v" || die "RANGE" ;;
-      # 按应用学习：默认关（它只在应用已有数字档位时才攒得出样本）。
-      # 门槛给的是"这个包自己"的样本量，不像全局那样整机共享。
-      LEARN_APP)      is_switch "$_v" || die "RANGE" ;;
-      LEARN_APP_MIN)  [ "$_v" -ge 5 ] && [ "$_v" -le 600 ] || die "RANGE" ;;
-      LEARN_APP_DAY)  [ "$_v" -ge 1 ] && [ "$_v" -le 28 ] || die "RANGE" ;;
       # 开机满血窗口：0=关，上限 600s。再长就失去"开机提速"的意义，
       # 且会盖过厂商开机阶段的热管理。区间和守护的 clampi(0,600) 对齐。
       BOOT_FULL_S)    [ "$_v" -ge 0 ] && [ "$_v" -le 600 ] || die "RANGE" ;;
@@ -443,8 +415,6 @@ cfg_set() {
   # 写入"成功"但内容不对的情况要等到下一次重启才暴露，为时已晚。
   [ "$(conf_read "$_k")" = "$_v" ] || die "VERIFY" 6
   # 全局百分比变了：记下方向，给建议做 7 天反向冷却。
-  _lt=$(_learn_tier_of_key "$_k")
-  [ -n "$_lt" ] && _learn_meta_note "$_lt" "$_oldv" "$_v"
   printf 'OK %s=%s\n' "$_k" "$_v"
 }
 
@@ -463,7 +433,7 @@ cmd_conf_set_many() {
     _v=${_kv#*=}
     [ -n "$_k" ] || die "BAD_KV"
     _n=$((_n + 1))
-    # 值没变就不动文件：既省写入，也不会因为"原样保存"给学习记一条改帽。
+    # 值没变就不动文件：既省写入，也不会因为"原样保存"误改配置。
     [ "$(conf_read "$_k")" = "$_v" ] && continue
     _err=$( ( cfg_set "$_k" "$_v" ) 2>&1 >/dev/null )
     if [ $? -ne 0 ]; then
@@ -479,9 +449,11 @@ cmd_conf_set_many() {
 # 名单中已安装在设备上的项。
 # 一次 pm list packages 拿全量再自己筛，不逐包调 pm path：
 # 数百个包就是数百次进程调用，WebUI 会卡死。
+# 这份输出会被当成 grep -F -x 的模式文件用（见 list_installed），
+# 所以行尾必须在这里就干净：带 \r 的行 -x 永远判不相等。
 _installed_set() {
   pm list packages 2>/dev/null | sed -n 's/^package://p' \
-    | awk '{print $1}' | grep -v '^$' | sort
+    | awk '{print $1}' | tr -d '\r' | grep -v '^$' | sort
 }
 
 # 候选：装了、包名里带发行商词典的段、但还没进名单的应用。
@@ -636,8 +608,6 @@ builtin_labels() {
   return 0
 }
 # 一行一个 "包名<TAB>应用名"，给前端画"第一行应用名、第二行包名"。
-#
-# 一行一个 "包名<TAB>应用名"，给前端画"第一行应用名、第二行包名"。
 # Android 没有现成的应用名来源：pm list packages 无 --show-app-label，
 # dumpsys package 也不带标签；名字只存在 APK 里（AndroidManifest 的 android:label，
 # 通常是 @string 引用，文本还要去 resources.arsc 字符串池解析），只能由守护读 APK。
@@ -777,7 +747,8 @@ list_installed() {
   # 和"名单里真的一条都没装上"长得一模一样，没法区分。
   if [ ! -s "$_set" ]; then rm -f "$_set"; die "NO_PM" 8; fi
   # 名单先规范化成 LF 再整行比对：CRLF 的行尾带 \r，
-  # 而 grep 的模式来自 pm（纯 LF），-x 要求整行相等 -> 一条都命中不了。
+  # 而模式文件 _set 由 _installed_set 生成（那边已 tr 掉 \r），
+  # -x 要求整行相等 -> 任一侧带 \r 就一条都命中不了。
   # tr 放在 grep 之后就晚了，grep 早就按含 \r 的行判过了。
   tr -d '\r' < "$LIST" | grep -F -x -f "$_set"
   rm -f "$_set" 2>/dev/null
@@ -843,9 +814,7 @@ is_mode_val() {
   [ "$1" -ge 1 ] && [ "$1" -le 100 ]
 }
 
-# 输出成 "pkg=值" 的纯数据行，供前端渲染；学习写回来的那条在值后面多带一个
-# learn 词尾。页面上要分得清哪条是自己填的（学习永远不会去改它）、
-# 哪条是学出来的（点一下档位就夺回成手填）。
+# 输出成 "pkg=值" 的纯数据行，供前端渲染；
 modes_list() {
   [ -f "$MODES" ] || return 0
   # 同 list_all：包里的 app_modes.conf 是"全是注释 + 例子"的模板，
@@ -857,12 +826,11 @@ modes_list() {
       if (i < 2) next
       pkg = substr($0, 1, i - 1)
       rest = substr($0, i + 1)
-      tag = (rest ~ /#[ \t]*learn/) ? " learn" : ""
       sub(/#.*/, "", rest)
       gsub(/^[ \t]+|[ \t]+$/, "", pkg)
       gsub(/[ \t]+$/, "", rest)
       if (!pkg || rest == "") next
-      print pkg "=" rest tag
+      print pkg "=" rest
     }'
   return 0
 }
@@ -893,54 +861,6 @@ modes_set() {
   ensure_final_newline "$MODES"
   printf '%s=%s\n' "$_p" "$_v" >> "$MODES" || die "WRITE" 5
   printf 'OK %s=%s\n' "$_p" "$_v"
-}
-
-# 学习写回一条档位。手填过的那条永远赢：行尾没有 #learn 标记就一个字都不改，
-# 否则"用户明明设成 60%，学习又偷偷改回 65%"是没法解释的行为。
-# 只接受数字：full 是整个交还系统，学错了等于完全不限频，这个动作只能人来点。
-# 带冒号（用户单独调过 GPU）的条目也整条不动：学习只懂 CPU，重写会吞掉 GPU 段。
-modes_learn() {
-  _p=${1:-}
-  _v=${2:-}
-  is_package "$_p" || die "BAD_PKG"
-  case "$_v" in ''|*[!0-9]*) die "BAD_MODE" ;; esac
-  [ "$_v" -ge 1 ] && [ "$_v" -le 100 ] || die "BAD_MODE"
-  [ -f "$MODES" ] || { mkdir -p "$DATA" 2>/dev/null; : > "$MODES" 2>/dev/null; } \
-    || die "WRITE" 5
-  # 前缀比较一律用 awk 的 index()，不用 grep -E "^$_p="：包名里的点是通配符。
-  if tr -d '\r' < "$MODES" | awk -v k="$_p" '
-       index($0, k "=") == 1 {
-         v = substr($0, length(k) + 2)
-         sub(/#.*/, "", v)
-         if (index(v, ":")) f = 1
-       } END { exit !f }'; then
-    printf 'SKIP %s 这条带 GPU 设置，学习不改\n' "$_p"
-    return 0
-  fi
-  if tr -d '\r' < "$MODES" | awk -v k="$_p" '
-       index($0, k "=") == 1 {
-         v = substr($0, length(k) + 2)
-         sub(/#.*/, "", v)
-         if (v ~ /^[ \t]*[kK][eE][eE][pP][ \t]*$/) f = 1
-       } END { exit !f }'; then
-    printf 'SKIP %s 这条是熄屏保持封顶，学习不改\n' "$_p"
-    return 0
-  fi
-  if tr -d '\r' < "$MODES" | awk -v k="$_p" \
-       'index($0, k "=") == 1 && $0 !~ /#[ \t]*learn/ { f = 1 } END { exit !f }'; then
-    printf 'SKIP %s 这条是手填的，学习不改\n' "$_p"
-    return 0
-  fi
-  if tr -d '\r' < "$MODES" | awk -v k="$_p" 'index($0, k "=") == 1 { f = 1 } END { exit !f }'; then
-    tr -d '\r' < "$MODES" \
-      | awk -v k="$_p" -v v="$_v" 'index($0, k "=") == 1 { print k "=" v "  #learn"; next } { print }' \
-      | write_atomic "$MODES" || die "WRITE" 5
-    printf 'OK %s=%s learn\n' "$_p" "$_v"
-    return 0
-  fi
-  ensure_final_newline "$MODES"
-  printf '%s=%s  #learn\n' "$_p" "$_v" >> "$MODES" || die "WRITE" 5
-  printf 'OK %s=%s learn\n' "$_p" "$_v"
 }
 
 modes_del() {
@@ -1234,8 +1154,6 @@ cmd_pkg() {
     pkg_kv kernel "$(uname -r 2>/dev/null)"
     pkg_kv build "$(getprop ro.build.display.id 2>/dev/null)"
     pkg_kv root "$(for d in /data/adb/ksu /data/adb/ap /data/adb/magisk; do [ -d "$d" ] && printf '%s ' "$d"; done)"
-    pkg_kv learned "$( [ -f "$LEARN" ] && echo 有样本 || echo 无样本)"
-    pkg_kv learned_app "$( [ -f "$LEARN_APP" ] && echo 有样本 || echo 无样本)"
     pkg_ovr
 
     pkg_sec '守护探测 probe 原样（它自己怎么看这台机）'
@@ -1313,12 +1231,6 @@ cmd_pkg() {
     pkg_sec '当前配置全文'
     cat "$CONF" 2>/dev/null
 
-    pkg_sec '智能建议当前结论'
-    cmd_advice
-
-    pkg_sec '按应用建议当前结论'
-    cmd_advice_app
-
     # 待机耗电的现场：深睡有没有在跑、名单有多大、系统空闲状态是什么。
     pkg_sec '深度睡眠现场'
     printf '  dsleep.conf:\n'
@@ -1355,7 +1267,7 @@ cmd_pkg() {
       [ -d "$d" ] || continue
       [ -f "$d/stats/time_in_state" ] || _no=$((_no + 1))
     done
-    [ "$_no" -gt 0 ] && printf '  → 有 %s 个 policy 没有 stats/time_in_state：学习采样只能走粗略档\n' "$_no"
+    [ "$_no" -gt 0 ] && printf '  → 有 %s 个 policy 没有 stats/time_in_state：采样只能走粗略档\n' "$_no"
     # 判"有没有可写上限节点"要逐个试，不能把三个候选塞进一条 ls：
     # ls 只要有一个参数打不开就返回非零，高通机器上 mali 那条必然不存在，
     # 于是明明有 3d00000.qcom,kgsl-3d0/max_freq 也会被报成"没找到"。
@@ -1557,7 +1469,7 @@ _ds_stop() {
       ;;
   esac
   rm -f "$DS_PID" 2>/dev/null
-  [ -f "$DS_SH" ] && ( . "$DS_SH" >/dev/null 2>&1; ds_freeze_restore_if_any; ds_snap_restore_if_any )
+  [ -f "$DS_SH" ] && ( . "$DS_SH" >/dev/null 2>&1; ds_freeze_restore_if_any; ds_ops_restore_if_any; ds_snap_restore_if_any )
   _ds_state_active_off
   return 0
 }
@@ -1667,408 +1579,6 @@ cmd_resume()  {
 }
 cmd_ping()    { printf 'PONG\n'; }
 
-# ── 智能建议 ────────────────────────────────────────────────────
-# 采样在守护里（src/learn.c），判据写在 awk 里：改阈值不用重编二进制，
-# 也不用因为一个数字再刷一次机。
-#
-# 单位对齐是这里的唯一难点：
-#   顶帽占比 = 顶帽驻留 / 全部驻留。分子分母都来自 time_in_state，
-#              同一套单位（核·毫秒），可以直接相除；
-#              不能拿它去除墙钟时长——多核同频点时驻留会叠加，除出来能超 100%。
-#   p90/p99  = 频率直方图的 90%/99% 分位，按桶内线性插值，单位是硬件最高频的百分比。
-#   贴帽两桶 = 当前帽所在桶 + 下面一桶的驻留占比（约帽下 8 个点）。
-#              不能取绝对最高的 22、23 桶：帽通常 60~70%，那两桶永远是空的。
-#   被压占比 = 这一档的实际上限低于我们要的帽的那些时段，占采样墙钟的比例。
-#              热限频把上限压到比我们的帽还低时，"核贴着上限跑"贴的是它的帽，
-#              这时候升和降两个方向都判不出来，直接不动。
-#   时长     = 墙钟分钟数，只用来判断"采够了没有"，不参与任何比值。
-# 守护只在封顶真的生效的时段累计（熄屏、开机满血窗口、游戏解锁都不采），
-# 所以这里的分布回答的就是"这道帽扣得紧不紧"。
-# 这一拍为什么没在采样。天数一直是 0，十有八九是一分钟都没累计到；
-# 只写"还没累计到样本"用户没法行动。按和守护一致的优先级点名：
-#   暂停 > 熄屏 > 插电放宽 > 实时偏移 > 游戏/满血
-_learn_gate() {
-  [ -f "$PAUSE" ] && { echo pause; return; }
-  [ -f "$STATUS" ] || { echo ok; return; }
-  _g_sc=$(sed -n 's/^screen=//p' "$STATUS" 2>/dev/null | head -n 1)
-  _g_st=$(sed -n 's/^state=//p' "$STATUS" 2>/dev/null | head -n 1)
-  _g_cg=$(sed -n 's/^chg=//p' "$STATUS" 2>/dev/null | head -n 1)
-  _g_dl=$(sed -n 's/^dlt=//p' "$STATUS" 2>/dev/null | head -n 1)
-  _g_cu=$(conf_read CHG_UNCAP)
-  [ "$_g_sc" = off ] && { echo screen; return; }
-  [ "$_g_cg" = 1 ] && [ "$_g_cu" != 0 ] && { echo chg; return; }
-  case "$_g_dl" in ''|0|-1|*[!0-9-]*) : ;; *) echo adapt; return ;; esac
-  [ "$_g_st" = full ] && { echo full; return; }
-  echo ok
-}
-
-cmd_advice() {
-  _lv=$(conf_read LEARN)
-  case "$_lv" in 0) _lv=0 ;; *) _lv=1 ;; esac
-  _mode=$(conf_read LEARN_MODE)
-  case "$_mode" in eco|performance) ;; *) _mode=balanced ;; esac
-  printf 'learn=%s\nmode=%s\n' "$_lv" "$_mode"
-  # 旧格式被守护清掉时留的标记：页面要说明"正在重新积累"。
-  _rst=0
-  [ -f "$LEARN.v2reset" ] && _rst=1
-  printf 'reset=%s\n' "$_rst"
-  _rows=0
-  [ -f "$LEARN" ] && _rows=$(tr -d '\r' < "$LEARN" \
-      | awk 'NF >= 31 && $1 !~ /^#/ { n++ } END { print n + 0 }' 2>/dev/null)
-  case "$_rows" in ''|*[!0-9]*) _rows=0 ;; esac
-  printf 'rows=%s\n' "$_rows"
-  printf 'gate=%s\n' "$(_learn_gate)"
-  if [ "$_lv" = 0 ]; then
-    printf 'note=学习开关是关的，打开后从下一个巡检周期开始采\n'
-    return 0
-  fi
-  if [ "$_rows" -eq 0 ]; then
-    if [ "$_rst" = 1 ]; then
-      printf 'note=学习算法已升级，旧样本已清空；重新积累 2~3 天后出建议\n'
-    else
-      printf 'note=还没采到样本：要亮屏、封顶生效、且不在游戏或满血时段\n'
-    fi
-    return 0
-  fi
-  # 手动改文件绕过 conf_set 时，按 meta 记录里的旧帽补出方向。
-  _learn_meta_sync 0 "$(conf_read CPU_PCT_BIG)"
-  _learn_meta_sync 1 "$(conf_read CPU_PCT_MID2)"
-  _learn_meta_sync 2 "$(conf_read CPU_PCT_MID)"
-  _learn_meta_sync 3 "$(conf_read CPU_PCT_LITTLE)"
-  _learn_meta_sync 4 "$(conf_read GPU_PCT)"
-  tr -d '\r' < "$LEARN" | awk \
-    -v c0="$(conf_read CPU_PCT_BIG)" -v c1="$(conf_read CPU_PCT_MID2)" \
-    -v c2="$(conf_read CPU_PCT_MID)" -v c3="$(conf_read CPU_PCT_LITTLE)" \
-    -v c4="$(conf_read GPU_PCT)" -v mode="$_mode" -v now="$(date +%s)" \
-    -v md0="$(_lm_field 0 2)" -v mt0="$(_lm_field 0 4)" \
-    -v md1="$(_lm_field 1 2)" -v mt1="$(_lm_field 1 4)" \
-    -v md2="$(_lm_field 2 2)" -v mt2="$(_lm_field 2 4)" \
-    -v md3="$(_lm_field 3 2)" -v mt3="$(_lm_field 3 4)" \
-    -v md4="$(_lm_field 4 2)" -v mt4="$(_lm_field 4 4)" '
-  function num(x) { return (x ~ /^[0-9]+$/ && x + 0 > 0) ? x + 0 : -1 }
-  # 分位数落在帽所在桶的中间时会略微超过帽（桶宽 4.17%），"离帽 -2 个点"
-  # 这种负数读起来像算错了；贴到帽就说贴到帽。
-  function gaptxt(c, q,   gg) {
-    gg = c - q
-    if (gg >= 1) return sprintf("离帽 %d 个点", gg)
-    return "已经贴到帽"
-  }
-  # p99 用桶内线性插值：24 个桶每个 4.17%，直接取桶上沿会把贴帽判得太宽。
-  # 设备上的 awk 不认 C 风格注释（/* */ 会被当成正则），这里一律用 #。
-  function qval(t, q, tot,   tgt, cum, i, frac) {
-    tgt = tot * q; cum = 0
-    for (i = 0; i < 24; i++) {
-      if (cum + bd[t, i] >= tgt) {
-        frac = (bd[t, i] > 0) ? (tgt - cum) / bd[t, i] : 1
-        return (i + frac) * 100 / 24
-      }
-      cum += bd[t, i]
-    }
-    return 100
-  }
-  BEGIN {
-    c[0] = c0; c[1] = c1; c[2] = c2; c[3] = c3; c[4] = c4
-    mdir[0] = md0; mts[0] = mt0; mdir[1] = md1; mts[1] = mt1
-    mdir[2] = md2; mts[2] = mt2; mdir[3] = md3; mts[3] = mt3
-    mdir[4] = md4; mts[4] = mt4
-  }
-  /^[[:space:]]*#/ { next }
-  {
-    if (NF < 31) next
-    t = $2 + 0
-    if (t < 0 || t > 4) next
-    cur = num(c[t])
-    if (cur < 0) next
-    # 只认当前这道配置帽下采的样本：旧帽的行即使还在也不参与。
-    if (($31 + 0) != cur) next
-    seen[t] = 1
-    matched++
-    sm[t] += $3 + 0; pn[t] += $4 + 0; hd[t] += $5 + 0
-    for (i = 0; i < 24; i++) bd[t, i] += $(6 + i) + 0
-    b = $30 + 0
-    for (i = 0; i < 28 && b > 0; i++) { if (b % 2) df[t, i] = 1; b = int(b / 2) }
-  }
-  END {
-    split("CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT", kn, " ")
-    for (t = 0; t <= 4; t++) {
-      if (!seen[t]) continue
-      tot = 0
-      for (i = 0; i < 24; i++) tot += bd[t, i]
-      days = 0
-      for (i = 0; i < 28; i++) if (df[t, i]) days++
-      mins = int(sm[t] / 60000)
-      pin = (tot > 0) ? int(pn[t] * 100 / tot) : 0
-      if (pin > 100) pin = 100
-      held = (sm[t] > 0) ? int(hd[t] * 100 / sm[t]) : 0
-      p90 = (tot > 0) ? int(qval(t, 0.90, tot) + 0.5) : 0
-      p99 = (tot > 0) ? int(qval(t, 0.99, tot) + 0.5) : 0
-      cur = num(c[t])
-      # “贴帽两桶”= 当前帽所在桶再带下面一桶（约帽下 8 个点）。
-      # 不能取绝对最高的 22、23 桶：帽在 65% 时那两桶永远是空的，
-      # 爆发压力判不出来，建议又只剩“往下收”。
-      capbin = int(cur * 24 / 100)
-      if (capbin > 23) capbin = 23
-      if (capbin < 1) capbin = 1
-      top2 = (tot > 0) ? int((bd[t, capbin] + bd[t, capbin - 1]) * 100 / tot) : 0
-      adv = "hold"; to = (cur > 0 ? cur : 0); why = ""
-      updays = (mode == "eco" ? 3 : (mode == "performance" ? 1 : 2))
-      upmin = 60
-      nearcap = (tot > 0 && p99 >= cur - 100 / 24)
-      pressure = (pin >= 10 || top2 >= 25)
-      if (cur < 0) {
-        why = "读不到这一档当前的封顶值"
-      } else if (cur >= 100) {
-        why = "这一档已经是 100%，等于没扣，没有可放宽的余量"
-      } else if (tot <= 0) {
-        why = sprintf("还没累计到驻留样本（墙钟 %d 分钟），先继续用", mins)
-      } else if (held >= 50) {
-        why = sprintf("这段时间有 %d%% 的上限被厂商压在你要的帽之下（热限频在管），先不给建议", held)
-      } else if (nearcap && pressure) {
-        if (mins >= upmin && days >= updays) {
-          adv = "up"; to = cur + 5
-          why = sprintf("p99 到 %d%%（贴帽）、顶帽 %d%%、贴帽两桶 %d%%：帽确实在拦，可以放宽一档", p99, pin, top2)
-        } else {
-          why = sprintf("p99 %d%%、贴帽两桶 %d%%：像在拦，但样本不够（现在 %d 天 %d 分钟，要 %d 天 %d 分钟）",
-                        p99, top2, days, mins, updays, upmin)
-        }
-      } else if (mode != "performance" && pin <= 10 && p99 <= cur - 15) {
-        if (t == 0) {
-          if (mode == "eco" && p99 <= cur - 25 && mins >= 180 && days >= 7) {
-            adv = "down"; to = cur - 5
-            why = sprintf("p99 只到 %d%%（离帽 %d 个点）、顶帽 %d%%：大核长期没被碰到，省电模式收紧一档", p99, cur - p99, pin)
-          } else if (mode == "eco") {
-            why = sprintf("大核在省电模式下也要 p99 ≤ %d%%、满 7 天/180 分钟才下调（现在 p99 %d%%、%d 天 %d 分钟）",
-                          cur - 25, p99, days, mins)
-          } else {
-            why = sprintf("p99 只到 %d%%：大核是爆发型负载，均衡/性能模式不自动下调；要省电请切到省电模式", p99)
-          }
-        } else if (mins >= 120 && days >= 2) {
-          adv = "down"; to = cur - 5
-          why = sprintf("p99 只到 %d%%（离帽 %d 个点）、顶帽 %d%%：这道帽长期没被碰到，可以收紧一档", p99, cur - p99, pin)
-        } else {
-          why = sprintf("p99 只到 %d%%（离帽 %d 个点）：看着可以收紧，但样本不够（现在 %d 天 %d 分钟，要 2 天 120 分钟）",
-                        p99, cur - p99, days, mins)
-        }
-      } else {
-        why = sprintf("p99 %d%%（%s）、顶帽 %d%%、贴帽两桶 %d%%：还没凑成该动的组合，先维持",
-                      p99, gaptxt(cur, p99), pin, top2)
-      }
-      # 7 天反向冷却：刚往一个方向调过，不立刻建议反着来。
-      if (adv != "hold") {
-        md = mdir[t]; mtsv = mts[t] + 0
-        if (md != "" && md != "none" && md != adv && mtsv > 0 && now - mtsv < 7 * 86400) {
-          why = "7 天内刚往" (md == "up" ? "上" : "下") "调过，先不反向；" why
-          adv = "hold"; to = cur
-        }
-      }
-      if (to < 1) to = 1
-      if (to > 100) to = 100
-      nrec++
-      printf "---REC---\n"
-      printf "tier=%d\nkey=%s\ncur=%d\nadvice=%s\nto=%d\npin=%d\nheld=%d\np90=%d\np99=%d\ntop2=%d\nmin=%d\ndays=%d\nwhy=%s\n", \
-             t, kn[t + 1], cur, adv, to, pin, held, p90, p99, top2, mins, days, why
-    }
-    if (nrec == 0 && matched == 0)
-      print "note=样本和当前这道帽对不上（刚改过百分比或刚升级），等约 5 分钟新样本落盘再看"
-  }'
-  return 0
-}
-
-# 按应用的建议。判据形状和全局一致，差别：
-#   1) CPU 四档合并一个分布（应用档位本来就是四簇统一），GPU 不参与；
-#   2) 上调固定 3 天，不跟随性能模式的 1 天；下调沿用 LEARN_APP_DAY / MIN；
-#   3) 已经设数字档位的包按那道帽过滤样本；没设的按全局各档帽过滤、用四簇平均当基准；
-#   4) 满血/带 GPU 段/手填的包不出自动建议；没设档位的只列真有 up/down 的。
-cmd_advice_app() {
-  _lv=$(conf_read LEARN)
-  case "$_lv" in 0) _lv=0 ;; *) _lv=1 ;; esac
-  _la=$(conf_read LEARN_APP)
-  case "$_la" in 1|true|TRUE) _la=1 ;; *) _la=0 ;; esac
-  _mode=$(conf_read LEARN_MODE)
-  case "$_mode" in eco|performance) ;; *) _mode=balanced ;; esac
-  printf 'learn=%s\nlearn_app=%s\nmode=%s\n' "$_lv" "$_la" "$_mode"
-  if [ "$_lv" = 0 ] || [ "$_la" = 0 ]; then
-    printf 'note=按应用学习是关的。打开后，每个前台应用都会在全局帽下攒自己的样本\n'
-    return 0
-  fi
-  _need=30
-  _nday=2
-  _m=$(conf_read LEARN_APP_MIN); case "$_m" in ''|*[!0-9]*) ;; *) _need=$_m ;; esac
-  _d=$(conf_read LEARN_APP_DAY); case "$_d" in ''|*[!0-9]*) ;; *) _nday=$_d ;; esac
-  printf 'min=%s\ndays=%s\n' "$_need" "$_nday"
-  _rows=0
-  [ -f "$LEARN_APP" ] && _rows=$(tr -d '\r' < "$LEARN_APP" \
-      | awk 'NF >= 31 && $1 !~ /^#/ { n++ } END { print n + 0 }' 2>/dev/null)
-  case "$_rows" in ''|*[!0-9]*) _rows=0 ;; esac
-  printf 'rows=%s\n' "$_rows"
-  if [ "$_rows" = 0 ]; then
-    printf 'note=还没攒到按应用的样本：要有亮屏、封顶生效（不在游戏或满血、没被实时偏移改帽）的前台应用\n'
-    return 0
-  fi
-  printf 'note=没设专属档位的应用只在学出可改的建议时列出；设了数字档位的按那道帽算\n'
-  _mf=/dev/null
-  [ -f "$MODES" ] && _mf="$MODES"
-  MODES_FILE="$_mf" awk -v need="$_need" -v nday="$_nday" -v mode="$_mode" \
-      -v g0="$(conf_read CPU_PCT_BIG)" -v g1="$(conf_read CPU_PCT_MID2)" \
-      -v g2="$(conf_read CPU_PCT_MID)" -v g3="$(conf_read CPU_PCT_LITTLE)" '
-  function trim(s) { gsub(/^[ \t\r]+|[ \t\r]+$/, "", s); return s }
-  function acap(x, v) {
-    v = x + 0
-    if (x ~ /^[0-9]+$/ && v >= 1 && v <= 100) { cs += v; nc++ }
-  }
-  function qval(p, q, tot,   tgt, cum, i, frac) {
-    tgt = tot * q; cum = 0
-    for (i = 0; i < 24; i++) {
-      if (cum + bd[p, i] >= tgt) {
-        frac = (bd[p, i] > 0) ? (tgt - cum) / bd[p, i] : 1
-        return (i + frac) * 100 / 24
-      }
-      cum += bd[p, i]
-    }
-    return 100
-  }
-  # 同全局那条：分位数落在帽所在桶里会略微超过帽，别说成"离帽 -2 个点"
-  function gaptxt(c, q,   gg) {
-    gg = c - q
-    if (gg >= 1) return sprintf("离帽 %d 个点", gg)
-    return "已经贴到帽"
-  }
-  BEGIN {
-    mf = ENVIRON["MODES_FILE"]
-    acap(g0); acap(g1); acap(g2); acap(g3)
-    base = (nc > 0) ? int(cs / nc + 0.5) : 0
-    g[0] = g0 + 0; g[1] = g1 + 0; g[2] = g2 + 0; g[3] = g3 + 0
-  }
-  { sub(/\r$/, "") }
-  # 第一份输入是档位文件；没有档位文件时传空设备，靠文件名判，不用 FNR==NR。
-  FILENAME == mf {
-    i = index($0, "=")
-    if (i < 2 || /^[ \t]*(#|$)/) next
-    p = trim(substr($0, 1, i - 1))
-    v = substr($0, i + 1)
-    learn = (v ~ /#[ \t]*learn/) ? 1 : 0
-    sub(/#.*/, "", v)
-    v = trim(v)
-    if (v == "full" || v == "FULL") { full[p] = 1; next }
-    if (v == "keep" || v == "KEEP") { skipd[p] = 1; next }
-    if (index(v, ":")) { skipd[p] = 1; next }
-    if (v !~ /^[0-9]+$/) next
-    cur[p] = v + 0
-    if (!learn) manual[p] = 1
-    next
-  }
-  /^[[:space:]]*#/ { next }
-  {
-    if (NF < 31) next
-    p = $1; t = $2 + 0
-    if (t < 0 || t > 3) next
-    if (p in full || p in skipd) next
-    capv = $31 + 0
-    want = (p in cur) ? cur[p] : g[t]
-    # 只认当前这道帽下的样本
-    if (want < 1 || capv != want) next
-    seen[p] = 1
-    matched++
-    sm[p] += $3 + 0; pn[p] += $4 + 0; hd[p] += $5 + 0
-    for (i = 0; i < 24; i++) bd[p, i] += $(6 + i) + 0
-    b = $30 + 0
-    for (i = 0; i < 28 && b > 0; i++) { if (b % 2) dy[p, i] = 1; b = int(b / 2) }
-  }
-  END {
-    for (p in seen) {
-      if (p in full || p in skipd) continue
-      ismode = (p in cur)
-      c = ismode ? cur[p] : base
-      if (c < 1) continue
-      tot = 0
-      for (i = 0; i < 24; i++) tot += bd[p, i]
-      days = 0
-      for (i = 0; i < 28; i++) if (dy[p, i]) days++
-      mins = int(sm[p] / 60000)
-      pin = (tot > 0) ? int(pn[p] * 100 / tot) : 0
-      if (pin > 100) pin = 100
-      held = (sm[p] > 0) ? int(hd[p] * 100 / sm[p]) : 0
-      # 按应用也一样：贴帽两桶跟着这个包当前的帽走
-      capbin = int(c * 24 / 100)
-      if (capbin > 23) capbin = 23
-      if (capbin < 1) capbin = 1
-      top2 = (tot > 0) ? int((bd[p, capbin] + bd[p, capbin - 1]) * 100 / tot) : 0
-      p90 = (tot > 0) ? int(qval(p, 0.90, tot) + 0.5) : 0
-      p99 = (tot > 0) ? int(qval(p, 0.99, tot) + 0.5) : 0
-      adv = "hold"; to = c; why = ""
-      nearcap = (tot > 0 && p99 >= c - 100 / 24)
-      pressure = (pin >= 10 || top2 >= 25)
-      if (c >= 100) {
-        why = "这个应用已经是 100%，等于没扣，没有可放宽的余量"
-      } else if (tot <= 0) {
-        why = sprintf("还没累计到驻留样本（前台 %d 分钟），先继续用", mins)
-      } else if (held >= 50) {
-        why = sprintf("这段时间有 %d%% 的上限被厂商压在你要的帽之下（热限频在管），先不给建议", held)
-      } else if (nearcap && pressure) {
-        if (mins >= need && days >= 3) {
-          adv = "up"; to = c + 5
-          why = sprintf("p99 到 %d%%、贴帽两桶 %d%%：这个应用经常贴着这道帽跑，可以放宽一档", p99, top2)
-        } else {
-          why = sprintf("p99 %d%%、贴帽两桶 %d%%：像在拦，但样本不够（现在 %d 天 %d 分钟，按应用要 3 天 %d 分钟）",
-                        p99, top2, days, mins, need)
-        }
-      } else if (mode != "performance" && pin <= 10 && p99 <= c - 15) {
-        if (days >= nday && mins >= need) {
-          adv = "down"; to = c - 5
-          why = sprintf("p99 只到 %d%%（离帽 %d 个点）、顶帽 %d%%：这道帽长期没被碰到，可以收紧一档", p99, c - p99, pin)
-        } else {
-          why = sprintf("p99 只到 %d%%（离帽 %d 个点）：看着可以收紧，但这个包的样本还不够（现在 %d 天 %d 分钟，要 %d 天 %d 分钟）",
-                        p99, c - p99, days, mins, nday, need)
-        }
-      } else {
-        why = sprintf("p99 %d%%（%s）、顶帽 %d%%、贴帽两桶 %d%%：还没凑成该动的组合，先维持",
-                      p99, gaptxt(c, p99), pin, top2)
-      }
-      # 没设档位的包只在真想改的时候出现：维持或样本不够的不刷列表。
-      if (!ismode && adv == "hold") continue
-      if (to < 1) to = 1
-      if (to > 100) to = 100
-      bsrc = ismode ? "mode" : "global"
-      nrec++
-      printf "---REC---\n"
-      printf "pkg=%s\ncur=%d\nmanual=%d\nadvice=%s\nto=%d\npin=%d\nheld=%d\np90=%d\np99=%d\ntop2=%d\nmin=%d\ndays=%d\nwhy=%s\nbase=%s\n", \
-             p, c, ((p in manual) ? 1 : 0), adv, to, pin, held, p90, p99, top2, mins, days, why, bsrc
-    }
-    if (nrec == 0) {
-      if (matched == 0)
-        print "note=按应用样本和当前档位对不上（刚改过百分比或档位），等约 5 分钟新样本"
-      else {
-        for (p in seen) nsee++
-        printf "note=有 %d 个应用攒到样本，但还没到门槛：上调固定要 3 天；下调按「要跨几天」和「至少用多久」。\n", nsee
-      }
-    }
-  }' "$_mf" "$LEARN_APP"
-  return 0
-}
-
-cmd_learn_reset() {
-  # 起点文件也一起删：天数是"从首次采样起满 24 小时算一天"，
-  # 只删样本不删起点的话，清零后下一个小时就可能又显示第 2 天。
-  rm -f "$LEARN" "$LEARN_APP" "$LEARN.since" 2>/dev/null
-  # 守护每 5 分钟会重写这两份文件，但内存里的累计不会自己清；
-  # 让它看见文件消失时把累计归零（src/learn.c 的 learn_check_reset）。
-  # 学习写回来的那批档位也一起撤掉：留着它们，页面上会显示几个
-  # "来源已经被清零、却还在压着核心"的值。手填的一条不动。
-  _n=0
-  if [ -f "$MODES" ]; then
-    _n=$(tr -d '\r' < "$MODES" | grep -c '#[ \t]*learn' 2>/dev/null)
-    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
-    if [ "$_n" -gt 0 ]; then
-      tr -d '\r' < "$MODES" | grep -v '#[ \t]*learn' | write_atomic "$MODES" \
-        || die "WRITE" 5
-    fi
-  fi
-  printf 'OK learn_reset modes=%s\n' "$_n"
-}
-
-# 全部恢复默认：性能配置 / 分应用档位 / 深睡开关与内置豁免 / 适配覆盖 / 学习样本。
-# 游戏名单、发行商词典、主题不动——那是用户自己的内容，不是"调乱的配置"。
-# 页面上的按钮要连点两次确认；这里按单次调用执行。
 cmd_reset_all() {
   # 出厂配置：新装/升级时装机脚本会留一份到 $DATA/defaults；
   # 手动解包/hot-push 没有 defaults 时退回模块目录里的原文件。
@@ -2113,7 +1623,9 @@ cmd_reset_all() {
   fi
 
   rm -f "$OVR" 2>/dev/null
-  rm -f "$LEARN" "$LEARN_APP" "$LEARN.since" "$LEARN_META" 2>/dev/null
+  # 旧版本留下的学习样本；学习模式已移除，恢复默认时一并清掉。
+  rm -f "$DATA/learn.tsv" "$DATA/learn_app.tsv" "$DATA/learn.tsv.since" \
+        "$DATA/learn_meta.tsv" 2>/dev/null
 
   [ -f "$BIN" ] && "$BIN" restart >/dev/null 2>&1
   printf 'OK reset_all\n'
@@ -2126,6 +1638,7 @@ case "${1:-}" in
   ping)       cmd_ping ;;
   status)     st_status ;;
   log)        st_log "$2" ;;
+  logs)       shift; cmd_logs "$@" ;;
   about)      st_about ;;
   conf_get)   cfg_get ;;
   conf_set)   cfg_set "$2" "$3" ;;
@@ -2142,14 +1655,10 @@ case "${1:-}" in
   builtin_labels) builtin_labels ;;
   labels)     shift; cmd_labels "$@" ;;
   modes_set)  modes_set "$2" "$3" ;;
-  modes_learn) modes_learn "$2" "$3" ;;
   modes_del)  modes_del "$2" ;;
   cores)      [ -f "$BIN" ] && "$BIN" cores ;;
   icon)       cmd_icon "$2" ;;
   icons)      shift; cmd_icons "$@" ;;
-  advice)     cmd_advice ;;
-  advice_app) cmd_advice_app ;;
-  learn_reset) cmd_learn_reset ;;
   reset_all)  cmd_reset_all ;;
   pkg)        cmd_pkg ;;
   pkg_import) shift; cmd_pkg_import "$@" ;;

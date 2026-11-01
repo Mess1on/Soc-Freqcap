@@ -18,6 +18,15 @@ ok(){ if [ "$1" = "$2" ]; then echo "  ok   $3"; pass=$((pass+1));
       else echo "  FAIL $3: got=[$1] want=[$2]"; fail=$((fail+1)); fi; }
 has(){ grep -qx -- "$2" "$1" 2>/dev/null && echo yes || echo no; }
 
+# deep_sleep.sh 里没有 ds_proc_state / ds_proc_adj：读 state 和 oom_score_adj 的
+# 逻辑早先合进了 ds_freeze_build_queue 那段 awk，函数名就没了。台架按同一个口径
+# 自己从 /proc 读，否则每条用到它们的断言都报 "inaccessible or not found"，
+# 一串假 FAIL 会把真回归盖住。
+# state 必须走 ds_proc_stat_after_comm：comm 里可能带空格和括号，直接 awk '{print $3}'
+# 会切错列；先剥掉 "pid (comm) " 之后，第 1 列才是状态。
+ds_proc_state(){ ds_proc_stat_after_comm "$1" 2>/dev/null | awk '{print $1}'; }
+ds_proc_adj(){ cat "/proc/$1/oom_score_adj" 2>/dev/null; }
+
 P=""
 cleanup(){
     ds_freeze_thaw_all >/dev/null 2>&1
@@ -90,6 +99,33 @@ case "$ds_freeze_backend" in
     v1|v2)
         ok "$([ -d "$ds_freeze_group" ] && echo yes || echo no)" "no" "残留组已清理" ;;
 esac
+ds_frozen=""; ds_freeze_frozen=0
+kill "$P" 2>/dev/null; P=""
+
+echo "== 账本 pid 前缀撞车：不能把没冻过的进程当成已冻 =="
+# 真会撞的情形：账本里有 1124，补扫又扫出 124。
+# 拿 *"$pid|"* 在整个账本里做子串匹配，"124|" 会命中 "1124|" 的尾巴，
+# 于是 124 被跳过、永远不入组，用户看到的是"后台应用还在跑"。
+sleep 300 &
+P=$!
+DS_FREEZE_TEST_PID=$P
+DS_FREEZE_TEST_PKG=com.test.freeze
+export DS_FREEZE_TEST_PID DS_FREEZE_TEST_PKG
+ds_freeze_group_init
+ds_freeze_build_queue
+ok "$(grep -c "^$P|" "$DS_FREEZE_QUEUE" 2>/dev/null)" "1" "队列里是候选 pid 本身"
+# 先塞一条 pid 正好是"9 + 候选 pid"的假账，制造前缀撞车。
+# 账本是按行分隔的记录，假账也必须带行尾换行（产品里就是 ds_frozen="${ds_frozen}...
+# " 这种写法）；漏了换行会让下一条记录粘在同一行末尾，断言会因为"格式不对"
+# 而失败，那就不是在验前缀撞车了。
+ds_frozen="9${P}|1|com.fake.prefix
+"
+ds_freeze_step
+ok "$(printf '%s\n' "$ds_frozen" | grep -c "^$P|")" "1" \
+   "候选被真的记进账本（没有被前缀撞车跳过）"
+ok "$(grep -c "^$P|" "$DS_FREEZE_LEDGER" 2>/dev/null)" "1" "账本文件里也有它"
+ok "$(printf '%s\n' "$ds_frozen" | grep -c "^9${P}|")" "1" "原来那条假账没被顶掉"
+ds_freeze_thaw_all 2>/dev/null
 ds_frozen=""; ds_freeze_frozen=0
 kill "$P" 2>/dev/null; P=""
 

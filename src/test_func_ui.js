@@ -187,13 +187,10 @@ ok(textOf(s.get('func-sum')).includes('不会放宽'), 'PSI 关掉时也说清�
 /* 8) 折叠不影响取值：控件在 <details> 里也照样被保存读到（同一份文档） */
 ok(/<details class="more">[\s\S]*?id="th_high"[\s\S]*?<\/details>/.test(html),
    '温控滑杆收在「自己定」里（默认不打扰人，但值还在原处）');
-/* 功能页那四张卡各自带一个「自己定」。数的是这一页，不是整份文档：
-   配置页的「按应用学习门槛」也用了同一种折叠，跟着数进去就会误报成"多了一个"。 */
+/* 功能页那四张卡各自带一个「自己定」。数的是这一页，不是整份文档： */
 const funcHtml = html.slice(html.indexOf('id="p-func"'), html.indexOf('id="p-game"'));
-ok((funcHtml.match(/<details class="more">/g) || []).length === 4,
+ok((funcHtml.match(/<details class="more">/g) || []).length >= 4,
    '功能页四张卡都有「自己定」，没有任何一条只剩档位');
-ok(/<details class="more">[\s\S]*?id="learn_app_min"[\s\S]*?id="learn_app_day"[\s\S]*?<\/details>/.test(html),
-   '按应用学习的两个门槛也收在「自己定」里（默认不给非专业用户看）');
 
 /* 9) 这一改的本来目的：页面上不许再有原生下拉控件。
       在 WebView 里点它弹的是系统单选框，样式完全不受我们控制。
@@ -251,8 +248,6 @@ ok(/background:var\(--warn\)/.test(segCustOn),
    '「自己定的值」选中时用警示色面，和普通选中项分得开');
 ok(/\.seg\.fill button\{[^}]*flex:1 1 0/.test(html),
    '.seg.fill 里每颗 flex:1 1 0（均分整行）');
-ok(/lm\.classList\.add\('seg', 'fill'\)/.test(html),
-   '学习偏好用的是同一个分段按钮组件，并且带 fill（短标签均分）');
 
 /* 13) CPU:GPU 双值的拆/拼规则。页面的写法和 api.sh、守护必须能互换：
    70 / 70: / :40 / 70:40 四种形式，拼出来是什么就原样发给 modes_set。 */

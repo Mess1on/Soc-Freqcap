@@ -124,9 +124,9 @@ key_wait() {
 }
 
 # ── 动作表 ──────────────────────────────────────────────────────
-# 只读的（1/2/3/9）按下去直接执行；改东西的五个（4~8）都要二次确认：
+# 只读的（1/2/3）按下去直接执行；改东西的五个（4~8）都要二次确认：
 # 音量+ 取消、音量- 确认。只有两个键的界面里，误碰的代价就靠确认那一步兜住。
-NITEMS=9
+NITEMS=8
 
 label() {
   case "$1" in
@@ -138,12 +138,11 @@ label() {
     6) echo "重启守护（改完配置让它立刻生效）" ;;
     7) echo "暂停 / 恢复限频" ;;
     8) echo "停掉守护并恢复到开机前状态" ;;
-    9) echo "智能建议（按学习采样给每档升降，只读）" ;;
   esac
 }
 
 # 这一项是不是"只读"
-readonly_item() { [ "$1" -le 3 ] || [ "$1" = 9 ]; }
+readonly_item() { [ "$1" -le 3 ]; }
 
 # CPU 四簇一起加减：只动超大核的话，页面上四个滑杆和这里调出来的结果会互相盖。
 bump_cpu() {
@@ -173,11 +172,6 @@ do_item() {
     6) say "重启守护…"; api restart; say "完成" ;;
     7) if [ -f "$DATA/pause" ]; then say "恢复限频…"; api resume; else say "暂停限频…"; api pause; fi ;;
     8) say "停止并恢复…"; api stop; say "已恢复到开机前状态" ;;
-    9) api advice | sed -e 's/^---REC---$/    ------------/' \
-         -e 's/^advice=up$/    建议 = 放宽一档/' \
-         -e 's/^advice=down$/    建议 = 收紧一档/' \
-         -e 's/^advice=hold$/    建议 = 维持不动/' \
-         -e 's/^/    /' ;;
   esac
 }
 
@@ -207,7 +201,6 @@ if ! can_use_keys; then
   say "6 $DAEMON restart"
   say "7 touch $DATA/pause   ／   rm -f $DATA/pause && $DAEMON restart"
   say "8 $DAEMON stop"
-  say "9 sh $API advice"
   ui_print ""
   say "参数与 WebUI 一致，改完由守护巡检生效"
   exit 0

@@ -39,18 +39,6 @@ int icon_score_stdin(void);
 int appinfo_label(const char *apk, char *out, size_t osz);
 int appinfo_iconpath(const char *apk, char *out, size_t osz);
 int appinfo_labels_stdin(void);
-/* learn.c：常态封顶下的频率驻留采样。只攒计数，判据在 api.sh 的 advice 里。
-   采样窗口里"有效时长"用的是墙钟，桶存的是占硬件最高频的百分比分布。
-   两份样本：全局一行一个目录，按应用一行一个 (包, 档)。全局帽下的那一段两层都记，
-   应用专属帽下的那一段只记应用行。 */
-void learn_init(const char *path, const char *apath);
-void learn_tick(int eligible, const char *pkg, int own_cap,
-                const char *const *dirs, const int *tiers,
-                const long *hw, const long *cap, const long *pct, int n);
-void learn_flush(void);
-void learn_set_enabled(int on);
-/* 从学习起点按 24 小时切块（不按零点切天），返回 0..27。 */
-long learn_day_index(long since, long now);
 /* adapt.c：三个实时传感器（PSI / 温度 / 充电态）合成一个"封顶偏移"。
    偏移只加在生效值上，从不写配置 —— 见 adapt.h。 */
 #include "adapt.h"
@@ -68,7 +56,7 @@ long learn_day_index(long since, long now);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "1.6"
+#define SF_VERSION "2.1"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。
@@ -88,13 +76,6 @@ long learn_day_index(long since, long now);
 #define BOOT_BOOST_FILE RUN_DIR "/boot_boost_until"
 #define CFG_FILE   SF_DATADIR "/socfreq.conf"
 #define GAME_LIST  SF_DATADIR "/games.txt"
-/* 学习采样结果。守护只写计数，判据在 api.sh 的 advice 里算。 */
-#define LEARN_FILE SF_DATADIR "/learn.tsv"
-#define LEARN_APP_FILE SF_DATADIR "/learn_app.tsv"
-/* GPU 的学习采样点：KGSL 的每档驻留累计表。
- * 只有这一种来源能用（devfreq 的 trans_stat 在 KGSL 上是冻的，见 learn.c）。 */
-#define GPU_LEARN_DIR "/sys/class/kgsl/kgsl-3d0"
-#define GPU_STATS_FILE GPU_LEARN_DIR "/gpu_clock_stats"
 /* 分应用档位：pkg=full / pkg=60 / pkg=60:40。优先级 应用专属 > 全局百分比。
  * 由 api.sh / WebUI 维护，守护只读——写的一侧有校验，读的一侧就不需要第二套。 */
 #define MODE_FILE  SF_DATADIR "/app_modes.conf"
@@ -128,6 +109,9 @@ long learn_day_index(long since, long now);
 
 struct cfg {
   int interval;        /* 常态巡检间隔秒 */
+  /* 调度策略：0=限频（固定百分比），1=智能（按负载状态给目标）。
+     smart 下 CPU_PCT_* 退化成"天花板"——状态机的目标不会超过它。 */
+  int strategy;
   int grace;           /* 游戏退出宽限秒 */
   int pct[4];          /* big / mid2 / mid / little 封顶百分比 */
   int gpu_pct;         /* GPU 封顶百分比 */
@@ -144,8 +128,6 @@ struct cfg {
   char batt_current_path[192];
   int batt_current_ma_unit; /* 1 = 原始值已经是 mA；0 = µA */
   int boot_full_s;     /* 开机后满血秒数，0 = 关 */
-  int learn;           /* 1 = 常态封顶下采样频率驻留，给"智能建议"攒证据 */
-  int learn_app;       /* 1 = 同一份分布另记一份到"这个应用自己的帽"上，默认关 */
   char governor[32];   /* 日常调速器，空 = 不干预 */
   /* 实时偏移（adapt.c）。都是"百分点"，只加在生效值上，不写回配置。 */
   struct adapt_cfg ad;
@@ -217,15 +199,45 @@ static void log_open(void) {
   g_logfd = open(LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
 }
 
-/* 每 64 次才量一次大小，砍掉前半截再 O_APPEND 重开，避免长跑撑爆存储 */
+/* 每 64 次才量一次大小，超 256KB 就砍掉旧的一半，避免长跑撑爆存储。
+ *
+ * 为什么是"写临时文件 + rename"，不是 ftruncate：
+ *   1) 要留的是**新的一半**。ftruncate(fd, size/2) 砍的是尾部，
+ *      留下的全是开机那阵的旧内容；再叠加 O_APPEND 之后新行全写在旧内容后面，
+ *      于是每次裁剪都把新日志丢掉、文件永远停在开机时刻，等于日志冻住了。
+ *      service.sh 裁自己的日志用的是 tail -c 131072，同一个口径。
+ *   2) 不能拿 O_RDWR 的 fd 去 dup2 覆盖 g_logfd：dup2 只复制 fd 号，
+ *      复制不过来 O_APPEND，偏移还会归零。之后每行日志都从文件头开始盖，
+ *      把刚留下的那一半反复覆盖掉。所以裁剪完必须重新 log_open()，
+ *      走同一条带 O_APPEND 的路。
+ *
+ * shortcut: 不加文件锁。action.sh 也会往同一个文件追加（>> socfreqd.log），
+ * 它持有的旧 fd 在 rename 之后指向被换掉的 inode，那一两行会丢。
+ * 丢的是日志不是状态，为一个 append 上锁不值得。
+ */
 static void log_trim(void) {
   if (++g_logcount % 64) return;
   struct stat st;
   if (fstat(g_logfd, &st) || st.st_size < 256 * 1024) return;
-  int fd = open(LOG_FILE, O_RDWR);
-  if (fd < 0) return;
-  if (!ftruncate(fd, st.st_size / 2)) dup2(fd, g_logfd);
-  close(fd);
+  char tmp[sizeof LOG_FILE + 8];
+  snprintf(tmp, sizeof tmp, "%s.trim", LOG_FILE);
+  int in = open(LOG_FILE, O_RDONLY);
+  if (in < 0) return;
+  off_t skip = st.st_size / 2;
+  if (lseek(in, skip, SEEK_SET) != skip) { close(in); return; }
+  int out = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (out < 0) { close(in); return; }
+  char buf[4096];
+  ssize_t r = 0;
+  while ((r = read(in, buf, sizeof buf)) > 0) {
+    if (write(out, buf, r) != r) { r = -1; break; }
+  }
+  close(in);
+  if (close(out) != 0 || r < 0) { unlink(tmp); return; }
+  if (rename(tmp, LOG_FILE) != 0) { unlink(tmp); return; }
+  close(g_logfd);
+  g_logfd = -1;
+  log_open();
 }
 
 static void logf_(const char *fmt, ...) {
@@ -689,7 +701,9 @@ struct policy {
   char dir[160];
   long hw_max;
   long cap;  /* 封顶值，已吸附到频点 */
-  long pct;  /* 意图百分比 */
+  long pct;  /* 意图百分比（已含实时偏移前的策略目标） */
+  int  tpct; /* 策略目标：cap 下 = CPU_PCT_*，smart 下 = 状态机给的值 */
+
   int tier;  /* 用的哪一档：0=BIG 1=MID2 2=MID 3=LITTLE，WebUI 靠它对滑杆 */
   int pol_no; /* policy 号（atoi(name+6)）。反查"某档管哪几颗核"要拿它和
                * core_policy_of(c) 比，后者来自 readlink、不是数组下标；
@@ -893,6 +907,95 @@ static int tier_key_of(const long *ladder, int m, long hw_max) {
   return 2;
 }
 
+/* ── 智能模式：负载状态机 ────────────────────────────────────────
+ * 四档 idle / light / medium / heavy。状态机给的是"这一档该用多少百分比"，
+ * 真正写下去的仍是 min(它, CPU_PCT_*)：滑杆在智能模式下当天花板，
+ * 状态机就算判错也顶不到 100%。
+ *
+ * 判据只用 /proc/stat 的整机忙闲（每拍一次 open+read，约 2KB），
+ * 不引入新采样。比一次 dumpsys 便宜三个数量级。
+ *
+ * 滞回：进档 8/30/60，退档 4/25/55。差 4~5 个点，避免负载在阈值附近
+ * 抖动时频率跟着来回跳；换档还要连续两拍一致，再抖一层。 */
+static const int kSmartPct[4][2] = {
+  /* 大核, 其余档 */
+  { 30, 40 },   /* idle   */
+  { 45, 50 },   /* light  */
+  { 65, 60 },   /* medium */
+  { 85, 75 },   /* heavy  */
+};
+
+struct smart_state {
+  int  state;
+  int  pending;
+  int  pend_n;
+  long switches;
+};
+static struct smart_state g_sm;
+
+static long g_cpu_prev_total, g_cpu_prev_idle;
+
+/* 整机 CPU 忙闲百分比。读不到 / 计数器回退（热插拔、重启）返回 -1。 */
+static int cpu_busy_pct(void) {
+  FILE *f = fopen("/proc/stat", "r");
+  if (!f) return -1;
+  char line[256];
+  int ok = fgets(line, sizeof line, f) != NULL;
+  fclose(f);
+  if (!ok || strncmp(line, "cpu ", 4)) return -1;
+  long v[8] = {0};
+  int k = sscanf(line + 4, "%ld %ld %ld %ld %ld %ld %ld %ld",
+                 &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+  if (k < 4) return -1;
+  long total = 0;
+  for (int i = 0; i < k; i++) total += v[i];
+  long idle = v[3] + (k > 4 ? v[4] : 0);
+  long dt = total - g_cpu_prev_total, di = idle - g_cpu_prev_idle;
+  g_cpu_prev_total = total;
+  g_cpu_prev_idle = idle;
+  if (dt <= 0 || di < 0 || di > dt) return -1;
+  return (int)((dt - di) * 100 / dt);
+}
+
+/* 纯函数：busy% + 当前档 → 目标档。单测直接喂数。 */
+static int smart_target(int cur, int busy) {
+  if (busy < 0) return cur;
+  int want;
+  if (busy >= 60) want = 3;
+  else if (busy >= 30) want = 2;
+  else if (busy >= 8) want = 1;
+  else want = 0;
+  if (want < cur) {
+    int lo = (cur == 3) ? 55 : (cur == 2) ? 25 : 4;
+    if (busy > lo) want = cur;          /* 没跌破退档阈值：不动 */
+  }
+  return want;
+}
+
+/* 这一档、这个 tier 的目标百分比（已按用户设的天花板夹过）。 */
+static int smart_pct(int tierkey) {
+  int v = kSmartPct[g_sm.state][tierkey == 0 ? 0 : 1];
+  int ceil = cfg.pct[tierkey];
+  if (ceil >= 1 && ceil <= 100 && v > ceil) v = ceil;
+  return v < 1 ? 1 : v;
+}
+
+/* 每拍推进一次。返回 1 = 档位变了，调用处要重算封顶。 */
+static int smart_tick(void) {
+  int busy = cpu_busy_pct();
+  int want = smart_target(g_sm.state, busy);
+  if (want == g_sm.state) { g_sm.pending = want; g_sm.pend_n = 0; return 0; }
+  if (want == g_sm.pending) g_sm.pend_n++;
+  else { g_sm.pending = want; g_sm.pend_n = 1; }
+  if (g_sm.pend_n < 2) return 0;        /* 连续两拍才换 */
+  g_sm.state = want;
+  g_sm.pend_n = 0;
+  g_sm.switches++;
+  log("智能模式：负载 %d%% → 档位 %d（大核 %d%% / 其余 %d%%）", busy, want,
+      smart_pct(0), smart_pct(3));
+  return 1;
+}
+
 /* 按簇阶梯分档：最高档 big，次高 mid2，中间 mid，最低 little */
 /* 生效封顶 = 用户设的值 + 实时偏移（adapt.c 每轮算好放在快照里）。
  * 充电态是"抬地板"：插着电发热由充电器承担，没必要压着；
@@ -921,8 +1024,9 @@ static void assign_pct(struct policy *p, int n) {
     int pct, tierkey;
     tierkey = tier_key_of(ladder, m, p[i].hw_max);
     /* 键到值的下标和 tierkey 一样（cfg.pct 的下标就是 BIG/MID2/MID/LITTLE） */
-    pct = cfg.pct[tierkey];
+    pct = (cfg.strategy == 1) ? smart_pct(tierkey) : cfg.pct[tierkey];
     if (pct < 1 || pct > 100) pct = 1;
+    p[i].tpct = pct;
     int eff = eff_pct(pct, 0);
     p[i].pct = eff;
     p[i].tier = tierkey;
@@ -1311,15 +1415,50 @@ static const char *write_gpu(long want_hz, int unlock) {
 }
 
 /* 把 GPU 下限钉回最低档，抵消厂商 boost 抬高下限造成的越界 */
+/* GPU 下限的"压回"不是每拍都该做的事：厂商通常 1~2 分钟才抬一次，
+ * 而这里原来每拍无条件写一遍（access + 扫 journal + chmod + write），
+ * 一天 17280 次全是白烧，还会跟厂商的 boost 逻辑抢同一个节点。
+ * 做法对齐自适配动态限频 v1.2.2：
+ *   1) 先读，已经在下限就直接返回 —— 绝大多数拍走这条；
+ *   2) 被抬上去才写，并计数；
+ *   3) 连续压回 3 次之后按 1/2/4/6 周期退避；
+ *   4) 距上次压回满 10 分钟没有新命中，计数与退避一起清零。 */
+#define GMIN_WIN_S 600
+static long g_gmin_writes;   /* 真正写节点的次数，status 里报出来用于验收 */
+static int  g_gmin_hits;
+static int  g_gmin_skip;
+static long g_gmin_last;
+
 static void gpu_min_to_floor(void) {
   /* MTK 的下限在同一条 set 命令里写；没有独立 min 节点。 */
   if (g_gpu.mtk) return;
   if (!cfg.gpu_min_lock || !g_gpu.min_node[0] || g_gpu.min_hz <= 0) return;
+  long now = mono_sec();
+  if (g_gmin_hits > 0 && now - g_gmin_last >= GMIN_WIN_S) {
+    g_gmin_hits = 0;
+    g_gmin_skip = 0;
+  }
+  if (g_gmin_skip > 0) { g_gmin_skip--; return; }
+  long cur = read_num(g_gpu.min_node);
+  if (cur > 0 && g_gpu.min_is_mhz) cur *= 1000000;
+  if (cur <= 0) return;                 /* 读不到就别写，免得把下限写成 0 */
+  if (cur <= g_gpu.min_hz) return;      /* 已经在下限：这一拍什么都不做 */
   long val = g_gpu.min_is_mhz ? g_gpu.min_hz / 1000000 : g_gpu.min_hz;
   if (write_journaled(NODES_JOURNAL, g_gpu.min_node, val)) return;
+  g_gmin_writes++;
+  g_gmin_hits++;
+  g_gmin_last = now;
+  int nb = 1;
+  if (g_gmin_hits >= 6) nb = 6;
+  else if (g_gmin_hits == 5) nb = 4;
+  else if (g_gmin_hits == 4) nb = 2;
+  g_gmin_skip = nb - 1;
   long got = read_num(g_gpu.min_node);
   if (got > 0 && g_gpu.min_is_mhz) got *= 1000000;
-  if (got > g_gpu.min_hz) log("RESTORE GPU 下限 %ldHz -> %ldHz", got, g_gpu.min_hz);
+  /* 只有第一次压回记完整日志，之后每 10 分钟由 cleanup 的汇总体现，
+     免得厂商一抬就刷一行。 */
+  if (got > g_gpu.min_hz)
+    log("RESTORE GPU 下限 %ldHz -> %ldHz", got, g_gpu.min_hz);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1533,6 +1672,105 @@ static int foreground_pkg(char *out) {
   return rc;
 }
 
+/* ── 前台探测节流 ──────────────────────────────────────────────
+ * dumpsys window 是本守护最贵的一步（本机实测 ~49 ms/次，5 秒一拍
+ * 就是 17280 次/天，约 14 核·分钟/天，还要把大核叫醒一万七千次）。
+ * 但它只在前台**换人**时才需要重跑：先在 /dev/cpuset/top-app/cgroup.procs
+ * 上读一次 PID 集合（一次 open，几微秒），集合没变就沿用上一拍的包名。
+ *
+ * 为什么不用"固定 TTL 缓存"（powerd 用的 2 秒那种）：那是给一个循环里
+ * 多个调用点共用一次探测设计的；这里每拍只探一次，TTL 短于巡检周期时
+ * 等于没缓存。集合变化才是真正的"可能换前台"信号，而且延迟仍是一拍，
+ * 游戏解锁不受影响。
+ *
+ * 输入法、tts、system_server、surfaceflinger 常驻 top-app，换应用时
+ * 它们的 PID 不变，变的是应用进程 → 判据按"集合是否相同"，并先排序，
+ * 内核给的顺序不保证稳定。 */
+#define FG_PIDS_MAX 64
+#define FG_FORCE_S  60   /* 集合一直不变也每 60 秒强探一次（防同进程内切焦点） */
+#define FG_FAIL_S   10   /* 探失败后 10 秒内不重复砸 dumpsys */
+
+/* 可观测性：每拍一次 tick，只有真的跑了 dumpsys 才 +1。
+ * 页面上不显示，但 run/status 里能直接算出"这一版把探测降了多少"，
+ * 不用 strace 也能验收。 */
+static long g_tick_n;
+static long g_fg_probe_n;
+static long g_fg_pids[FG_PIDS_MAX];
+static int  g_fg_npid;
+static char g_fg_cache[PKG_LEN];
+static int  g_fg_cache_ok;
+static long g_fg_probed_at;
+
+/* 纯函数：空格/换行分隔的 PID 列表 → 升序数组。返回个数。单测直接喂字符串。 */
+static int parse_pid_list(char *b, long *out, int max) {
+  int c = 0;
+  for (char *p = b; *p && c < max; ) {
+    while (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') p++;
+    if (!*p) break;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (end == p) break;
+    if (v > 0) out[c++] = v;
+    p = end;
+  }
+  for (int i = 1; i < c; i++) {
+    long k = out[i];
+    int j = i - 1;
+    while (j >= 0 && out[j] > k) { out[j + 1] = out[j]; j--; }
+    out[j + 1] = k;
+  }
+  return c;
+}
+
+/* 读 top-app 的 PID 集合。返回个数；-1 = 读不到（调用处回落到每拍探测）。 */
+static int topapp_pids(long *out, int max) {
+  int fd = open("/dev/cpuset/top-app/cgroup.procs", O_RDONLY);
+  if (fd < 0) return -1;
+  static char b[2048];
+  ssize_t n = read(fd, b, sizeof b - 1);
+  close(fd);
+  if (n <= 0) return -1;
+  b[n] = 0;
+  return parse_pid_list(b, out, max);
+}
+
+static int same_pids(const long *a, int na, const long *b, int nb) {
+  if (na != nb) return 0;
+  for (int i = 0; i < na; i++)
+    if (a[i] != b[i]) return 0;
+  return 1;
+}
+
+/* 带节流的前台探测。语义与 foreground_pkg 相同：0 = 拿到包名，-1 = 没拿到。 */
+static int foreground_pkg_throttled(char *out) {
+  long pids[FG_PIDS_MAX];
+  int np = topapp_pids(pids, FG_PIDS_MAX);
+  long now = mono_sec();
+  int changed = 1;
+  if (np >= 0) {
+    changed = !same_pids(pids, np, g_fg_pids, g_fg_npid);
+    for (int i = 0; i < np; i++) g_fg_pids[i] = pids[i];
+    g_fg_npid = np;
+  }
+  long ttl = g_fg_cache_ok ? FG_FORCE_S : FG_FAIL_S;
+  if (!changed && g_fg_probed_at > 0 && now - g_fg_probed_at < ttl) {
+    if (!g_fg_cache_ok) return -1;      /* 上一拍也没探到：别每拍都砸一次 */
+    snprintf(out, PKG_LEN, "%s", g_fg_cache);
+    return 0;
+  }
+  int rc = foreground_pkg(out);
+  g_fg_probe_n++;
+  g_fg_probed_at = now ? now : 1;
+  if (rc == 0) {
+    snprintf(g_fg_cache, sizeof g_fg_cache, "%s", out);
+    g_fg_cache_ok = 1;
+  } else {
+    g_fg_cache[0] = 0;
+    g_fg_cache_ok = 0;
+  }
+  return rc;
+}
+
 static int is_game(const char *pkg) {
   for (int i = 0; i < g_npkg; i++)
     if (!strcmp(g_pkgs[i], pkg)) return 1;
@@ -1566,14 +1804,6 @@ static char g_app[PKG_LEN];
 static int g_app_pct;
 /* 应用专属 GPU 档位，0 = 跟随全局 GPU_PCT。full 走交还系统那条路，不在这里。 */
 static int g_app_gpu;
-
-/* 刚过去的那个采样周期里，核心或 GPU 身上戴的是哪个应用的专属档位（空 = 全局）。
- * 按包归因只认这个而不认"本轮读到的前台"：它是上一轮写下的，覆盖的正是 dt
- * 那一整段，切换瞬间的脏样本进不来。满血、游戏解锁、熄屏这些没帽的时段留空。 */
-static char g_app_capped[PKG_LEN];
-/* 刚过去那段戴的是全局帽时，前台是谁。和 g_app_capped 互斥，同一轮只会有一个
- * 非空：全局帽下的分布两层都要记，但归因的包必须来自上一轮，理由同上。 */
-static char g_fg_global[PKG_LEN];
 
 /* 读一个档位文件。路径做成参数，便于指向临时件而不改用户生效的配置。 */
 static int load_app_modes_from(const char *path) {
@@ -1970,10 +2200,18 @@ static int reclaim_caps_allowed(void) {
 static int reload_if_changed(uint64_t seen) {
   uint64_t now = cfg_stamp();
   if (now == seen) return 0;
+  char prev_gov[32];
+  snprintf(prev_gov, sizeof prev_gov, "%s", cfg.governor);
   log("检测到配置变更，重新计算封顶值");
   load_cfg();
   screen_state_init(); /* SCREEN_STATE_PATH / 策略变了要重新挑信号 */
   detect_gpu();        /* GPU 百分比变了要重新挑吸附频点 */
+  /* 从某个调速器改成"不干预"：不能只是停止写入，要把模块改过的名字写回
+   * 启动时的快照；否则节点会一直停在模块最后写入的那个调速器上。 */
+  if (prev_gov[0] && !cfg.governor[0]) {
+    if (!access(GOV_JOURNAL, F_OK)) restore_governors();
+    else log("WARN 调速器快照缺失，无法恢复原值");
+  }
   return 1;
 }
 
@@ -2048,8 +2286,6 @@ static void enter_screen_off(void) {
   g_idle_hold = 0;
   g_soff_keep = keep;
   snprintf(g_soff_pkg, sizeof g_soff_pkg, "%s", keep ? g_fg : "");
-  g_app_capped[0] = 0;
-  g_fg_global[0] = 0;
   if (keep) {
     /* 亮屏时 keep 不动分档；熄屏时把可能残留的应用档位收回全局，再做轻巡检。 */
     if (g_app_pct || g_app_gpu) {
@@ -2116,6 +2352,26 @@ static int cfg_get(const char *key, char *out) {
   return found;
 }
 
+/* cfg_get 的 %[^\n] 要求值至少一个字符，空值会被当成键不存在。
+ * CPU_GOVERNOR= 的"不干预"就是空值，需要单独认键名。 */
+static int cfg_key_present(const char *key) {
+  FILE *f = fopen(CFG_FILE, "r");
+  if (!f) return 0;
+  char line[512], k[128];
+  int found = 0;
+  while (fgets(line, sizeof line, f)) {
+    const char *s = line;
+    while (*s && isspace((unsigned char)*s)) s++;
+    if (*s == '#' || !*s) continue;
+    if (sscanf(s, "%127[^= \t]", k) == 1 && !strcmp(k, key)) {
+      found = 1;
+      break;
+    }
+  }
+  fclose(f);
+  return found;
+}
+
 static int clampi(int v, int lo, int hi, int dflt) {
   return (v < lo || v > hi) ? dflt : v;
 }
@@ -2138,14 +2394,14 @@ static void load_cfg(void) {
   cfg.screen_state_path[0] = 0;
   cfg.idle_current_ma = 250;
   cfg.idle_hold_cycle = 2;
+  cfg.strategy = 0;
   cfg.idle_interval = 30;
   cfg.wake_delta_ma = 150;
   snprintf(cfg.batt_current_path, sizeof cfg.batt_current_path,
            "/sys/class/power_supply/battery/current_now");
   cfg.batt_current_ma_unit = 0;
   cfg.boot_full_s = 60;
-  cfg.learn = 1;
-  cfg.learn_app = 0;
+  snprintf(cfg.governor, sizeof cfg.governor, "conservative");
   /* 实时偏移的默认值。三条都默认开：装了模块的人要的就是"该压住、该让路时
      也让得出去"。每个来源各有上限，合计再有一对总闸（默认 +15 / -30），
      避免"每一项都合法、叠起来不可用"。 */
@@ -2201,12 +2457,8 @@ static void load_cfg(void) {
   }
   if (cfg_get("BATT_CURRENT_UNIT", v) == 0)
     cfg.batt_current_ma_unit = !strcasecmp(v, "ma");
-  if (cfg_get("LEARN", v) == 0)
-    cfg.learn = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
-  /* 按应用学习默认关，所以判据和上面那条相反：只认显式的 1/true。
-     它只在"这个应用已经有专属数字档位"时才攒得出样本，是给愿意细调的人用的。 */
-  if (cfg_get("LEARN_APP", v) == 0)
-    cfg.learn_app = (!strcmp(v, "1") || !strcasecmp(v, "true")) ? 1 : 0;
+  if (cfg_get("STRATEGY", v) == 0)
+    cfg.strategy = !strcasecmp(v, "smart") ? 1 : 0;
   /* 开机满血窗口上限 600s：再长就不是"开机提速"而是"忘了限频"了，
      而且窗口越长，越容易盖过厂商开机的热管理。 */
   if (cfg_get("BOOT_FULL_S", v) == 0)
@@ -2229,6 +2481,9 @@ static void load_cfg(void) {
         }
       if (v[0]) snprintf(cfg.governor, sizeof cfg.governor, "%s", v);
     }
+  } else if (cfg_key_present("CPU_GOVERNOR")) {
+    /* "不干预"写成空值：保留空，运行时/退出时按快照还原原调速器。 */
+    cfg.governor[0] = 0;
   }
   for (int i = 0; i < 4; i++)
     if (cfg_get(keys[i], v) == 0)
@@ -2292,12 +2547,23 @@ static void publish_status(void) {
    * 两个必须分开：页面上"把当前前台应用设为满血"要的是 fg，
    * 而它大部分时候根本不是游戏（相机、地图、播放器）。
    * 只报 game_pkg 的话，非游戏态那半永远是空，按钮就永远点不动。 */
+  /* 这台机实际用掉几档（1..4）。api.sh 的按应用建议要拿它算"没设档位的包"
+   * 的基准：2 簇机型把 MID2/MID 的配置值也平均进去，基准会差 5~10 个点。 */
+  int ntier = 0;
+  {
+    int used[4] = {0, 0, 0, 0};
+    for (int i = 0; i < g_npol; i++)
+      if (g_pol[i].tier >= 0 && g_pol[i].tier < 4) used[g_pol[i].tier] = 1;
+    for (int t = 0; t < 4; t++) ntier += used[t];
+  }
   fprintf(f, "state=%s\nscreen=%s\nsoff=%d\nsoff_keep=%d\ngame_pkg=%s\nreason=%s\n"
-             "fg=%s\napp_mode=%s\napp_gpu=%s\npid=%d\nver=%s\n",
+             "fg=%s\napp_mode=%s\napp_gpu=%s\npid=%d\nver=%s\nntier=%d\n"
+             "strat=%d\nsmart=%d\ntick=%ld\nfgprobe=%ld\ngminw=%ld\n",
           g_state, g_deep ? "deep" : (g_screen_off ? "off" : "on"),
           g_deep ? cfg.idle_interval : cfg.soff_interval, g_soff_keep,
           g_game[0] ? g_game : "-", g_reason,
-          g_fg[0] ? g_fg : "-", mode, gmode, getpid(), SF_VERSION);
+          g_fg[0] ? g_fg : "-", mode, gmode, getpid(), SF_VERSION, ntier,
+          cfg.strategy, g_sm.state, g_tick_n, g_fg_probe_n, g_gmin_writes);
   /* 实时偏移的三个来源一起发出去：页面上"实际比设定宽/严了多少"必须说得出是谁干的，
    * 只剩一个合计数就等于让人猜。读不到的传感器发 -1，页面据此不显示那一项。 */
   {
@@ -2320,7 +2586,6 @@ static void publish_status(void) {
 static void cleanup(void) {
   if (!g_have_lock) return;
   log("停止，恢复启动前状态");
-  learn_flush();
   restore_governors();
   /* 顺序：先还原数值，再收权限。反了会写不进需要放开才能写的节点 */
   if (g_gpu.mtk) mtk_restore_row();
@@ -2630,7 +2895,6 @@ int main(int argc, char **argv) {
            cfg.idle_interval, cfg.idle_current_ma, cfg.idle_hold_cycle, cfg.wake_delta_ma);
     printf("batt_unit=%s\n", cfg.batt_current_ma_unit ? "ma" : "ua");
     printf("boot_full=%d\n", cfg.boot_full_s);
-    printf("learn=%d\n", cfg.learn);
     /* 实时偏移：页面配置页要能显示、能改，所以和上面这些一样原样发出去 */
     printf("psi_adapt=%d\npsi_gain=%d\npsi_step=%d\n", cfg.ad.psi, cfg.ad.psi_gain, cfg.ad.psi_step);
     printf("th_cap=%d\nth_high=%d\nth_low=%d\nth_step=%d\nth_max=%d\n",
@@ -2869,27 +3133,25 @@ int main(int argc, char **argv) {
   /*
    * 先按持久化快照回收上次崩溃留下的写入，再取新基准。
    * 所有数值写入都走 journal，所以这里恢复出来的就是真正的原始值。
+   * 调速器单独走一条：必须先恢复上次运行留下的快照，再取基准；
+   * 反过来先把被模块改过的当前值 snapshot 进去，原始调速器就永久丢了。
    */
   journal_restore(NODES_JOURNAL);
   perms_restore();
-  snapshot_governors();
-  /* 上次崩溃时改过调速器的话，基准快照要记恢复后的值 */
   restore_governors();
-  snapshot_governors();
+  if (access(GOV_JOURNAL, F_OK))
+    log("WARN 调速器快照未还原，保留到下次启动重试");
+  else
+    snapshot_governors();
 
   load_game_pkgs();
   load_app_modes();
-  learn_init(LEARN_FILE, LEARN_APP_FILE);
   /* 传感器路径的钩子在这里读一次环境变量，之后每轮直接按路径取 */
   adapt_init();
-  /* 顺序要有：先加载已有样本，再判开关。
-     LEARN=0 时关掉的那一步会顺手删掉数据文件，"关闭学习"就等价于清空样本，
-     反过来先删后读的话，磁盘上会留一份再也不会被覆盖的旧数据。 */
-  learn_set_enabled(cfg.learn);
   screen_state_init();
-  log("巡检 日常%d s / 游戏%d s / 熄屏%d s，退出宽限 %d s%s，熄屏策略=%s", cfg.interval,
+  log("调度策略=%s", cfg.strategy ? "智能（状态机）" : "限频（固定百分比）");
+  log("巡检 日常%d s / 游戏%d s / 熄屏%d s，退出宽限 %d s，熄屏策略=%s", cfg.interval,
       cfg.interval * 2, cfg.soff_interval, cfg.grace,
-      cfg.learn ? "，学习采样开" : "",
       cfg.screen_policy == SCREEN_UNCAP ? "交还系统" : "保持封顶");
   apply_normal(1);
   heartbeat();
@@ -2898,6 +3160,7 @@ int main(int argc, char **argv) {
   long ad_last = 0;       /* 上一次算实时偏移的时刻，用来量真实的巡检间隔 */
   uint64_t seen = cfg_stamp();
   for (; !g_stop;) {
+    g_tick_n++;
     /* 每轮开头复位：这一轮只要偏移动过，后面几处 apply_normal 就得 force 写 */
     int adapt_changed = 0;
     /* pause 自查：手工 touch pause 与 WebUI 的"暂停"都在一个巡检周期内生效。
@@ -2909,9 +3172,6 @@ int main(int argc, char **argv) {
     heartbeat();
     int cfg_changed = reload_if_changed(seen);
     seen = cfg_stamp();
-    /* 页面上把 LEARN 改成 0 之后不必重启守护：这一行让下一个巡检周期就停采，
-       并把已经采到的样本删掉（见 learn_set_enabled）。 */
-    learn_set_enabled(cfg.learn);
     /* 熄屏轻巡检：SCREEN_OFF 下只读一个亮屏信号，不 popen dumpsys、
        不跑 PSI/温控/学习。SCREEN_POLICY=keep 时整段跳过，行为与旧版一致。 */
     if (cfg.screen_policy == SCREEN_UNCAP) {
@@ -2997,7 +3257,11 @@ int main(int argc, char **argv) {
     }
     /* 配置和偏移都看过之后，统一在这里重算生效封顶。
      * 顺序是有意的：偏移的快照必须先新鲜，否则这里算出来的是旧地板。 */
-    if (cfg_changed || adapt_changed) {
+    /* 智能模式：每拍推进一次状态机。档位变了就走和"配置变了"同一条
+       重算路径，保证频率立刻跟上，而不是等下一次配置变更。 */
+    int smart_changed = 0;
+    if (cfg.strategy == 1) smart_changed = smart_tick();
+    if (cfg_changed || adapt_changed || smart_changed) {
       assign_pct(g_pol, g_npol);
       /* 全局分档刚被重算，生效中的应用专属档位要盖回去，
        * 否则保存配置会让正在生效的专属档位静默退回全局百分比。 */
@@ -3005,79 +3269,10 @@ int main(int argc, char **argv) {
       if (reclaim_caps_allowed()) apply_normal(1);
     }
 
-    /* 学习采样。eligible 判的是 g_state=="normal"，也就是**上一轮到这一轮之间**
-     * 处于常态封顶——那才是刚过去这段 dt 的真实状态。游戏、开机满血窗口、
-     * 熄屏解除、应用满血期间帽不在身上，采到的分布只会把建议往高了带。
-     * 这些时段仍然要调一次：learn_tick 会只刷基线不累计，避免回来第一拍
-     * 把整段解锁时间一次性算进封顶期的分布里。 */
-    {
-      const char *ld[MAX_POLICY]; int lt[MAX_POLICY];
-      long lh[MAX_POLICY], lc[MAX_POLICY], lp[MAX_POLICY];
-      int ln = 0;
-      /* 样本里的"帽"必须记**配置意图**（CPU_PCT_* / GPU_PCT），不能记生效值：
-         生效值里有充电地板和 PSI/温控偏移，插拔一次电源、抖一档，
-         就会把已经攒了几小时的分布整档清零（表现就是"CPU 学习不见了"）。
-         判据那边也是拿这个值跟 conf 比，意图才是两边的共同语言。 */
-      int app_cap_active = g_app_capped[0] != 0;
-      /* 只有开了按应用学习才把应用百分比写进样本；没开时那段仍按全局帽记账，
-         否则一个 40% 的应用帽会被当成"全局改成了 40%"，整行样本作废。 */
-      int app_layer = cfg.learn_app && app_cap_active;
-      for (int i = 0; i < g_npol && ln < MAX_POLICY; i++) {
-        ld[ln] = g_pol[i].dir; lt[ln] = g_pol[i].tier;
-        lh[ln] = g_pol[i].hw_max; lc[ln] = g_pol[i].cap;
-        lp[ln] = (app_layer && g_app_pct > 0) ? g_app_pct : cfg.pct[g_pol[i].tier];
-        ln++;
-      }
-      /* GPU 当成第 5 档（tier 4）来采：判据、页面那一行、应用建议都走同一条路。
-       * 只有 KGSL 那对表（gpu_clock_stats / gpu_available_frequencies）能采，
-       * 读不到就干脆不给 GPU 这一行 —— 不拿 cur_freq 凑数，
-       * 那玩意儿空闲时趴在最低档，会把分布做成"GPU 永远用不满"的假结论。 */
-      if (g_gpu.ok && ln < MAX_POLICY &&
-          !access(GPU_STATS_FILE, F_OK)) {
-        ld[ln] = GPU_LEARN_DIR; lt[ln] = 4;
-        lh[ln] = g_gpu.max_hz;
-        /* 生效值而不是配置值：应用专属 GPU 档和实时偏移都会改它 */
-        lc[ln] = g_gpu.active > 0 ? g_gpu.active : g_gpu.normal;
-        /* 但样本要记住"百分比意图"：应用专属 GPU 档下采的样本不能让全局
-           GPU 建议拿去用（advice 会按这个值过滤）。 */
-        lp[ln] = (app_layer && g_app_gpu > 0) ? g_app_gpu : cfg.gpu_pct;
-        ln++;
-      }
-      /* 采样只在"帽正好是用户设的那一道"时累计。
-       * 插电抬到 100%、温控压了两档、PSI 借了 5 个点的时候，
-       * 核心身上的是别的封顶，那份分布回答不了"设定值这道帽紧不紧"，
-       * 混进去会把建议往错的方向带（顶帽率虚高 → 建议放宽，或反之）。
-       * 代价是插着电的时段不攒样本：宁可慢，也不要给出偏掉的建议。
-       *
-       * 戴的是应用专属档位时同一份分布只记到按应用那一层，两层互斥：
-       * 拿"75% 应用帽下的表现"去建议全局值，两层会互相把对方带偏。
-       * 戴的是全局帽时反过来：同一段分布既回答全局那道帽紧不紧，
-       * 也回答这个前台包在全局帽下过得怎么样，两层都记。 */
-      struct adapt av;
-      adapt_snapshot(&av);
-      int adapt_clean = !av.delta && !av.chg_on;
-      /* 有没有应用专属帽，和开没开按应用学习是两件事：没开学习时那段分布
-         仍然不属于全局帽，不能记进全局行（否则一开抖音就清掉全局 CPU 样本）。 */
-      int app_now = cfg.learn && cfg.learn_app && app_cap_active;
-      /* 归属来自上一轮，覆盖的正是刚过去的 dt。应用专属帽优先——
-         那一轮全局层本来就不采；否则用全局帽下的前台包。 */
-      const char *lpkg = "";
-      int lown = 0;
-      if (cfg.learn_app) {
-        if (app_now) { lpkg = g_app_capped; lown = 1; }
-        else if (g_fg_global[0]) lpkg = g_fg_global;
-      }
-      learn_tick(!strcmp(g_state, "normal") && adapt_clean && !app_cap_active,
-                 lpkg, lown, ld, lt, lh, lc, lp, ln);
-      /* 本轮还没走到"要不要戴某个应用的档位"那一步，先清空：
-       * 只有下面真的应用了数字档位的那一支会把它写回来。 */
-      g_app_capped[0] = 0;
-      g_fg_global[0] = 0;
-    }
     char fg[PKG_LEN] = {0};
     load_game_pkgs();
     load_app_modes();
-    int game = foreground_pkg(fg) == 0 && g_npkg && is_game(fg);
+    int game = foreground_pkg_throttled(fg) == 0 && g_npkg && is_game(fg);
     /* 前台包名无条件记下来（命中名单与否都要）。
      * 只在游戏态记的话，页面上"把当前前台设为满血"在相机、地图这些
      * 最需要它的场景里永远是空的。 */
@@ -3170,11 +3365,6 @@ int main(int argc, char **argv) {
       else log("  GPU 回到全局 %d%%", cfg.gpu_pct);
       apply_gpu_cap(1);
     }
-    /* 这个应用戴着任何一道专属帽（CPU 或 GPU）时，这一轮就记在它名下（下一轮采样读它）。
-     * GPU-only 档（:40）也要标：那段 GPU 驻留是在应用帽下采的，不能算进全局样本。 */
-    if ((want_pct > 0 || want_gpu > 0) && fg[0])
-      snprintf(g_app_capped, sizeof g_app_capped, "%s", fg);
-
     if (has_mode) {
       missing_since = 0;
       apply_normal(caps_changed || adapt_changed);
@@ -3221,10 +3411,6 @@ int main(int argc, char **argv) {
        * adapt_changed 同理，而且更常见：PSI 借出额度、或凉下来还档，都是升档。 */
       apply_normal(caps_changed || adapt_changed);
       gpu_patrol();
-      /* 这一轮落在全局帽的稳态巡检上：接下来的 dt 就是这个包在全局帽下。
-         下一轮顶上的 learn_tick 用它做按应用归属；游戏宽限、满血、专属档位
-         那几支都提前 continue 了，不会写到这里。 */
-      if (fg[0]) snprintf(g_fg_global, sizeof g_fg_global, "%s", fg);
     }
     publish_status();
     sleep(cfg.interval);

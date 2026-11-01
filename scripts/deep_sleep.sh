@@ -19,7 +19,11 @@ PIDFILE=$CONF_DIR/run/dsleep.pid
 
 SCREEN_OFF_DELAY=20
 POLL_INTERVAL=2
-# 冻结方案按 ZenCore 的时序：熄屏后先冻结后台，7:30 才一次性 force-idle。
+# 深睡激活后不再 2 秒轮询：阻塞等 screen_toggled 事件（亮屏立即醒），
+# 最多 DS_ACTIVE_TICK 秒醒一次做维护（充电/7:30/名单）；事件源不可用时退 30 秒轮询。
+DS_ACTIVE_TICK=120
+DS_ACTIVE_FALLBACK=30
+# 冻结时序：熄屏后先冻结后台，7:30 才一次性 force-idle。
 # 3 分钟内分批冻结，之后不再新增，减少冻结组里 D 状态进程把整组卡住的机会。
 DS_FREEZE_ENABLED=${DS_FREEZE:-1}
 DS_FREEZE_WINDOW=180
@@ -30,10 +34,20 @@ DS_FREEZE_BATCH=8
 DS_FREEZE_GROUP_NAME=${DS_FREEZE_GROUP_NAME:-socfreq_ds}
 DS_FREEZE_LEDGER=$CONF_DIR/run/freeze.saved
 DS_FREEZE_QUEUE=$CONF_DIR/run/freeze.queue
-# 唤醒统计和媒体保护各要读一次 dumpsys（一次就是一次 system_server 往返，
-# 熄屏时这条路不能每 2 秒走一遍）。计数器是累计量，隔多久读都不丢增量。
-WAKE_SAMPLE_INTERVAL=${DS_WAKE_INTERVAL:-60}
-MEDIA_CHECK_INTERVAL=${DS_MEDIA_INTERVAL:-30}
+DS_SCAN_PS=$CONF_DIR/run/freeze.ps
+DS_SCAN_META=$CONF_DIR/run/freeze.meta
+DS_SCAN_CAND=$CONF_DIR/run/freeze.cand
+DS_EVENT_TMP=$CONF_DIR/run/ds_event.tmp
+DS_EVENT_FIFO=$CONF_DIR/run/ds_event.fifo
+# 深睡只做冻结 + appops 唤醒锁，不碰 CPU 频率/调度。
+# nice= 不冻结、不碰唤醒锁（保活）；push= 只放行指定进程（pkg[:proc]）并注入 Doze 白名单。
+DS_APPOPS_ENABLED=${DS_APPOPS:-1}
+DS_OPS_LEDGER=$CONF_DIR/run/ops.saved
+DS_LOCK_DIR=$CONF_DIR/run/dsleep.lock.d
+# 只有维护轮才读 dumpsys（一次就是一次 system_server 往返）。计数器是累计量，
+# 隔多久读都不丢增量：唤醒榜 15 分钟、媒体 5 分钟足够，退出时还会结算一次。
+WAKE_SAMPLE_INTERVAL=${DS_WAKE_INTERVAL:-900}
+MEDIA_CHECK_INTERVAL=${DS_MEDIA_INTERVAL:-300}
 # 闹钟守卫：时钟类应用有这么多秒内要响的闹钟时，不进入深睡（已经在里面就退出）。
 # 只让路闹钟前半小时，不是"有闹钟就永不深睡"。
 ALARM_GUARD_SEC=1800
@@ -45,10 +59,21 @@ ds_active=0
 ds_screen_off_ts=0
 ds_added=""
 ds_alarm_checked=0
+ds_alarm_wait=0
 ds_game_checked=0
 ds_was_charging=0
 ds_state_last=""
 ds_quit=0
+# 事件等待：logcat 可用时阻塞等亮屏，不可用就退化成定时唤醒。
+ds_event_ok=1
+ds_event_on=0
+ds_wait_pid=""
+ds_tick_stamp=""
+DS_NICE=""
+DS_PUSH=""
+# 第三方包名单缓存：一次深睡只查一次 pm，补扫复用。
+DS_THIRD=""
+ds_ops_done=""
 # 冻结状态机
 ds_freeze_backend=""
 ds_freeze_root=""
@@ -76,7 +101,28 @@ ds_wcsince=0
 ds_cur_base=""
 
 now() { date +%s; }
-log_ds() { echo "$(date '+%m-%d %H:%M:%S' 2>/dev/null) $*" >>"$LOG" 2>/dev/null; }
+# dsleep.log 以前是全模块唯一没人裁的日志：service.log 有 tail -c 131072，
+# socfreqd.log 有 log_trim，这份是裸追加。正常一天一百来行（约 10KB）不要紧，
+# 但任何一条路径开始刷屏就再也收不住 —— 这台机上出现过 5692 行重复日志、
+# 一天涨 430KB，而且永不回收。口径和 service.sh 保持一致：超 256KB 只留最近
+# 128KB，留下的必须是**新**的那一半（tail，不是 head）。
+# 每 64 条才量一次大小，别在每条日志上都多跑一次 wc。
+#
+# shortcut: 不加锁。只有拿到运行锁的那个实例能把计数累加到 64 的倍数——
+# 抢锁失败的进程只写一行就退出（api.sh source 本文件时也只写零星几条），
+# 所以实际不存在两个进程同时裁剪、争同一个 $LOG.tmp。
+_ds_logn=0
+log_ds() {
+    echo "$(date '+%m-%d %H:%M:%S' 2>/dev/null) $*" >>"$LOG" 2>/dev/null
+    _ds_logn=$((_ds_logn + 1))
+    [ $((_ds_logn % 64)) -eq 0 ] || return 0
+    local n
+    n=$(wc -c <"$LOG" 2>/dev/null)
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -lt 262144 ] && return 0
+    tail -c 131072 "$LOG" >"$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null
+    return 0
+}
 
 atomic_write() {
     local f="$1" perm="$2"
@@ -246,8 +292,12 @@ ds_conf_write() {
 # 深度睡眠配置
 # enable=1 打开；0 关闭。关闭只停止干预，不会保留任何系统改动。
 enable=0
-# 每行一条 white=包名，名单里的应用深睡时也允许被唤醒（等同系统电量设置里的「无限制」）。
+# 每行一条 white=包名：完全豁免（不冻结/不限 CPU/不碰唤醒锁），并加入 Doze 白名单。
 # white=com.tencent.mm
+# nice=包名：不冻结、不碰唤醒锁（保活类应用；深睡不碰 CPU）。
+# nice=com.tencent.mobileqq
+# push=包名[:进程]：只放行这个进程（不冻结/不限 CPU/不碰唤醒锁），并把包加入 Doze 白名单。
+# push=com.tencent.mm:push
 EOF
     mv -f "$DSLEEP_CONF.tmp" "$DSLEEP_CONF" 2>/dev/null
     chmod 0644 "$DSLEEP_CONF" 2>/dev/null
@@ -273,15 +323,54 @@ ds_conf_load() {
             exit
         }' "$DSLEEP_CONF" 2>/dev/null)
     [ "$ds_enabled" = "1" ] || ds_enabled=0
-    DS_WHITE=$(awk '
-        /^[[:space:]]*white[[:space:]]*=/ {
+    DS_WHITE=$(ds_conf_list white)
+    DS_NICE=$(ds_conf_list nice)
+    DS_PUSH=$(ds_conf_list push)
+    return 0
+}
+
+# 取某一类列表：一行一条 key=值，值里去掉注释/空白，输出逗号串。
+ds_conf_list() {
+    awk -v key="$1" '
+        $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
             v = $0
             sub(/^[^=]*=/, "", v)
             sub(/#.*/, "", v)
             gsub(/[[:space:]\r]/, "", v)
             if (v != "") print v
-        }' "$DSLEEP_CONF" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+        }' "$DSLEEP_CONF" 2>/dev/null | tr '\n' ',' | sed 's/,$//'
     return 0
+}
+
+ds_list_has() {
+    case ",$1," in *",$2,"*) return 0 ;; esac
+    return 1
+}
+
+# 列表里出现包名即算（忽略 :proc 后缀）。
+ds_pkg_in_push() {
+    local e
+    for e in $(echo "$DS_PUSH" | tr ',' ' '); do
+        [ "${e%%:*}" = "$1" ] && return 0
+    done
+    return 1
+}
+
+# 进程名（cmdline 第一段，通常是 pkg 或 pkg:proc）命中 push 列表。
+ds_push_match_proc() {
+    local e
+    for e in $(echo "$DS_PUSH" | tr ',' ' '); do
+        case "$e" in
+            *:*) [ "$e" = "$1" ] && return 0 ;;
+            *) [ "${1%%:*}" = "$e" ] && return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# push 列表里的包（去重、去掉 :proc），用于注入 Doze 白名单。
+ds_push_pkg_list() {
+    echo "$DS_PUSH" | tr ',' '\n' | sed 's/:.*//' | grep -v '^$' | sort -u | tr '\n' ',' | sed 's/,$//'
 }
 
 # ============================ Doze 原语 =======================================
@@ -463,7 +552,7 @@ ds_media_playing() {
         }'
 }
 
-# ============================ 后台冻结（ZenCore 方案） =======================
+# ============================ 后台冻结 ========================================
 # 冻结第三方后台进程，替代“熄屏 20 秒就把整机压进 Doze”的高频做法：
 #   T0 冻结 → T+3min 停止新增 → T+7:30 一次性 force-idle。
 # 只操作 /dev/freezer（或 v2 freezer）里的自有子组，不碰别的模块建的组。
@@ -480,16 +569,6 @@ ds_proc_start() {
     local s
     s="$(ds_proc_stat_after_comm "$1")" || return 1
     printf '%s\n' "$s" | awk '{print $20}'
-}
-
-ds_proc_state() {
-    local s
-    s="$(ds_proc_stat_after_comm "$1")" || return 1
-    printf '%s\n' "$s" | awk '{print $1}'
-}
-
-ds_proc_adj() {
-    tr -d '\r\n' < "/proc/$1/oom_score_adj" 2>/dev/null
 }
 
 # 选冻结后端：v1 的 freezer 挂载点（这台机是 /dev/freezer），
@@ -671,6 +750,7 @@ ds_freeze_thaw_all() {
         # 账本每批都落盘，比内存里的 ds_frozen 全；两边并集会重复解冻同一 PID。
         [ -n "$led" ] && ds_frozen="$led"
     fi
+    ds_freeze_backend="$b"; ds_freeze_root="$r"; ds_freeze_group="$g"
     case "$b" in
         v1)
             [ -n "$g" ] && [ -w "$g/freezer.state" ] && echo THAWED > "$g/freezer.state" 2>/dev/null
@@ -688,10 +768,17 @@ EOF
         if [ "$b" = "sigstop" ]; then
             kill -CONT "$pid" 2>/dev/null
         else
-            ds_freeze_backend="$b"; ds_freeze_root="$r"; ds_freeze_group="$g"
             ds_freeze_move_root "$pid"
         fi
     done
+    # 账本可能漏掉后来进组的子进程：按组里的实际 PID 再搬一遍，否则组删不掉，
+    # 下一轮深睡会把这些进程连带冻上。
+    if [ -n "$g" ] && [ -d "$g" ]; then
+        for pid in $(cat "$g/cgroup.procs" 2>/dev/null; cat "$g/tasks" 2>/dev/null); do
+            case "$pid" in ''|*[!0-9]*) continue ;; esac
+            ds_freeze_move_root "$pid"
+        done
+    fi
     [ -n "$g" ] && [ -d "$g" ] && rmdir "$g" 2>/dev/null
     rm -f "$DS_FREEZE_LEDGER" "$DS_FREEZE_QUEUE" 2>/dev/null
     ds_frozen=""
@@ -762,8 +849,11 @@ ds_freeze_build_skip() {
 
 # 找第三方后台进程，写成 "pid|starttime|pkg" 队列。只看 -3 包；
 # 只冻 oom_score_adj >= 200（缓存/后台），前台和可见应用不动。
+#
+# 一轮扫描只起固定几个子进程：pm、ps、读 stat/oom 的 awk、拼队列的 awk。
+# 逐个 /proc 起 cat/tr/head/grep/awk 会产生几千次 fork，熄屏后反而把 CPU 拉醒。
 ds_freeze_build_queue() {
-    local d pid cmd pkg st stt adj third
+    local pid cmd pkg st stt adj
     : > "$DS_FREEZE_QUEUE" 2>/dev/null
     [ "$DS_FREEZE_ENABLED" = "1" ] || return 0
     if [ -n "${DS_FREEZE_TEST_PID:-}" ]; then
@@ -772,47 +862,74 @@ ds_freeze_build_queue() {
             "${DS_FREEZE_TEST_PKG:-com.test.freeze}" > "$DS_FREEZE_QUEUE"
         return 0
     fi
-    third="$(pm list packages -3 2>/dev/null | sed -n 's/^package://p' | tr -d '\r')"
-    if [ -z "$third" ]; then
+    if [ -z "$DS_THIRD" ]; then
+        DS_THIRD="$(pm list packages -3 2>/dev/null | sed -n 's/^package://p' \
+            | tr -d '\r' | tr '\n' ',')"
+        DS_THIRD="${DS_THIRD%,}"
+    fi
+    if [ -z "$DS_THIRD" ]; then
         log_ds "冻结：pm 没返回第三方应用，本次跳过"
         return 0
     fi
-    ds_freeze_build_skip
-    for d in /proc/[0-9]*; do
-        pid="${d##*/}"
+    [ -n "$DS_FREEZE_SKIP" ] || ds_freeze_build_skip
+    ps -A -o pid=,args= > "$DS_SCAN_PS" 2>/dev/null
+    # 一次 awk 同时读 stat 和 oom_score_adj：只留 adj>=200、状态不在 Z/D/T/X 的进程。
+    awk '
+        FILENAME ~ /\/stat$/ && FNR == 1 {
+            n = split(FILENAME, a, "/"); p = a[n-1]
+            rest = $0; sub(/^.*\) /, "", rest); split(rest, f, " ")
+            state[p] = f[1]; start[p] = f[20]
+            next
+        }
+        FILENAME ~ /\/oom_score_adj$/ && FNR == 1 {
+            n = split(FILENAME, a, "/"); p = a[n-1]
+            oom[p] = $1 + 0
+            next
+        }
+        END {
+            for (p in oom)
+                if (oom[p] >= 200 && state[p] != "" && state[p] !~ /^[ZDTX]$/)
+                    print p "|" start[p] "|" state[p] "|" oom[p]
+        }' /proc/[0-9]*/stat /proc/[0-9]*/oom_score_adj > "$DS_SCAN_META" 2>/dev/null
+    awk -v mf="$DS_SCAN_META" '
+        BEGIN {
+            FS = "|"
+            while ((getline l < mf) > 0) {
+                split(l, m, "|")
+                meta[m[1]] = m[2] "|" m[3] "|" m[4]
+            }
+        }
+        {
+            line = $0
+            sub(/^[ ]+/, "", line)
+            split(line, a, " ")
+            p = a[1]
+            if (!(p in meta)) next
+            cmd = line
+            sub(/^[0-9]+[ ]+/, "", cmd)
+            print p "|" meta[p] "|" cmd
+        }' "$DS_SCAN_PS" > "$DS_SCAN_CAND" 2>/dev/null
+    while IFS='|' read -r pid st stt adj cmd; do
         case "$pid" in ''|*[!0-9]*) continue ;; esac
-        [ "$pid" = "$$" ] && continue
-        cmd="$(cat "$d/cmdline" 2>/dev/null | tr '\0' '\n' | head -n 1)"
         [ -n "$cmd" ] || continue
         pkg="${cmd%%:*}"
-        printf '%s\n' "$third" | grep -qx -- "$pkg" || continue
+        case ",$DS_THIRD," in *",$pkg,"*) ;; *) continue ;; esac
         case "$pkg" in
-            # 输入法/桌面/闹钟这类被冻了会直接影响使用；厂商自带应用整片不碰
-            # （ColorOS 的天气/健康/时钟在 -3 清单里，冻了就是闹钟不响）。
             *inputmethod*|*keyboard*|*launcher*|*alarmclock*|*deskclock*) continue ;;
-            com.coloros.*|com.oplus.*|com.oppo.*|com.heytap.*|com.hihonor.*|\
-            com.huawei.*|com.miui.*|com.xiaomi.*|com.google.*|com.vivo.*|\
-            com.iqoo.*|com.bbk.*|com.samsung.*|com.mediatek.*|com.qualcomm.*|\
-            com.transsion.*|com.tecno.*|com.infinix.*|com.sony.*|com.asus.*|\
-            com.lenovo.*|com.nubia.*|com.meizu.*|com.oneplus.*|com.realme.*) continue ;;
+            com.coloros.*|com.oplus.*|com.oppo.*|com.heytap.*|com.hihonor.*|com.huawei.*|com.miui.*|com.xiaomi.*|com.google.*|com.vivo.*|com.iqoo.*|com.bbk.*|com.samsung.*|com.mediatek.*|com.qualcomm.*|com.transsion.*|com.tecno.*|com.infinix.*|com.sony.*|com.asus.*|com.lenovo.*|com.nubia.*|com.meizu.*|com.oneplus.*|com.realme.*) continue ;;
         esac
         case " $DS_FREEZE_SKIP " in *" $pkg "*) continue ;; esac
-        st="$(ds_proc_start "$pid")"
-        [ -n "$st" ] || continue
-        stt="$(ds_proc_state "$pid")"
-        case "$stt" in Z|D|T|X) continue ;; esac
-        adj="$(ds_proc_adj "$pid")"
-        case "$adj" in ''|*[!0-9-]*) continue ;; esac
-        [ "$adj" -ge 200 ] 2>/dev/null || continue
+        ds_push_match_proc "$cmd" && continue
+        ds_list_has "$DS_NICE" "$pkg" && continue
         printf '%s|%s|%s\n' "$pid" "$st" "$pkg" >> "$DS_FREEZE_QUEUE"
-    done
+    done < "$DS_SCAN_CAND"
     log_ds "冻结候选 $(grep -c . "$DS_FREEZE_QUEUE" 2>/dev/null) 个进程"
 }
 
 # 每轮最多冻 8 个；第一批后把组置 FROZEN，后续迁入的进程自动冻结。
 # 队列空不代表冻结结束：3 分钟窗口里还有应用退到后台，由调用方补扫。
 ds_freeze_step() {
-    local line pid rest st pkg cur n=0
+    local line pid st pkg cur n=0
     [ "$ds_freeze_done" = "1" ] && return 0
     [ -s "$DS_FREEZE_QUEUE" ] || return 0
     while [ "$n" -lt "$DS_FREEZE_BATCH" ] && [ -s "$DS_FREEZE_QUEUE" ]; do
@@ -826,10 +943,16 @@ $line
 EOF
         case "$pid" in ''|*[!0-9]*) continue ;; esac
         # 补扫会把已经冻住的进程再扫出来一次，按账本跳过，别重复入组。
-        case "$ds_frozen" in *"$pid|"*) continue ;; esac
+        # 必须按整行锚定（^pid|），不能拿 *pid| 在账本里做子串匹配：
+        # 账本里已有 1124 时，候选 124 会命中 "124|" 那段尾巴而被误判成已冻，
+        # 于是这个进程一直不入组，用户看到"后台应用还在跑"。
+        # pid 在上面已校验为纯数字，进 grep 的模式没有元字符风险。
+        printf '%s\n' "$ds_frozen" | grep -q "^$pid|" && continue
         cur="$(ds_proc_start "$pid")"
         [ "$cur" = "$st" ] || continue
         case " $DS_FREEZE_SKIP " in *" $pkg "*) continue ;; esac
+        # 先掐唤醒锁，再冻；push 包整包不动 appops。
+        ds_ops_apply "$pkg"
         ds_freeze_add_pid "$pid" || continue
         ds_frozen="${ds_frozen}${pid}|${st}|${pkg}
 "
@@ -909,21 +1032,185 @@ ds_doze_once() {
     fi
 }
 
+# ============================ 唤醒锁（appops） ===============================
+
+ds_ops_get() {
+    # stdin 要断开：调用方常在 `while read < 账本` 里，cmd 继承账本 fd 会读到空结果。
+    cmd appops get "$1" WAKE_LOCK 2>/dev/null < /dev/null \
+        | awk '$1 == "WAKE_LOCK:" { sub(/;.*/, "", $2); print $2; exit }'
+}
+
+ds_ops_apply() {
+    local pkg="$1" old now
+    [ "$DS_APPOPS_ENABLED" = "1" ] || return 0
+    case ",$ds_ops_done," in *",$pkg,"*) return 0 ;; esac
+    ds_ops_done="$ds_ops_done,$pkg"
+    [ -f "$DS_OPS_LEDGER" ] && grep -q "^$pkg|" "$DS_OPS_LEDGER" 2>/dev/null && return 0
+    # 包级豁免：push 列表里的包可能还要靠 push 进程收消息，整包不碰。
+    ds_pkg_in_push "$pkg" && return 0
+    old="$(ds_ops_get "$pkg")"
+    case "$old" in
+        ''|ignore) return 0 ;;
+    esac
+    cmd appops set "$pkg" WAKE_LOCK ignore >/dev/null 2>&1 < /dev/null || return 0
+    now="$(ds_ops_get "$pkg")"
+    [ "$now" = "ignore" ] || return 0
+    printf '%s|%s\n' "$pkg" "$old" >> "$DS_OPS_LEDGER" 2>/dev/null
+}
+
+ds_ops_restore_all() {
+    local line pkg old now keep=""
+    [ -f "$DS_OPS_LEDGER" ] || return 0
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        IFS='|' read -r pkg old <<EOF
+$line
+EOF
+        case "$pkg" in ''|*[!A-Za-z0-9._]*) continue ;; esac
+        case "$old" in allow|deny|ignore|default) ;; *) old=default ;; esac
+        # 在 while read < 账本 里，cmd 会继承账本 fd，appops 事务会直接失败；
+        # 必须断开 stdin，否则旧值永远写不回去。
+        cmd appops set "$pkg" WAKE_LOCK "$old" >/dev/null 2>&1 < /dev/null
+        # 设置失败、被系统改回，或 AppOps 缓存还没刷新时保留账本，下次启动再试；
+        # 否则会留下 ignore。最多等 0.6 秒让缓存跟上。
+        now=""
+        _i=0
+        while [ "$_i" -lt 3 ]; do
+            now="$(ds_ops_get "$pkg")"
+            [ "$now" = "$old" ] && break
+            sleep 0.2
+            _i=$((_i + 1))
+        done
+        [ "$now" = "$old" ] || keep="$keep$pkg|$old
+"
+    done < "$DS_OPS_LEDGER"
+    if [ -n "$keep" ]; then
+        printf '%s' "$keep" | atomic_write "$DS_OPS_LEDGER" 0644
+    else
+        rm -f "$DS_OPS_LEDGER" 2>/dev/null
+    fi
+    ds_ops_done=""
+}
+
+ds_ops_restore_if_any() {
+    [ -f "$DS_OPS_LEDGER" ] || return 0
+    ds_ops_restore_all
+    if [ -f "$DS_OPS_LEDGER" ]; then
+        log_ds "唤醒锁还原未完成，账本保留到下次启动再试"
+    else
+        log_ds "唤醒锁设置已按账本还原"
+    fi
+}
+
+# ============================ 策略迁移 ========================================
+# V1.6 之前内置把微信/QQ/企业微信/钉钉整包放进 white=：整包不冻结、
+# 不进唤醒锁管控，还进了 Doze 白名单。这里做一次性迁移：IM 保活（nice=），
+# 微信只放行 :push 进程（push=），其余第三方照常冻结/管唤醒锁。
+# 保留系统关键应用和用户其它 white= 条目。
+ds_policy_migrate() {
+    local marker="$CONF_DIR/run/policy_v2" p installed
+    [ -f "$marker" ] && return 0
+    [ -f "$DSLEEP_CONF" ] || return 0
+    installed="$(pm list packages 2>/dev/null | sed 's/^package://' | tr -d '\r')"
+    [ -n "$installed" ] || return 0
+    # 备份配置和迁移前的 Doze 白名单，出问题可人工回滚。
+    cp -f "$DSLEEP_CONF" "$DSLEEP_CONF.bak-policy2" 2>/dev/null
+    timeout 2 dumpsys deviceidle whitelist 2>/dev/null > "$CONF_DIR/run/doze.before-policy2"
+    {
+        awk '
+            /^[[:space:]]*white[[:space:]]*=/ {
+                v = $0
+                sub(/^[^=]*=/, "", v)
+                sub(/#.*/, "", v)
+                gsub(/[[:space:]\r]/, "", v)
+                if (v == "com.tencent.mm" || v == "com.tencent.mobileqq" ||
+                    v == "com.tencent.tim" || v == "com.tencent.wework" ||
+                    v == "com.alibaba.android.rimet") next
+            }
+            { print }
+        ' "$DSLEEP_CONF"
+        for p in com.tencent.mm com.tencent.mobileqq com.tencent.tim \
+                 com.tencent.wework com.alibaba.android.rimet; do
+            printf '%s\n' "$installed" | grep -qx -- "$p" || continue
+            printf 'nice=%s\n' "$p"
+        done
+        if printf '%s\n' "$installed" | grep -qx -- 'com.tencent.mm'; then
+            printf 'push=com.tencent.mm:push\n'
+        fi
+    } | atomic_write "$DSLEEP_CONF" 0644 || return 0
+    # 旧版把这些整包永久加进了系统 Doze 白名单；迁移时撤掉（微信 push 会在
+    # 每次进入深睡时重新临时加白，QQ 等不再整包放行）。
+    for p in com.tencent.mm com.tencent.mobileqq com.tencent.tim \
+             com.tencent.wework com.alibaba.android.rimet; do
+        timeout 2 dumpsys deviceidle whitelist "-$p" >/dev/null 2>&1
+    done
+    printf '%s\n' "policy_v2 $(now)" > "$marker" 2>/dev/null
+    ds_conf_raw=""
+    log_ds "深睡策略已迁移：微信/QQ 等改为保活（不冻结），微信 push 放行"
+    return 0
+}
+
+# V3：音乐/健康/Scene 之前整包 white= 也被注入 Doze 白名单；force-idle 后这些
+# 应用仍能跑，抵消了 Doze。迁到 nice=：不冻结，但不进 Doze；正在播放的音乐由
+# 媒体检测临时加白。系统关键包（com.android./厂商前缀）仍保留 white= + Doze。
+ds_policy_migrate_v3() {
+    local marker="$CONF_DIR/run/policy_v3" p installed
+    [ -f "$marker" ] && return 0
+    [ -f "$DSLEEP_CONF" ] || return 0
+    installed="$(pm list packages 2>/dev/null | sed 's/^package://' | tr -d '')"
+    [ -n "$installed" ] || return 0
+    cp -f "$DSLEEP_CONF" "$DSLEEP_CONF.bak-policy3" 2>/dev/null
+    timeout 2 dumpsys deviceidle whitelist 2>/dev/null > "$CONF_DIR/run/doze.before-policy3"
+    {
+        awk '
+            /^[[:space:]]*white[[:space:]]*=/ {
+                v = $0
+                sub(/^[^=]*=/, "", v)
+                sub(/#.*/, "", v)
+                gsub(/[[:space:]]/, "", v)
+                if (v == "com.netease.cloudmusic" || v == "com.tencent.qqmusic" ||
+                    v == "com.kugou.android" || v == "cn.kuwo.player" ||
+                    v == "com.ximalaya.ting.android" || v == "com.mi.health" ||
+                    v == "com.xiaomi.hm.health" || v == "com.huawei.health" ||
+                    v == "com.hihonor.health" || v == "com.heytap.health" ||
+                    v == "com.heytap.health.international" || v == "com.oplus.healthservice" ||
+                    v == "com.vivo.health" || v == "com.sec.android.app.shealth" ||
+                    v == "com.omarea.vtools") next
+            }
+            { print }
+        ' "$DSLEEP_CONF"
+        for p in com.netease.cloudmusic com.tencent.qqmusic com.kugou.android                  cn.kuwo.player com.ximalaya.ting.android com.mi.health                  com.xiaomi.hm.health com.huawei.health com.hihonor.health                  com.heytap.health com.heytap.health.international                  com.oplus.healthservice com.vivo.health com.sec.android.app.shealth                  com.omarea.vtools; do
+            printf '%s
+' "$installed" | grep -qx -- "$p" || continue
+            printf 'nice=%s
+' "$p"
+        done
+    } | atomic_write "$DSLEEP_CONF" 0644 || return 0
+    for p in com.netease.cloudmusic com.tencent.qqmusic com.kugou.android              cn.kuwo.player com.ximalaya.ting.android com.mi.health              com.xiaomi.hm.health com.huawei.health com.hihonor.health              com.heytap.health com.heytap.health.international              com.oplus.healthservice com.vivo.health com.sec.android.app.shealth              com.omarea.vtools; do
+        timeout 2 dumpsys deviceidle whitelist "-$p" >/dev/null 2>&1
+    done
+    printf '%s
+' "policy_v3 $(now)" > "$marker" 2>/dev/null
+    ds_conf_raw=""
+    log_ds "深睡策略已迁移：音乐/健康/Scene 移出 Doze 白名单（改为保活）"
+    return 0
+}
+
 # ============================ 进入 / 退出 =====================================
 
 ds_enter() {
     local old_white pkg n=0 sms
-    # 防御性再查一次（主循环也会查）：闹钟快响了就别动系统 Doze。
-    if ds_alarm_soon; then
-        log_ds "闹钟在 ${ALARM_GUARD_SEC} 秒内，暂不进入深睡"
-        ds_state_write
-        return 0
-    fi
     old_white="$(ds_white_snapshot)"
     ds_added=""
     for pkg in $(echo "$DS_WHITE" | tr ',' ' '); do
         [ -n "$pkg" ] || continue
         n=$((n+1)); [ "$n" -gt "$MAX_WHITE" ] && break
+        ds_white_add "$pkg" "$old_white"
+    done
+    # push 列表的包也要进 Doze 白名单（只放行 push 进程，整包仍可能被冻结）。
+    for pkg in $(ds_push_pkg_list | tr ',' ' '); do
+        [ -n "$pkg" ] || continue
+        case " $ds_added " in *" $pkg "*) continue ;; esac
         ds_white_add "$pkg" "$old_white"
     done
     # 默认短信应用不在名单里也要临时加白：否则 SMS 广播会被压到出 Doze 才发。
@@ -936,6 +1223,14 @@ ds_enter() {
                log_ds "短信应用 $sms 已临时加白" ;;
         esac
     fi
+    # 正在放媒体的应用（可能在 nice=）进入时也临时进 Doze 白名单，
+    # 否则 force-idle 后音乐会被压住；退出时按 ds_added 撤销。
+    for pkg in $(ds_media_playing); do
+        [ -n "$pkg" ] || continue
+        case " $ds_added " in *" $pkg "*) continue ;; esac
+        ds_white_add "$pkg" "$old_white"
+        log_ds "媒体应用 $pkg 已临时加白"
+    done
     ds_snap_write
     # ZenCore 时序：先冻结/限流后台，7:30 才一次性 force-idle，不再 20 秒就压 Doze。
     ds_doze_sent=0
@@ -945,10 +1240,18 @@ ds_enter() {
     ds_freeze_fail=0
     ds_frozen=""
     ds_freeze_scan_ts=$(now)
+    DS_THIRD=""
+    DS_FREEZE_SKIP=""
     ds_freeze_probe
     ds_freeze_group_init
     ds_freeze_build_queue
     ds_freeze_step
+    # 冻结关掉时没有窗口可等，直接进事件等待，别按 2 秒空转 3 分钟。
+    [ "$DS_FREEZE_ENABLED" = "1" ] || ds_freeze_done=1
+    ds_alarm_wait=0
+    ds_event_ok=1
+    ds_last_media=$(now)
+    ds_last_wake=$(now)
     ds_run_list=""
     ds_cur_base="$(ds_wakes_collect)"
     ds_wakes_save
@@ -958,9 +1261,11 @@ ds_enter() {
 
 ds_exit() {
     local pkg
-    timeout 2 dumpsys deviceidle unforce >/dev/null 2>&1
-    # 先解冻再撤白名单：顺序反了会让被冻的应用在“无豁免”的空窗里等亮屏。
+    # 先尝试恢复唤醒锁；冻结中的进程可能让 appops 写不进去，解冻后再按留下的账本重试。
+    ds_ops_restore_all
     ds_freeze_thaw_all
+    [ -f "$DS_OPS_LEDGER" ] && ds_ops_restore_all
+    timeout 2 dumpsys deviceidle unforce >/dev/null 2>&1
     for pkg in $ds_added; do ds_white_del "$pkg"; done
     ds_wakes_update
     [ -n "$ds_run_list" ] && echo "$ds_run_list" | awk '{print "A "$1"="$2}' \
@@ -968,9 +1273,12 @@ ds_exit() {
     rm -f "$DS_SNAP" "$DS_FREEZE_QUEUE" 2>/dev/null
     ds_active=0
     ds_added=""
+    DS_THIRD=""
+    DS_FREEZE_SKIP=""
     ds_doze_sent=0
     ds_doze_checked=0
-    log_ds "已退出（$1），冻结与白名单已还原"
+    ds_alarm_wait=0
+    log_ds "已退出（$1），冻结/唤醒锁与白名单已还原"
 }
 
 # ============================ 状态文件 ========================================
@@ -1002,6 +1310,8 @@ dswc=$dswc"
 
 ds_tick() {
     local t media pkg charging
+    # 记下这一轮的起点：事件等待用它补读“上一轮巡检之后、监听开始之前”的亮屏。
+    ds_tick_stamp=$(date '+%m-%d %H:%M:%S.000')
     ds_conf_load
     t=$(now)
     charging=0; ds_charging && charging=1
@@ -1016,6 +1326,7 @@ ds_tick() {
         [ "$ds_active" = "1" ] && ds_exit "关开关"
         ds_screen_off_ts=0
         ds_alarm_checked=0
+        ds_alarm_wait=0
         ds_game_checked=0
         ds_state_write
         # 关着就不常驻：写完这一轮状态就退，重新打开时 api.sh 会立刻拉起。
@@ -1029,6 +1340,7 @@ ds_tick() {
         else
             ds_screen_off_ts=0
             ds_alarm_checked=0
+            ds_alarm_wait=0
             ds_game_checked=0
         fi
         ds_state_write
@@ -1039,6 +1351,7 @@ ds_tick() {
         if [ "$ds_active" = "1" ]; then ds_exit "充电"; fi
         ds_screen_off_ts=0
         ds_alarm_checked=0
+        ds_alarm_wait=0
         ds_game_checked=0
         ds_state_write
         return 0
@@ -1058,14 +1371,22 @@ ds_tick() {
                 return 0
             fi
             # 闹钟前半小时不进入；最多每分钟问一次 dumpsys，别每 2 秒拉一遍。
+            # 判到闹钟后必须停在等待态：否则下一轮“60 秒未到”会跳过检查直接
+            # 走 ds_enter，等于每 2 秒再查一次 dumpsys alarm。
+            if [ "$ds_alarm_wait" = "1" ] && [ $((t - ds_alarm_checked)) -lt 60 ]; then
+                ds_state_write
+                return 0
+            fi
             if [ $((t - ds_alarm_checked)) -ge 60 ]; then
                 ds_alarm_checked=$t
                 if ds_alarm_soon; then
+                    ds_alarm_wait=1
                     log_ds "闹钟在 ${ALARM_GUARD_SEC} 秒内，暂不进入深睡"
                     ds_state_write
                     return 0
                 fi
             fi
+            ds_alarm_wait=0
             ds_enter
         fi
         ds_state_write
@@ -1132,6 +1453,142 @@ ds_tick() {
     ds_state_write
 }
 
+# 深睡激活后的等待：阻塞等 screen_toggled，亮屏立刻醒；最多 DS_ACTIVE_TICK 秒
+# 醒一次做维护（充电/7:30/名单/媒体）。事件源不可用时退 30 秒定时。
+# 返回 0 = 拿到事件，1 = 超时或事件源不可用。
+ds_screen_event() {
+    local t0 t1 wp lp wd stamp backlog
+    ds_event_on=0
+    : > "$DS_EVENT_TMP" 2>/dev/null
+    t0=$(now)
+    # 时间戳必须在起子 shell 之前取：后台进程真正跑起来可能晚几百毫秒。
+    stamp=$(date '+%m-%d %H:%M:%S.000')
+    if [ "$ds_event_ok" = "1" ] && command -v logcat >/dev/null 2>&1; then
+        # 先非阻塞补读：上一轮 tick 之后、本次监听开始之前发生的亮屏不能漏。
+        if [ -n "$ds_tick_stamp" ]; then
+            backlog="$(timeout 2 logcat -b events -d -s screen_toggled \
+                -T "$ds_tick_stamp" 2>/dev/null | grep 'screen_toggled' | tail -n 1)"
+            if [ -n "$backlog" ]; then
+                case "$backlog" in *"screen_toggled: 1"*) ds_event_on=1 ;; esac
+                return 0
+            fi
+        fi
+        (
+            rm -f "$DS_EVENT_FIFO"
+            mkfifo "$DS_EVENT_FIFO" 2>/dev/null || exit 0
+            logcat -b events -s screen_toggled -T "$stamp" > "$DS_EVENT_FIFO" 2>/dev/null &
+            lp=$!
+            ( sleep "$DS_ACTIVE_TICK"; kill "$lp" 2>/dev/null ) &
+            wd=$!
+            grep -m1 'screen_toggled' < "$DS_EVENT_FIFO" > "$DS_EVENT_TMP"
+            kill "$lp" "$wd" 2>/dev/null
+            rm -f "$DS_EVENT_FIFO"
+        ) &
+        wp=$!
+        ds_wait_pid=$wp
+        # 监听已经挂上；补读之后才亮屏的，也让它走 tick 退出。
+        if ds_screen_on; then
+            ds_event_on=1
+            ds_kill_children "$wp"
+            wait "$wp" 2>/dev/null
+            rm -f "$DS_EVENT_FIFO"
+            ds_wait_pid=""
+            return 0
+        fi
+        if ds_charging; then
+            ds_kill_children "$wp"
+            wait "$wp" 2>/dev/null
+            rm -f "$DS_EVENT_FIFO"
+            ds_wait_pid=""
+            return 0
+        fi
+        wait "$wp"
+        ds_wait_pid=""
+        t1=$(now)
+        if [ -s "$DS_EVENT_TMP" ]; then
+            case "$(cat "$DS_EVENT_TMP" 2>/dev/null)" in *"screen_toggled: 1"*) ds_event_on=1 ;; esac
+            return 0
+        fi
+        # 立刻返回空 = logcat 不可用/-T 不支持，退化成定时唤醒。
+        if [ $((t1 - t0)) -lt 5 ]; then
+            ds_event_ok=0
+            log_ds "logcat 事件不可用，深睡维护改为 ${DS_ACTIVE_FALLBACK} 秒巡检"
+        fi
+        return 1
+    fi
+    sleep "$DS_ACTIVE_FALLBACK" &
+    ds_wait_pid=$!
+    wait $!
+    ds_wait_pid=""
+    return 1
+}
+
+# 已在深睡中的主循环：冻结窗口内 2 秒一步，之后只等事件/维护轮。
+ds_active_wait() {
+    local t busy
+    while [ "$ds_active" = "1" ] && [ "$ds_quit" != "1" ]; do
+        t=$(now)
+        busy=0
+        if [ $((t - ds_screen_off_ts)) -lt "$DS_FREEZE_WINDOW" ]; then
+            if [ "$DS_FREEZE_ENABLED" = "1" ] && [ "$ds_freeze_done" != "1" ]; then
+                busy=1
+            fi
+        fi
+        if [ "$busy" = "1" ]; then
+            sleep 2 &
+            ds_wait_pid=$!
+            wait $!
+            ds_wait_pid=""
+            ds_tick
+            [ "$ds_quit" = "1" ] && return 0
+            continue
+        fi
+        ds_screen_event
+        if [ "$ds_event_on" = "1" ]; then
+            ds_exit "亮屏"
+            return 0
+        fi
+        ds_tick
+        [ "$ds_quit" = "1" ] && return 0
+    done
+}
+
+ds_lock_acquire() {
+    local p i age
+    i=0
+    while [ "$i" -lt 10 ]; do
+        if mkdir "$DS_LOCK_DIR" 2>/dev/null; then
+            echo $$ > "$DS_LOCK_DIR/pid" 2>/dev/null
+            return 0
+        fi
+        p="$(cat "$DS_LOCK_DIR/pid" 2>/dev/null)"
+        case "$p" in
+            ''|*[!0-9]*) ;;
+            *)
+                if [ -d "/proc/$p" ] && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'deep_sleep.sh'; then
+                    log_ds "已有深睡实例在跑（pid $p），本次不重复启动"
+                    return 1
+                fi
+                ;;
+        esac
+        sleep 0.2
+        i=$((i + 1))
+    done
+    # 刚创建、还没写 pid 的锁是“另一个实例正在启动”，绝不能抢；只有陈旧锁才清。
+    age=$(( $(now) - $(stat -c %Y "$DS_LOCK_DIR" 2>/dev/null || echo 0) ))
+    if [ "$age" -lt 30 ]; then
+        log_ds "运行锁刚被创建，按启动中处理，本次不重复启动"
+        return 1
+    fi
+    rm -rf "$DS_LOCK_DIR" 2>/dev/null
+    mkdir "$DS_LOCK_DIR" 2>/dev/null || return 1
+    echo $$ > "$DS_LOCK_DIR/pid" 2>/dev/null
+}
+
+ds_lock_release() {
+    [ "$(cat "$DS_LOCK_DIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$DS_LOCK_DIR" 2>/dev/null
+}
+
 ds_alive_pid() {
     local p
     [ -f "$PIDFILE" ] || return 1
@@ -1141,15 +1598,27 @@ ds_alive_pid() {
     tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | grep -q 'deep_sleep\.sh'
 }
 
+ds_kill_children() {
+    local p="$1" c
+    [ -n "$p" ] || return 0
+    for c in $(ps -A -o pid,ppid 2>/dev/null | awk -v pp="$p" '$2 == pp {print $1}'); do
+        ds_kill_children "$c"
+    done
+    kill "$p" 2>/dev/null
+}
+
 ds_shutdown() {
     [ "$ds_shut" = "1" ] && exit 0
     ds_shut=1
+    [ -n "$ds_wait_pid" ] && ds_kill_children "$ds_wait_pid"
     [ "$ds_active" = "1" ] && ds_exit "停止"
-    # 入口失败/账本残留时也兜底解冻；没有残留就是空操作。
+    # 入口失败/账本残留时也兜底还原；先解冻，再恢复冻结期间写不进去的 appops。
     ds_freeze_restore_if_any
+    ds_ops_restore_if_any
     # 退出前把 dsactive 写回 0：api.sh 停止守护后页面还会读这份 state。
     ds_state_write
-    rm -f "$PIDFILE" 2>/dev/null
+    rm -f "$PIDFILE" "$DS_EVENT_TMP" "$DS_EVENT_FIFO" 2>/dev/null
+    ds_lock_release
     exit 0
 }
 
@@ -1157,21 +1626,37 @@ ds_main() {
     mkdir -p "$CONF_DIR/run" 2>/dev/null
     ds_alive_pid && exit 0
     ds_shut=0
-    echo $$ >"$PIDFILE" 2>/dev/null
+    ds_lock_acquire || exit 0
+    echo $$ > "$PIDFILE" 2>/dev/null
     trap 'ds_shutdown' 0 1 2 3 15
+    ds_conf_load
+    ds_policy_migrate
+    ds_conf_load
+    ds_policy_migrate_v3
     ds_conf_load
     ds_freeze_probe
     ds_freeze_restore_if_any
+    ds_ops_restore_if_any
     ds_wakes_load
     ds_snap_restore_if_any
+    ds_wait_pid=""
+    rm -f "$DS_EVENT_TMP" "$DS_EVENT_FIFO" 2>/dev/null
     while true; do
         ds_quit=0
         ds_tick
         [ "$ds_quit" = "1" ] && ds_shutdown
-        # 前台 sleep 时 TERM 要等它睡完才进 trap（实测 2 秒）。放到后台
-        # 再 wait：wait 会被信号立刻打断，关开关时不用白等一个巡检周期。
-        sleep "$POLL_INTERVAL" &
-        wait $!
+        if [ "$ds_active" = "1" ]; then
+            # 深睡中不再 2 秒轮询：事件等待 + 维护轮。
+            ds_active_wait
+            [ "$ds_quit" = "1" ] && ds_shutdown
+        else
+            # 前台 sleep 时 TERM 要等它睡完才进 trap（实测 2 秒）。放到后台
+            # 再 wait：wait 会被信号立刻打断，关开关时不用白等一个巡检周期。
+            sleep "$POLL_INTERVAL" &
+            ds_wait_pid=$!
+            wait $!
+            ds_wait_pid=""
+        fi
     done
 }
 

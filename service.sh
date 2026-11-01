@@ -4,7 +4,8 @@ MODDIR=${0%/*}
 DAEMON="$MODDIR/socfreqd"
 # 管理器已经标记卸载（remove）：即使 service.sh 还被调到，也绝不拉起守护。
 # 否则卸载到重启之间会继续写频率节点，看起来像"删了还在限频"。
-[ -f "$MODDIR/remove" ] && exit 0# 可变状态位于模块目录之外，升级模块不会把它一起删掉。
+[ -f "$MODDIR/remove" ] && exit 0
+# 可变状态位于模块目录之外，升级模块不会把它一起删掉。
 # 路径需与守护的 SF_DATADIR、api.sh 的 DATA 三处一致。
 DATA=/data/adb/soc_freqcap
 LOCK="$DATA/socfreqd.lock"
@@ -14,6 +15,20 @@ DS_PID="$DATA/run/dsleep.pid"
 DS_SH="$MODDIR/scripts/deep_sleep.sh"
 
 [ -f "$PAUSE" ] && exit 0
+
+# 启动看门狗自己的日志：WebUI「完整日志」的“启动”来源读这里。
+# 超过 256KB 砍半，和守护日志同一个规矩。
+SVC_LOG="$DATA/service.log"
+mkdir -p "$DATA" 2>/dev/null
+if [ -f "$SVC_LOG" ]; then
+  _sz=$(wc -c < "$SVC_LOG" 2>/dev/null)
+  case "$_sz" in ''|*[!0-9]*) _sz=0 ;; esac
+  if [ "$_sz" -gt 262144 ]; then
+    tail -c 131072 "$SVC_LOG" > "$SVC_LOG.tmp" 2>/dev/null && mv -f "$SVC_LOG.tmp" "$SVC_LOG"
+  fi
+fi
+exec >>"$SVC_LOG" 2>&1
+echo "===== service.sh $(date '+%m-%d %H:%M:%S' 2>/dev/null) ====="
 
 # 守护是否真的活着。
 # 不能只看锁文件在不在：守护被 kill -9 时不会走 cleanup，锁文件会残留，
@@ -114,6 +129,13 @@ ds_start() {
   # 深度睡眠守护独立成进程，没有心跳文件，只按 pid/cmdline 看护。
   ds_start
   while true; do
+    # 入口那次 remove 判断只挡"已经标记卸载后又被调起"这一种情况。
+    # 真正会漏的是另一种：开机时正常装好了，用户在跑着的时候去卸载，
+    # 管理器只是写一个 remove 标记文件，等下次重启才真删目录。
+    # uninstall.sh 会杀掉守护和深睡进程，但本看门狗还在 60 秒一轮地转，
+    # 心跳文件被删后 stale 立刻为真 → 一分钟内又把守护拉起来继续写频率，
+    # 用户看到的就是"模块删了还在限频"。所以在子 shell 里退出（不影响别的模块）。
+    [ -f "$MODDIR/remove" ] && exit 0
     if [ ! -f "$PAUSE" ] && stale; then
       if alive; then
         PID=$(cat "$LOCK" 2>/dev/null)

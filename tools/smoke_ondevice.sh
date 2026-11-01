@@ -15,7 +15,7 @@
 # 不是 Soc智能限频。写错的话五项会一起红，而且报的是"名单匹配不上"
 # 这类下游症状，会把人往错方向带。
 #
-# 只查八件事，任何一件不合格就非零退出——不修任何东西，只报告。
+# 只查七件事，任何一件不合格就非零退出——不修任何东西，只报告。
 #
 # 注意调用方式：socfreqd 是 ELF，要直接执行，不能写成 sh "$D/socfreqd"。
 # shell 对脚本操作数是"读进来当命令解析"，不是 execve，
@@ -161,8 +161,6 @@ printf '%s\n' "$EX" | grep -q '^boot_full=' \
   || bad "export 里没有 boot_full（开机满血没接上）"
 printf '%s\n' "$EX" | grep -q '^nmode=' \
   || bad "export 里没有 nmode（分应用档位没接上）"
-printf '%s\n' "$EX" | grep -q '^learn=' \
-  || bad "export 里没有 learn（智能学习的开关没接上，页面那个开关是空的）"
 
 # 档位这条只读不动用户的 app_modes.conf：真机上"顺手加一条再删掉"
 # 会在守护的一个巡检周期里把那个应用按测试包名改档，
@@ -243,51 +241,6 @@ else
   # 于是这一条在 PC 上永远数出 0，等上真机才发现"报错了"其实是量具坏了。
   N=$(sh "$API" labels $PKGS 2>/dev/null | tr -d '\r' | tr '\t' '|' | grep -c '|.')
   say "api.sh labels 给出 $N 行带名字的（点名那几个包，TAB 分两列）"
-fi
-
-echo "== 8. 智能学习链路（采样文件 ↔ advice 判据）=="
-# 这一段全部只读：advice 不改配置，清零那种动作留给用户自己在页面上做。
-LV=$(sed -n 's/^LEARN=//p' "$DATA/socfreq.conf" 2>/dev/null | head -n 1 | tr -d ' \r\t')
-[ -n "$LV" ] || LV=1   # 老配置的 conf 里没这一行，守护按开处理，这里同口径
-say "LEARN=$LV"
-
-AD=$(sh "$API" advice 2>&1); ARC=$?
-if [ "$ARC" -ne 0 ]; then
-  bad "advice 退出码 $ARC —— 判据整个挂在 api.sh 里，页面那一块会直接显示取建议失败"
-  say "$AD"
-fi
-printf '%s\n' "$AD" | grep -q '^learn=' \
-  || bad "advice 没给 learn= 这一行（前端要按它决定显示建议还是显示原因）"
-printf '%s\n' "$AD" | grep -q '^mode=' \
-  || bad "advice 没给 mode= 这一行（前端要显示学习偏好）"
-printf '%s\n' "$AD" | grep -q '^reset=' \
-  || bad "advice 没给 reset= 这一行（旧格式清空后页面要提示重新积累）"
-LR=$(printf '%s\n' "$AD" | sed -n 's/^rows=//p' | head -n 1)
-RC=$(printf '%s\n' "$AD" | grep -c -- '---REC---')
-say "advice 认到 ${LR:-0} 行样本、给出 $RC 条记录"
-[ "$RC" -eq 0 ] || printf '%s\n' "$AD" | grep -q '^top2=' \
-  || bad "建议记录里没有 top2= / p99=（页面证据行会显示 0）"
-
-# 列数必须是 31（键、档、采样/顶帽/被压、24 桶、天位图、配置帽）：
-# 守护写盘少一列或判据那边多读一列，表现都是"有样本但全是 0%"。
-# 表头 #fmt=2 不算数据行。
-if [ -f "$DATA/learn.tsv" ]; then
-  say "样本文件 $(wc -l < "$DATA/learn.tsv" | tr -d ' ') 行：$DATA/learn.tsv"
-  BW=$(awk '$1 ~ /^#/ { next } NF != 31 { n++ } END { print n + 0 }' "$DATA/learn.tsv" 2>/dev/null)
-  [ "${BW:-0}" = 0 ] || bad "learn.tsv 里有 $BW 行的列数不是 31（写盘被截断，或两端格式没同步）"
-  printf '%s\n' "$AD" | grep -q -- '---REC---' \
-    || say "  有文件但没出记录：这一档的采样时长还不够，或桶全空（刚装机属正常）"
-else
-  if [ "$LV" = 1 ]; then
-    say "还没有 learn.tsv：守护攒满 5 分钟才落一次盘，而且只在封顶真的生效时累计"
-    say "  （熄屏、开机满血窗口、游戏或分应用满血期间都不算，所以亮着屏用一会儿才会有）"
-  else
-    bad "LEARN=0 却留着 learn.tsv：关闭时应当把它删掉"
-  fi
-fi
-if [ -f "$DATA/learn_app.tsv" ]; then
-  ABW=$(awk '$1 ~ /^#/ { next } NF != 31 { n++ } END { print n + 0 }' "$DATA/learn_app.tsv" 2>/dev/null)
-  [ "${ABW:-0}" = 0 ] || bad "learn_app.tsv 里有 $ABW 行的列数不是 31（和全局那份必须同构）"
 fi
 
 echo

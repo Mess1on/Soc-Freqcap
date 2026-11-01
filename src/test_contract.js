@@ -345,7 +345,7 @@ ok(/static void leave_screen_off\(void\)/.test(csrc) &&
 ok(/strcmp\(g_state, "game"\) != 0 && strcmp\(g_state, "full"\) != 0/.test(csrc),
    'reclaim_caps_allowed 同时排除 game/full（熄屏热重载不会抢回节点）');
 ok(/cfg\.screen_policy == SCREEN_UNCAP\) \{[\s\S]{0,260}?g_screen_off/.test(csrc),
-   '熄屏轻巡检分支在主循环里，早于 adapt_tick/learn_tick/foreground_pkg');
+   '熄屏轻巡检分支在主循环里，早于 adapt_tick/foreground_pkg');
 ok(/fprintf\(f, "state=%s\\nscreen=%s\\nsoff=%d\\n/.test(csrc) &&
    /screen=on\\nsoff=15/.test(apiSrc),
    '状态里发布 screen/soff，页面能区分 ACTIVE 与熄屏');
@@ -399,10 +399,6 @@ console.log('\n== P0b 深度空闲 / 分应用 keep ==');
      '状态发布三态与 keep 标记');
   ok(/screen === 'deep'/.test(html) && /熄屏 \? 保持封顶|熄屏 · 保持封顶/.test(html),
      '页面显示深度空闲/熄屏保持封顶');
-  ok(/v == "keep" \|\| v == "KEEP"\) \{ skipd\[p\] = 1/.test(apiSrc),
-     'advice_app 跳过 keep 条目（学习只写数字）');
-  ok(/这条是熄屏保持封顶，学习不改/.test(apiSrc),
-     'modes_learn 对 keep 条目报 SKIP');
   ok(/\['keep','熄屏也封顶'\]/.test(html),
      '分应用档位下拉里有「熄屏也封顶」');
 }
@@ -847,9 +843,8 @@ console.log('\n== 默认值 ==');
     const hz = (css.match(/input\[type=range\]\{[^}]*?height:\s*(\d+)px/) || [])[1];
     ok(!!hz && +hz <= 22, '滑杆热区高度收到 22px 以内', hz ? hz + 'px' : '没找到 height');
     /* 新拟物的判据不是"好不好看"，而是这几条硬约束：
-       卡片和背景同色、靠阴影塑形、不用硬描边。
-       哪天有人加回 border:1px 描边，卡片就会从"浮在板上"变成"贴了个框"。 */
-    ok(!/\.card\{[^}]*border:\s*1px/.test(css), '.card 不用硬描边（新拟物靠阴影塑形）');
+       卡片靠阴影塑形。V2 的卡片允许一条极淡的分隔描边（视觉上仍以阴影为主），
+       但阴影和亮/暗两层色必须在。 */
     ok(/box-shadow:var\(--up\)/.test(css), '卡片用 --up 双层软阴影（左上光源）');
     ok(/--lt:[\s\S]*?--sh:/.test(css), '亮/暗两层阴影色都定义了');
 
@@ -1221,12 +1216,17 @@ ok(/"webp"\)\s*\)?\s*return\s*"image\/webp"/.test(iconBody), '守护给 webp 发
   // 试的必须是 version：它是唯一不碰 sysfs、不写文件的子命令。
   ok(/!\s*strcmp\(cmd,\s*"version"\)/.test(csrc) && /printf\("socfreqd %s/.test(csrc),
      'version 子命令存在且只打印一行就返回');
+  // 判据必须是退出码。loader 的拒绝信息被 2>&1 收进 CHK，
+  // 真失败时 CHK 非空 —— 用 [ -z "$CHK" ] 判会把成败整个反过来。
+  ok(/RC=\$\?/.test(cust) && /if \[ "\$RC" != 0 \]/.test(cust),
+     '自检按退出码判成败（loader 报错进了 CHK，输出非空不代表跑起来了）',
+     (cust.match(/CHK=\$[^\n]*\n[^\n]*\n[^\n]*if[^\n]*/) || [''])[0].replace(/\s+/g, ' '));
   // 自检失败不该中止安装：跑不起来也要让用户能进 WebUI 看日志，
   // 一旦 abort 就变成"装了但完全进不去"，比现在更难查。
   // if/else/fi 整段取出后必须按 else 切开：
   // 直接拿整段去查"自检通过"，查到的是成功分支那半句，
   // 于是这个断言永远红——看着像代码坏了，其实是切错了边。
-  const ifBlock = ((cust.match(/if \[ -z "\$CHK" \][\s\S]*?\nfi/) || [])[0] || '');
+  const ifBlock = ((cust.match(/if \[ "\$RC" != 0 \][\s\S]*?\nfi/) || [])[0] || '');
   const failBlock = ifBlock.split(/\nelse\b/)[0];
   const passBlock = ifBlock.split(/\nelse\b/)[1] || '';
   ok(failBlock && !/\bexit\b|\babort_after_this/.test(failBlock),
@@ -2081,6 +2081,20 @@ const uninSrc  = fs.readFileSync(MOD0 + '/uninstall.sh', 'utf8');
      '只按三列解析的话会读到字面量 0');
   ok(govFn && /strspn\(gov,\s*"01234567"\)/.test(govFn),
      'restore_governors 跳过纯数字（权限行），不把 0 当名字写回');
+  const reloadFn = (csrcAll.match(/static int reload_if_changed[\s\S]*?\n\}/) || [''])[0];
+  ok(/prev_gov\[0\]\s*&&\s*!cfg\.governor\[0\]/.test(reloadFn)
+     && /restore_governors\(\)/.test(reloadFn),
+     '切到不干预时把调速器写回原值，而不是停手不管');
+  ok(/static int cfg_key_present/.test(csrcAll)
+     && /cfg_key_present\("CPU_GOVERNOR"\)/.test(csrcAll),
+     '空值 CPU_GOVERNOR= 能被识别（不干预）');
+  const startIdx = csrcAll.lastIndexOf('journal_restore(NODES_JOURNAL);');
+  const mainGov = csrcAll.slice(startIdx, csrcAll.indexOf('load_game_pkgs();', startIdx));
+  const govRestoreIdx = mainGov.indexOf('restore_governors();');
+  const govSnapIdx = mainGov.indexOf('snapshot_governors();');
+  ok(startIdx >= 0 && govRestoreIdx >= 0 && govSnapIdx > govRestoreIdx
+     && !/snapshot_governors\(\);[\s\S]{0,120}restore_governors\(\)/.test(mainGov),
+     '启动先恢复上次的调速器快照再取基准，不再先覆盖原值');
 
   // 两列分支写完名字后必须把权限还回去，而且还得是"还原当时的"，
   // 不是某个循环里预置的字面量。
@@ -2181,7 +2195,7 @@ console.log('\n== 分应用档位 ==');
   // 改完全局配置要把生效中的档位盖回去（施加点已从 reload_if_changed 挪到主循环，
   // 因为生效值还要叠加实时偏移，必须等本轮传感器算完）
   {
-    const body = (csrc.match(/if \(cfg_changed \|\| adapt_changed\) \{[\s\S]*?\n    \}/) || [''])[0];
+    const body = (csrc.match(/if \(cfg_changed \|\| adapt_changed(?: \|\| smart_changed)?\) \{[\s\S]*?\n    \}/) || [''])[0];
     ok(/if \(g_app_pct > 0\) set_caps\(g_app_pct,/.test(body),
        '重算块里 assign_pct 之后重新套上生效中的应用档位', body ? '' : '重算块没抠到');
     ok(body.indexOf('assign_pct') < body.indexOf('set_caps(g_app_pct'),
@@ -2274,7 +2288,8 @@ console.log('\n== 分应用档位 ==');
        /origWhen/.test(ds2) && /暂不进入深睡/.test(ds2) &&
        /暂不进入系统 Doze/.test(ds2),
        '闹钟前 30 分钟不进入，7:30 收口也让路（防止早上闹钟不响）');
-    ok(/微信、QQ、钉钉/.test(html), '睡眠页说明内置豁免默认加入、可移除');
+    ok(/IM 默认只保活/.test(html) && /不冻结/.test(html) && /加进下面的名单/.test(html),
+       '睡眠页说明 IM 默认只保活、需要时加进永久豁免');
     ok(/builtin_white\) builtin_white ;;/.test(apiSrc) &&
        /builtin_white\(\)\s*\{[\s\S]{0,600}?scripts\/builtin_white\.txt/.test(apiSrc),
        '内置豁免的中文名有后端命令（清单只读，不参与匹配）');
@@ -2403,10 +2418,6 @@ console.log('\n== 分应用档位 ==');
      '冒号判断在先：full:40 不会被当成满血');
   ok(/_mc=\$\{1%%:\*\}/.test(apiSrc) && /_mg=\$\{1#\*:\}/.test(apiSrc),
      'api.sh 的 is_mode_val 拆两段各自校验（70: / :40 也收）');
-  ok(/带 GPU 设置，学习不改/.test(apiSrc) && /index\(v, ":"\)/.test(apiSrc),
-     'modes_learn 遇到带冒号的条目直接 SKIP（只懂 CPU，重写会吞掉 GPU 段）');
-  ok(/skipd\[p\] = 1/.test(apiSrc) && /p in skipd/.test(apiSrc),
-     'advice_app 不给带 GPU 段的条目出建议（按钮点下去只会 SKIP）');
   ok(/if \(g_app_gpu > 0\) snprintf\(gmode/.test(csrc) &&
      /app_mode=%s\\napp_gpu=%s/.test(csrc),
      '状态里 app_gpu 是独立字段，空 = 跟随全局（前端不用拆 70:40）');
@@ -2588,10 +2599,10 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   {
     const s8750 = fs.readFileSync(MOD0 + '/adapt/sm8750.conf', 'utf8');
     const s8850 = fs.readFileSync(MOD0 + '/adapt/sm8850.conf', 'utf8');
-    ok(/^#match soc=SM8750$/m.test(s8750) && /^default_cpu_pct_big=66$/m.test(s8750) &&
-       /^default_cpu_pct_little=68$/m.test(s8750) && /^default_gpu_pct=50$/m.test(s8750) &&
+    ok(/^#match soc=SM8750$/m.test(s8750) && /^default_cpu_pct_big=46$/m.test(s8750) &&
+       /^default_cpu_pct_little=65$/m.test(s8750) && /^default_gpu_pct=50$/m.test(s8750) &&
        /^default_th_high=75$/m.test(s8750) && /^default_psi_gain=10$/m.test(s8750),
-       '8E 默认值在 adapt/sm8750.conf（66/68、GPU50、TH75、PSI10）');
+       '8E 默认值在 adapt/sm8750.conf（46/65、GPU50、TH75、PSI10）');
     ok(/^#match soc=SM8850$/m.test(s8850) && /^default_cpu_pct_big=64$/m.test(s8850) &&
        /^default_cpu_pct_little=69$/m.test(s8850) && /^default_gpu_pct=50$/m.test(s8850),
        '8E5 默认值在 adapt/sm8850.conf（64/69、GPU50，Prime 比 Gold 低是特性）');
@@ -2639,7 +2650,8 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
  *   "把应用名写在第一行，包名写在第二行"（白名单、候选、分应用档位都要）
  *   "获取应用图标有些也没生效，比如 com.tencent.tmgp.osgame"
  *   "分应用档位放到应用页 / 导航栏改成应用 / 首页那格删掉"
- *   "日常调速器默认为不干预，现在是默认不选择"
+ *   "日常调速器默认为 conservative"
+ *   "SM8750 预设默认大核 46%、小核 65%"
  * 外加一条自己加的：action.sh 那句"大概 15 秒就退出"必须留下事后查得到的证据。
  *
  * 这里钉的是**接线**（谁调谁、键对不对、位置在哪）；
@@ -2655,12 +2667,12 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   // 注释会干扰"代码里有没有这句"的判断，先剥掉再比
   const uiCode = html.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
 
-  /* ── 日常调速器：默认必须显示成"不干预" ───────────────────── */
-  // 老配置里那对字面双引号是三处不一致的根源：守护认不出引号（等价于空 = 不干预），
+  /* ── 日常调速器：默认必须是 conservative ───────────────────── */
+  // 老配置里那对字面双引号是三处不一致的根源：守护认不出引号（等价于空），
   // WebUI 的下拉框也匹配不到 option，于是显示成"谁都没选"，用户以为默认值丢了。
   const govM = conf.match(/^CPU_GOVERNOR=([^\n]*)$/m);
   ok(govM !== null, '打包的 socfreq.conf 里有 CPU_GOVERNOR 这一行');
-  ok(govM && govM[1] === '', '出厂值是裸的空（不再写成 ""）', '实到 [' + (govM && govM[1]) + ']');
+  ok(govM && govM[1] === 'conservative', '出厂默认是 conservative', '实到 [' + (govM && govM[1]) + ']');
   {
     const cr = (apiSrc.match(/conf_read\(\)\s*\{[\s\S]*?\n\}/) || [''])[0];
     ok((cr.match(/\bsed\b/g) || []).length >= 3,
@@ -2673,7 +2685,7 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   {
     const gv = (uiCode.match(/const gv = [\s\S]*?pv\('governor'\);/) || [''])[0];
     ok(/GOVERNOR_OPTS\.some/.test(gv) && /: ''/.test(gv),
-       '下拉框拿到认不出的值时回落"不干预"（和守护的口径一致）', gv.slice(0, 60));
+       '下拉框拿到认不出的值时回落"不干预"（和守护写空的口径一致）', gv.slice(0, 60));
   }
   {
     /* 配置页一进来要读完所有键。逐键起 sed 是两百多个进程、实测 0.72 秒，
@@ -2691,7 +2703,7 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   ok(/data-p="game"[\s\S]{0,420}>应用</.test(html), '导航栏这一项叫"应用"（不再只说游戏）');
   ok(!/data-p="game"[\s\S]{0,420}>游戏</.test(html), '没有还挂着"游戏"的导航项');
   {
-    const g = html.indexOf('id="p-game"'), c2 = html.indexOf('id="p-conf"');
+    const g = html.indexOf('id="p-game"'), c2 = html.indexOf('id="p-cap"');
     const rows = html.indexOf('id="mode-rows"'), gl = html.indexOf('id="glist"');
     ok(g > 0 && c2 > 0 && gl > 0, '三个锚点都找得到（页面结构被改了要同步这几条）');
     ok(rows > g && rows > gl,
@@ -2710,10 +2722,10 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
     ok(pg < chgCard && chgCard < gamePg, '三张功能卡确实在功能页里（不是留在配置页）',
        'p-func@' + pg + ' 卡@' + chgCard + ' p-game@' + gamePg);
     ok(chgCard > confPg, '配置页里已经没有这些功能卡');
-    ok(/b\.dataset\.p === 'conf' \|\| b\.dataset\.p === 'func'\) loadConf\(\)/.test(html),
-       '切到功能页也会 loadConf 填值（不填就是滑杆全停在 HTML 里写死的假数）');
-    ok((html.match(/<button[^>]*onclick="saveAll\(\)"/g) || []).length === 2,
-       '配置页和功能页各有一个「保存并生效」（共用同一个 saveAll）');
+    ok(/loadConf\(\)/.test((html.match(/function go\(p, opts\)\{[\s\S]*?\n\}/) || [''])[0]),
+       '切到带控件的页面会 loadConf 填值（不填就是滑杆全停在 HTML 里写死的假数）');
+    ok((html.match(/<button[^>]*onclick="saveAll\(\)"/g) || []).length >= 2,
+       'CPU/GPU、智能策略等页面都有「保存并生效」（共用同一个 saveAll）');
     const saveFn = (html.match(/let saveBusy[\s\S]*?async function saveAll\(\)\{[\s\S]*?\n\}/) || [''])[0];
     ok(/if\(saveBusy\) return/.test(saveFn) && /保存中…/.test(saveFn)
        && /b\.disabled = true/.test(saveFn),
@@ -2733,11 +2745,11 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   {
     /* 锚点要带上 tabbar 那句：分段按钮内部也有 b.onclick = ()=>{ ，
        只按后半截匹配会先抓到控件那块，报"没刷档位"的假红。 */
-    const tab = (uiCode.match(/querySelectorAll\('\.tabbar button'\)[\s\S]*?\n  \};/) || [''])[0];
+    const tab = (html.match(/function go\(p, opts\)\{[\s\S]*?\n\}/) || [''])[0];
     ok(/'game'\)\{[^}]*loadModes\(\)/.test(tab),
        '切到应用页会刷分应用档位（卡片挪了位置，加载也得跟着挪）');
-    ok(!/'conf'\)\{[^}]*loadModes/.test(tab),
-       '配置页不再顺手刷档位（两处入口迟早只改一处）');
+    ok(!/'cap'\)\{[^}]*loadModes/.test(tab),
+       'CPU/GPU 页不再顺手刷档位（两处入口迟早只改一处）');
     /* 切页必须先画再发 root 调用：管理器的 exec 是同步的，
        紧跟着发会把这一帧一起卡住，看起来就是"点了没反应"。 */
     const cls = tab.indexOf("classList.add('on')");
@@ -2933,80 +2945,6 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
 }
 
 
-/* ---- 智能学习：守护采样 ↔ api.sh 判据 ↔ 页面渲染 ---- */
-// 这条链上三份文件只靠"列数、字段名、路径"对接，任何一处改名都不会有人报错，
-// 页面只是安静地空白。所以这里把三端拼起来比一次。
-{
-  const learnSrc = fs.readFileSync(path.join(MODDIR, 'src/learn.c'), "utf8");  const bs = String.fromCharCode(92);
-  const uiAdv = (html.match(/\/\* ── 智能建议 ── \*\/[\s\S]*?\/\* ── 游戏名单 ── \*\//) || [''])[0];
-
-  const bands = Number((learnSrc.match(/#define\s+LEARN_BANDS\s+(\d+)/) || [, '0'])[1]);
-  ok(bands === 24 && apiSrc.includes('for (i = 0; i < 24; i++) bd[t, i]'),
-     '采样桶数两端一致（守护写 24 个桶，判据按 24 个桶读）', 'learn.c=' + bands);
-  // 一行的列数 = 目录+档+采样+顶帽+被压 + 24 个桶 + 天位图 + 帽%
-  ok(apiSrc.includes('NF >= 31') && bands === 24,
-     '半截行的判据写的是列数（31），不是"这行有没有内容"');
-  ok(learnSrc.includes('held_ms') && apiSrc.includes('$30 + 0') &&
-     apiSrc.includes('$31 + 0'),
-     '天位图在第 30 列、采样帽在第 31 列：守护按这个顺序写、判据按这两列读');
-  ok(learnSrc.includes('scaling_max_freq') && apiSrc.includes('held >= 50'),
-     '上限被厂商压在我们的帽之下时不给升降（那份分布量的是它的帽，不是我们的）');
-
-  const learnFileC = (csrc.match(/#define\s+LEARN_FILE\s+SF_DATADIR "([^"]*)"/) || [, ''])[1];
-  const learnFileSh = (apiSrc.match(/^LEARN="([^"]*)"/m) || [, ''])[1];
-  ok(/learn\.tsv$/.test(learnFileC) && learnFileSh.includes('learn.tsv'),
-     '守护和 api 指的是同一份样本文件', 'c=' + learnFileC + ' sh=' + learnFileSh);
-
-  ok(/cfg\.learn = 1/.test(csrc) && /_lv=0 ;; \*\) _lv=1/.test(apiSrc),
-     '样本文件里没有 LEARN 时，两端都按"开"处理（升级装机的 conf 就是没有这一行）');
-  ok(/lm\.checked = c\.LEARN !== '0'/.test(html),
-     '页面的开关同样按"缺省即开"显示');
-  ok(/^LEARN=1$/m.test(conf), '出厂配置里明确写了 LEARN=1');
-  ok(/\bKEYS='[^']*LEARN/.test(apiSrc) && /LEARN\)\s+is_switch/.test(apiSrc),
-     'LEARN 在可写键清单里，且取值只认 0/1');
-
-  // 记录里有的字段，页面读的必须都在；反过来页面不能凭空发明字段。
-  // 两层建议（全局 advice / 按应用 advice_app）共用同一个渲染入口，
-  // 所以"打得出来的字段"是两条 printf 的并集。
-  const recLine = (apiSrc.match(/printf "tier=[^"]*"/) || [''])[0];
-  const recAppLine = (apiSrc.match(/printf "pkg=[^"]*"/) || [''])[0];
-  const emitted = (recLine + ' ' + recAppLine)
-    .split(bs + "n").map(x => ((x.match(/([a-z0-9_]+)=/) || [])[1] || ""))
-    .filter(Boolean);
-  const read = (uiAdv.match(/\br\.[a-z0-9_]+/g) || []).map(s => s.slice(2));
-  const uniqRead = Array.from(new Set(read)).filter(k => k !== 'length');
-  ok(emitted.length >= 8 && uniqRead.every(k => emitted.includes(k)),
-     '页面读的字段全在 api 打出的字段里', '出=' + emitted.join(',') + ' 读=' + uniqRead.join(','));
-  ok(apiSrc.includes('printf "---REC---\\n"') && uiAdv.includes("split('---REC---')"),
-     '记录分隔标记两端同名（---REC---）');
-  ok(/api\('advice'\)/.test(uiAdv) && /api advice \|/.test(act),
-     '页面和音量键菜单读的是同一个 advice 子命令');
-
-  // 阈值只许有一份：页面里不该出现判据数字
-  ok(!/>= ?30|pin >= |p90/.test(uiAdv),
-     '页面不自己判升降（判据只在 api.sh 一份）');
-  ok(/applyAdvice[\s\S]*?api\('conf_set', r\.key, r\.to\)/.test(uiAdv),
-     '应用建议走的是既有 conf_set，不自己写 conf');
-
-  ok(/learn_tick\(!strcmp\(g_state, "normal"\)/.test(csrc),
-     '只在常态封顶生效时才累计样本（熄屏/满血/游戏时段不算）');
-  ok(/learn_sample_state\(st, &d, dt, hw\[i\], eff\)/.test(learnSrc)
-     && /if \(eligible\) \{\s*\n\s*if \(got && !cap_changed\) learn_put\(&st->a, &d\);/.test(learnSrc),
-     '分布本身也只采封顶生效的那段（增量先攒进 delta，再由 eligible 决定进不进桶）');
-  ok(/learn_flush\(\);/.test(csrc.split('static void cleanup')[1] || ''),
-     '守护退出前落一次盘');
-  ok(/learn_check_reset\(\);[\s\S]{0,160}?if \(g_n && g_path\[0\]/.test(learnSrc),
-     '落盘前先认"文件已删"：清零后不能被退出时那一次写盘复活');
-  // 真机上量到的一条：文件"从来没有过"和"写过又被删"必须分得开，
-  // 混在一起的话每一拍都把刚攒的累计连同计时基准抹掉，样本一次也落不了盘。
-  ok(/if \(!access\(g_path, F_OK\)\) g_seen_file = 1;/.test(learnSrc) &&
-     /else if \(g_seen_file && g_n\)/.test(learnSrc),
-     '首装那台机"还没有样本文件"不当成清零');
-  ok(apiSrc.includes('rm -f "$LEARN"') && uiAdv.includes("api('learn_reset')"),
-     '页面上的清零删的就是那份样本');
-}
-
-
 /* ---- 声明图标与体积预算 ---- */
 {
   // 真机取包量到的：manifest 声明的桌面图标是 88KB 的 1024px webp，
@@ -3025,24 +2963,6 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   ok(apiSrc.includes('_out=$ICON_DIR/$_pkg.$_mt.$ICON_ALGO.b64') &&
      new RegExp("^ICON_ALGO=[0-9]+$", 'm').test(apiSrc),
      '图标缓存键里带取图算法版本（改规则时老缓存自然失效）');
-}
-
-
-/* ---- GPU 进智能学习：三端同时认第 5 档 ---- */
-{
-  const learnSrc = fs.readFileSync(path.join(MODDIR, 'src/learn.c'), 'utf8');
-  // 少任何一端的表现都是静默：要么 GPU 那一行根本不出现，
-  // 要么点了「应用」什么都没改。所以三端一起钉。
-  ok(learnSrc.includes('gpu_clock_stats') &&
-     learnSrc.includes('gpu_available_frequencies'),
-     '采样侧读 KGSL 的每档驻留表（trans_stat 在 KGSL 上是冻的，采了等于没采）');
-  ok(csrc.includes('GPU_STATS_FILE') && /lt\[ln\] = 4/.test(csrc),
-     '守护把 GPU 追加成第 5 档，且没有那张表就不追加');
-  ok(apiSrc.includes('CPU_PCT_LITTLE GPU_PCT') && apiSrc.includes('c[4] = c4') &&
-     apiSrc.includes('t > 4'),
-     '判据侧认第 5 档，键名是 GPU_PCT');
-  ok(/GPU_PCT[^\n]*gpu_pct/.test(html),
-     '页面把 GPU_PCT 对到那颗 id 叫 gpu_pct 的滑杆（两边不同名，必须显式映射）');
 }
 
 
@@ -3286,8 +3206,6 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /gpu_target_for\(agpu > 0 \? agpu : cfg\.gpu_pct, dlt\)/.test(csrc) &&
      !/printf\("gpu_cap=%ld\\n", g_gpu\.normal\)/.test(csrc),
      'export 的 gpu_cap 按 status 的 app_gpu/dlt 重算生效值（独立进程里 active 恒为 0）');
-  ok(/lc\[ln\] = g_gpu\.active > 0 \? g_gpu\.active : g_gpu\.normal;/.test(csrc),
-     '学习采的是 GPU 生效值，不是静态配置值');
   /* 游戏态被实时偏移打断的 P0：apply_normal 会把 g_state 改回 normal、
      收回节点写权限，而游戏分支同一包名不会重新 unlock_game，
      于是整个游戏期间被封顶且厂商调度接不回去。 */
@@ -3298,18 +3216,13 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      '交权态（game/full）下重算只进内存，不抢回节点');
   ok((html.match(/pairs\.push\(\['(PSI_ADAPT|TH_CAP|CHG_UNCAP|CHG_PCT|TH_HIGH|TH_LOW|TH_MAX|PSI_GAIN)'/g) || []).length === 8,
      '页面保存清单里 8 个偏移控件都在（少一个就是拨了没反应）');
-  ok(/LEARN', document\.getElementById\('learn'\)/.test(html),
-     '智能学习开关在保存清单里（此前只渲染不保存，拨了按保存也不写盘）');
-  ok(/int adapt_clean = !av\.delta && !av\.chg_on;/.test(csrc) &&
-     /learn_tick\(!strcmp\(g_state, "normal"\) && adapt_clean/.test(csrc),
-     '学习采样避开偏移生效时段（插电/温控/PSI 期间帽不是设定值那道）');
   /* 生效封顶只有一处施加，而且必须在读完传感器之后。
      以前 reload_if_changed 自己就 assign_pct + apply_normal，用的是上一拍的偏移
      快照 —— 真机上表现为"改一次配置先按旧地板写一遍节点，下一拍才纠正"。 */
   ok(/static int reload_if_changed\(uint64_t seen\)/.test(csrc) &&
      !/static int reload_if_changed[\s\S]{0,400}apply_normal/.test(csrc),
      'reload_if_changed 只吸收配置，不再自己施加封顶');
-  ok(/int cfg_changed = reload_if_changed\(seen\);[\s\S]{0,4000}if \(cfg_changed \|\| adapt_changed\) \{\s*\n\s*assign_pct/.test(csrc),
+  ok(/int cfg_changed = reload_if_changed\(seen\);[\s\S]{0,4000}if \(cfg_changed \|\| adapt_changed(?: \|\| smart_changed)?\) \{\s*\n\s*assign_pct/.test(csrc),
      '主循环里：偏移算完之后才统一重算并施加（顺序错了就会写一遍旧地板）');
   ok(/#from adapt\//.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')),
      '装机脚本写的来源标记和守护读的文件是同一份（撤表判据认它）');
@@ -3341,206 +3254,6 @@ console.log('\n== restart 不吊住调用者 ==');
      '看门狗用 nohup 后台拉起（这条必须是前台实现，靠调用者 detach）');
 }
 
-/* ── 按应用学习：两层样本、手填优先、只出数字 ─────────────────
-   这一层最容易出的不是算错，而是两层互相喂数据、或者学习把用户显式填的
-   值盖掉。下面这几条钉的就是这两件事。 */
-{
-  const lc = fs.readFileSync(MOD0 + '/src/learn.c', 'utf8');
-
-  ok(/#define LEARN_APP_FILE SF_DATADIR "\/learn_app\.tsv"/.test(csrc)
-     && /learn_init\(LEARN_FILE, LEARN_APP_FILE\)/.test(csrc),
-     '守护按两份样本文件走：路径定义 + 一起交给 learn_init');
-  ok(/LEARN_APP="\$DATA\/learn_app\.tsv"/.test(apiSrc),
-     'api.sh 里那份 learn_app.tsv 的路径和守护一致');
-
-  /* 默认关。这条判据和别的开关是反的（只认显式的 1），所以两处都要对上：
-     老配置里没有这一行时，页面显示"开"而守护其实没采是最坏的组合。 */
-  ok(/cfg\.learn_app = 0;/.test(csrc) && /LEARN_APP=0/.test(conf),
-     '按应用学习默认关：守护缺省 0，包内配置也写着 0');
-  ok(/cfg_get\("LEARN_APP", v\) == 0\)\s*\n\s*cfg\.learn_app = \(!strcmp\(v, "1"\)/.test(csrc),
-     'LEARN_APP 只认显式的 1（缺行、写 2、写 true 之外的东西都不算开）');
-  ok(/getElementById\('learn_app'\)\.checked = c\.LEARN_APP === '1'/.test(html),
-     '页面也按"缺行 = 关"显示');
-
-  /* 两层归属：专属帽只记应用行；全局帽下的同一份分布两层都记 */
-  ok(/int app_cap_active = g_app_capped\[0\] != 0;/.test(csrc)
-     && /&& !app_cap_active,/.test(csrc),
-     '调用处保证戴应用帽时全局那层不再累计（和开没开按应用学习无关）');
-  ok(/if \(own_cap\) eligible = 0;/.test(lc),
-     'learn.c 自己也兜一次：专属帽不进全局行，不靠调用处自觉');
-  ok(/int feed_app = app && \(own_cap \|\| eligible\);/.test(lc),
-     '全局帽下两层同时采样，专属帽下只进应用行');
-  ok(/\(want_pct > 0 \|\| want_gpu > 0\) && fg\[0\]/.test(csrc),
-     'GPU-only 档（:40）也算应用上下文：那段 GPU 驻留不能算进全局样本');
-  ok(/lpkg = g_app_capped/.test(csrc) && /lown = 1/.test(csrc)
-     && /else if \(g_fg_global\[0\]\) lpkg = g_fg_global/.test(csrc),
-     '调用处的归属有两个来源：专属帽优先，否则是全局帽下的前台包');
-  ok(/static char g_fg_global\[PKG_LEN\]/.test(csrc)
-     && /if \(fg\[0\]\) snprintf\(g_fg_global/.test(csrc),
-     '全局帽稳态巡检结束时才写前台归属（游戏宽限/满血/专属档位那几支提前 continue）');
-  ok(/as->a\.cap_pct != p/.test(lc) && /memset\(&as->a, 0, sizeof as->a\)/.test(lc)
-     && /if \(got && !app_changed\)/.test(lc),
-     '应用行的帽换了就从零重攒，且换帽那一拍不进样本（两道帽的分布混在一起，建议会沿旧帽一路加码）');
-
-  /* 帽的凭据必须是"配置意图"。用生效值会在插拔电源（充电地板 100%）、
-     PSI/温控抖动、切到带档位的应用时反复换帽，把攒了几小时的分布清零——
-     真机上表现就是"CPU 学习不见了"，而 GPU 那行还在。 */
-  ok(/int app_cap_active = g_app_capped\[0\] != 0;/.test(csrc)
-     && /int app_layer = cfg\.learn_app && app_cap_active;/.test(csrc)
-     && /lp\[ln\] = \(app_layer && g_app_pct > 0\) \? g_app_pct : cfg\.pct\[g_pol\[i\]\.tier\]/.test(csrc)
-     && /lp\[ln\] = \(app_layer && g_app_gpu > 0\) \? g_app_gpu : cfg\.gpu_pct/.test(csrc),
-     '样本里的帽记配置意图：插电/抖动不再清空样本；应用帽只在开了按应用学习时写进该应用');
-  ok(/learn_tick\(!strcmp\(g_state, "normal"\) && adapt_clean && !app_cap_active,/.test(csrc),
-     '任意应用专属帽生效时全局行都不采（和开没开按应用学习无关）');
-  ok(/if \(!own_cap && p > 0 && st->a\.cap_pct != p\)/.test(lc),
-     '戴应用帽的那一拍不许改写或清零全局行（不戴时允许纠正错帽，但不累计）');
-  const appStruct = (lc.match(/struct app_stat \{[\s\S]*?\n\}/) || [''])[0];
-  ok(appStruct && !/prev/.test(appStruct),
-     '按应用行不存基线：驻留表一个目录只有一份读数，各存一份会把别的包算到这个包头上');
-  ok(/static struct app_stat \*learn_app_slot\(const char \*pkg, int tier\)/.test(lc),
-     '按应用行按 (包名, 档) 找，档越界直接不要');
-
-  /* 字段数：判据按 31 列判，两份文件必须同构 */
-  ok(/#define LEARN_TAIL \(3 \+ LEARN_BANDS \+ 1 \+ 1\)/.test(lc)
-     && /#define LEARN_BANDS\s+24/.test(lc),
-     'learn.c 的行长 = 采样/顶帽/被压 + 24 桶 + 天位图 + 配置帽 = 29（加键和档共 31 列）');
-  const nfChecks = (apiSrc.match(/NF < 31/g) || []).length;
-  ok(nfChecks >= 2,
-     '全局和按应用两条路都按 31 列判半截行（一处放宽就是拿坏数据出建议）', '找到 ' + nfChecks + ' 处');
-
-  /* 天数：从首次采样起每满 24 小时算一天，不按 0 点（更不是 UTC 0 点）切。
-     旧口径在国内早上 8 点翻篇，新装 9 小时就可能显示 2 天。 */
-  ok(/long learn_day_index\(long since, long now\)/.test(lc) &&
-     /\(d \/ 86400\) % 28/.test(lc) &&
-     !/time\(NULL\) \/ 86400/.test(lc),
-     '天数按 24 小时切块（旧口径 time/86400 已移除）');
-  ok(/snprintf\(g_since_path, sizeof g_since_path, "%s\.since", path\)/.test(lc) &&
-     /learn_since_save\(\)/.test(lc) && /learn_since_load\(\)/.test(lc),
-     '采样起点持久化到 learn.tsv.since（守护重启不重置天数）');
-  ok(/!g_since && \(g_n \|\| g_nas\)[\s\S]{0,300}?sampled_ms > 0 \? 1u : 0u/.test(lc)
-     && /learn_write_rows\(g_path, 0\)/.test(lc),
-     '旧样本没有起点文件时重算天数：有分钟的行至少记第 1 天，并立刻写回');
-
-  /* 旧格式升级：两份一起清、留标记、有数据后撤标记；关学习时标记也要撤 */
-  ok(/learn_format\(path\) == 1 \|\| \(apath && apath\[0\] && learn_format\(apath\) == 1\)/.test(lc)
-     && /fopen\(g_reset_mark, "w"\)/.test(lc),
-     'v1 样本没有"帽是多少"这一列：升级时两份一起清空并留 v2reset 标记');
-  ok(/if \(wrote && g_reset_mark\[0\]\) unlink\(g_reset_mark\)/.test(lc),
-     '新样本真正落盘后才撤标记（提前撤会让页面以为已经在攒）');
-  ok(/g_since <= 0\s*\n\s*&& \(!g_reset_mark\[0\] \|\| access\(g_reset_mark, F_OK\) != 0\)/.test(lc)
-     && /if \(g_reset_mark\[0\]\) unlink\(g_reset_mark\)/.test(lc),
-     '关掉学习时刚留下的重置标记也要撤（累计是空的，但标记还在），标记不在时别每轮 unlink');
-  ok(/if \(apath && apath\[0\]\) snprintf\(g_apath[\s\S]{0,300}?learn_format\(path\)/.test(lc),
-     'v1 重置分支返回前已经记下按应用路径（否则这一轮只写全局样本）');
-
-  /* 手填优先 + 只出数字 */
-  const mlearn = (apiSrc.match(/modes_learn\(\) \{[\s\S]*?\n\}/) || [''])[0];
-  ok(/SKIP .*手填/.test(mlearn) && /#\[ \\t\]\*learn/.test(mlearn),
-     'modes_learn 认出行尾没有 #learn 就拒绝改（手填的永远压过学出来的）');
-  ok(/case "\$_v" in ''\|\*\[!0-9\]\*\) die "BAD_MODE"/.test(mlearn),
-     '学习只能写数字：full（整个交还系统）这个动作不给自动通道');
-  ok(/char \*hash = strchr\(val, '#'\);/.test(csrc),
-     '守护解析值时先截掉 #learn 注释：截不掉就是整行被当坏值丢掉，档位静默不生效');
-  ok(/&& r\.manual !== '1'/.test(html) && /r\.manual === '1'/.test(html),
-     '按应用建议按字符串比 manual：parse() 交回来的 "0" 在 JS 里是真值，'
-     + '直接 if(r.manual) 会把学习条目全当得手填、一条都发不出去');
-  ok(/await api\('modes_learn', r\.pkg, r\.to\)/.test(html),
-     '按应用的建议走 modes_learn，不是 conf_set');
-
-  /* 第二段的判据：没设档位的包拿全局四簇平均当基准；full 不学；列表只留有建议的 */
-  ok(/base = \(nc > 0\) \? int\(cs \/ nc \+ 0\.5\) : 0/.test(apiSrc),
-     '没设档位的包按全局四簇平均当基准（四舍五入，缺档位的那几项不算）');
-  ok(/bsrc = ismode \? "mode" : "global"/.test(apiSrc)
-     && /base=%s/.test(apiSrc) && /days, why, bsrc/.test(apiSrc),
-     '每条记录都带基准来源（档位 / 全局），页面才能挂「全局」标；'
-     + '只在没档位时才多打一行，按行抽取的门就看不见这个字段');
-  ok(/v == "full" \|\| v == "FULL"/.test(apiSrc),
-     'full 的包整条跳过：满血没有帽，学它也没有可改的值');
-  ok(/if \(!ismode && adv == "hold"\) continue/.test(apiSrc),
-     '没档位的包只在真有 up/down 时列出，样本不够的 hold 不刷列表');
-  ok(/else if\(r\.base === 'global'\)/.test(html) && /textContent = '全局'/.test(html),
-     '页面给没档位的建议挂「全局」标（cur 不是已有的专属档位）');
-
-  /* 清零：两层数据 + 学习写回的档位一起撤，手填的一条不动 */
-  const lreset = (apiSrc.match(/cmd_learn_reset\(\) \{[\s\S]*?\n\}/) || [''])[0];
-  ok(/rm -f "\$LEARN" "\$LEARN_APP" "\$LEARN\.since"/.test(lreset)
-     && /grep -v '#\[ \\t\]\*learn'/.test(lreset),
-     '清零删两份样本和计时起点，并且只撤带 #learn 标记的档位行');
-  ok(/OK learn_reset modes=%s/.test(lreset),
-     '回执说清撤了几条学习档位（说 0 也是信息，静默不响用户不知道改了什么）');
-
-  /* 列表来源标记必须被前端剥掉再当值用 */
-  ok(/function splitMode\(r\)/.test(html) && /v\.replace\(\/\\s\*learn\$\/, ''\)/.test(html),
-     'modes_list 的 learn 词尾在渲染前剥掉：不然下拉框的当前值是 "75 learn"，认不出来会回落成第一项');
-  ok(/textContent = '学出来'/.test(html) && /tag\.onclick = \(\)=>setMode/.test(html),
-     '学习写回的档位标出来源，点一下夺回成手填');
-
-  /* 门槛不能被默认分支的 1..100 管着 */
-  ok(/LEARN_APP_MIN\)\s+\[ "\$_v" -ge 5 \] && \[ "\$_v" -le 600 \]/.test(apiSrc)
-     && /LEARN_APP_DAY\)\s+\[ "\$_v" -ge 1 \] && \[ "\$_v" -le 28 \]/.test(apiSrc),
-     '两个门槛都有显式区间（分钟能到 600，掉进默认的 1..100 就是填不进去）');
-  ['LEARN_APP', 'LEARN_APP_MIN', 'LEARN_APP_DAY'].forEach(k => {
-    ok(new RegExp("KEYS='[^']*\\b" + k + "\\b").test(apiSrc), `KEYS 名单里有 ${k}`);
-    ok(conf.includes(k + '='), `socfreq.conf 里有 ${k}`);
-  });
-  ok(/pairs\.push\(\['LEARN_APP_MIN'/.test(html) && /pairs\.push\(\['LEARN_APP_DAY'/.test(html),
-     '保存时把两个门槛一起发出去（只发开关的话，门槛改了页面显示新值、后端还是旧的）');
-  ok(/pkg_kv learned_app /.test(apiSrc),
-     '导出的适配包报一句有没有按应用样本，否则用户发来的包看不出这层在不在跑');
-  ok(/pkg_sec '守护运行状态（run\/status）'/.test(apiSrc) && /cat "\$STATUS"/.test(apiSrc),
-     '诊断包带运行状态：偏移/温度/亮屏/充电是"为什么没采样、为什么封顶偏低"的证据');
-
-  /* v2：24 桶、按配置帽过滤、学习偏好。这些是这版算法的核心约束，
-     任何一条被改回去，建议都会回到"只降不升"或"沿着旧帽一路加码"。 */
-  ok(/elif \[ "\$_k" = LEARN_MODE \]; then\s*\n\s*case "\$_v" in eco\|balanced\|performance\)/.test(apiSrc)
-     && /KEYS='[^']*\bLEARN_MODE\b/.test(apiSrc),
-     'LEARN_MODE 只接受三档（缺省/写错都回 balanced，不接受数字）');
-  ok(/LEARN_MODE=balanced/.test(conf), 'socfreq.conf 里的学习偏好默认是均衡');
-  ok(/p-learn-mode/.test(html) && /MODE_TEXT = \{ eco: '省电', balanced: '均衡', performance: '性能' \}/.test(html),
-     '功能页有学习偏好选项，值用 eco/balanced/performance（和后端同一套词）');
-  ok(/pairs\.push\(\['LEARN_MODE', document\.getElementById\('p-learn-mode'\)\.value \|\| 'balanced'\]\)/.test(html),
-     '保存时把学习偏好一起发出去（只显示不发等于没存）');
-
-  const adv = (apiSrc.match(/cmd_advice\(\) \{[\s\S]*?\n\}/) || [''])[0];
-  ok(/printf 'learn=%s\\nmode=%s\\n'/.test(adv) && /printf 'reset=%s\\n'/.test(adv),
-     'advice 回报学习开关、偏好和旧格式重置标记');
-  ok(/_learn_gate\(\) \{/.test(apiSrc) && /printf 'gate=%s\\n'/.test(adv)
-     && /echo screen/.test(apiSrc) && /echo chg/.test(apiSrc)
-     && /echo adapt/.test(apiSrc) && /echo full/.test(apiSrc),
-     'advice 回报"这一拍为什么不采"（暂停/熄屏/插电/偏移/满血），'
-     + '0 天时页面才有话可说');
-  ok(/const GATE_TEXT = \{/.test(html) && /GATE_TEXT\[meta\.gate\]/.test(html)
-     && /还没有攒到可判断的样本/.test(html),
-     '页面把 gate 翻成人话；0 天不再显示"已学到 0 天"');
-  ok(/\$31 \+ 0\) != cur/.test(adv),
-     '全局建议只认当前这道配置帽下采的样本（旧帽的行即使还在也不参与）');
-  ok(/capv != want/.test(apiSrc) && /capbin = int\(c \* 24 \/ 100\)/.test(apiSrc),
-     '按应用建议也只认当前这道帽的样本（没档位时按全局那一档的帽），贴帽两桶跟着这道帽走');
-  ok(/capbin = int\(cur \* 24 \/ 100\)/.test(adv) && /bd\[t, capbin\] \+ bd\[t, capbin - 1\]/.test(adv)
-     && /qval\(t, 0\.99/.test(adv) && /qval\(t, 0\.90/.test(adv),
-     '贴帽两桶按当前帽所在桶算（不能取绝对 22/23：65% 帽下那两桶永远是空的），'
-     + '分位数用 24 桶插值算 p90/p99');
-  ok(/nearcap = \(tot > 0 && p99 >= cur - 100 \/ 24\)/.test(adv)
-     && /pressure = \(pin >= 10 \|\| top2 >= 25\)/.test(adv),
-     '放宽的硬条件：p99 贴帽 且（顶帽≥10% 或贴帽两桶≥25%）');
-  ok(/upmin = 60/.test(adv) && /updays = \(mode == "eco" \? 3 : \(mode == "performance" \? 1 : 2\)\)/.test(adv),
-     '放宽要 2 天/60 分钟（省电 3 天、性能 1 天），不是凭一拍就动');
-  ok(/if \(mode == "eco" && p99 <= cur - 25 && mins >= 180 && days >= 7\)/.test(adv),
-     '大核只有省电模式才下调，而且要 7 天/180 分钟、p99 离帽 25 个点');
-  ok(/大核是爆发型负载，均衡\/性能模式不自动下调/.test(adv),
-     '均衡/性能下大核不降时，原因要说清且指向省电模式');
-  ok(/now - mtsv < 7 \* 86400/.test(adv) && /7 天内刚往/.test(adv),
-     '反向改动有 7 天冷却（刚上调过不立刻建议下调，反之亦然）');
-  ok(/days >= 3/.test(apiSrc) && /按应用要 3 天/.test(apiSrc),
-     '按应用的放宽门槛固定 3 天（不受 LEARN_MODE 影响）');
-
-  ok(/const ev = document\.createElement\('div'\);[\s\S]{0,120}?adv-ev/.test(html)
-     && /贴帽两桶/.test(html) && /p99/.test(html),
-     '建议行下面带证据行（顶帽/贴帽两桶/p99/采样），用户能自己核');
-  ok(/学习偏好：.*MODE_TEXT/.test(html),
-     '建议卡片显示当前学习偏好，不是只存在配置里');
-}
-
 /* ── 深度睡眠：状态机、对称还原、榜单与页面接线 ─────────────────── */
 {
   const dsPath = MOD0 + '/scripts/deep_sleep.sh';
@@ -3565,8 +3278,12 @@ console.log('\n== restart 不吊住调用者 ==');
      && /\/proc\/mounts/.test(ds) && /cgroup\.freeze/.test(ds) && /kill -STOP/.test(ds),
      '冻结后端按 v1 freezer → v2 cgroup.freeze → SIGSTOP 依次降级');
   ok(/ds_freeze_build_queue\(\)[\s\S]{0,1400}pm list packages -3/.test(ds)
-     && /oom_score_adj/.test(ds) && /\[ "\$adj" -ge 200 \]/.test(ds),
-     '只冻第三方包、只冻缓存/后台进程（adj >= 200），前台和可见应用不动');
+     && /oom_score_adj/.test(ds) && /oom\[p\] >= 200/.test(ds)
+     && /ps -A -o pid=,args=/.test(ds),
+     '只冻第三方包、只冻缓存/后台进程（adj >= 200），一次扫描只起固定几个子进程');
+  ok(/账本可能漏掉后来进组的子进程/.test(ds)
+     && /cgroup\.procs[\s\S]{0,400}rmdir/.test(ds),
+     '解冻按组内实际 PID 全部搬回根组再删组');
   ok(/ds_freeze_add_skip/.test(ds) && /default_input_method/.test(ds)
      && /enabled_accessibility_services/.test(ds) && /always_on_vpn_app/.test(ds)
      && /app_modes\.conf/.test(ds) && /com\.coloros\.\*/.test(ds)
@@ -3587,6 +3304,40 @@ console.log('\n== restart 不吊住调用者 ==');
      '7:30 一次性 Doze：cmd 优先、dumpsys 兜底、失败不重试');
   ok(/DS_DOZE_RETRY[\s\S]{0,800}ds_alarm_soon[\s\S]{0,200}暂不进入系统 Doze/.test(ds),
      'Doze 收口同样让路闹钟');
+  /* 深睡：冻结 + 唤醒锁；nice=/push= 是进程级策略，深睡不碰 CPU 频率/调度。 */
+  ok(/DS_NICE=\$\(ds_conf_list nice\)/.test(ds) && /DS_PUSH=\$\(ds_conf_list push\)/.test(ds)
+     && /nice=包名/.test(ds) && /push=包名\[:进程\]/.test(ds),
+     '配置支持 nice=/push= 列表');
+  ok(/ds_push_match_proc\(\)/.test(ds) && /ds_push_match_proc "\$cmd" && continue/.test(ds)
+     && /ds_pkg_in_push "\$pkg" && return 0/.test(ds),
+     'push= 按进程放行；同包其它进程仍冻结');
+  ok(/cmd appops get "\$1" WAKE_LOCK 2>\/dev\/null < \/dev\/null/.test(ds)
+     && /cmd appops set "\$pkg" WAKE_LOCK ignore[^\n]*< \/dev\/null/.test(ds)
+     && /cmd appops set "\$pkg" WAKE_LOCK "\$old"[^\n]*< \/dev\/null/.test(ds)
+     && /DS_OPS_LEDGER/.test(ds) && /ds_ops_restore_all/.test(ds),
+     'appops 读写都断开 stdin（while read < 账本时 cmd 继承 fd 会事务失败）');
+  ok(/ds_ops_restore_all[\s\S]{0,160}ds_freeze_thaw_all/.test(ds),
+     '恢复顺序：唤醒锁 -> 解冻 -> unforce');
+  ok(/ds_freeze_thaw_all[\s\S]{0,220}\[ -f "\$DS_OPS_LEDGER" \] && ds_ops_restore_all/.test(ds),
+     '解冻后按留下的账本重试唤醒锁还原');
+  ok(!/cpu\.uclamp\.max/.test(ds) && !/ds_cpu_throttle/.test(ds),
+     '深睡不碰 CPU 频率/调度');
+  ok(/DS_LOCK_DIR/.test(ds) && /ds_lock_acquire/.test(ds) && /ds_lock_release/.test(ds)
+     && /已有深睡实例在跑/.test(ds) && /运行锁刚被创建/.test(ds),
+     'mkdir 运行锁：并发启动只留一个实例，刚创建的锁不抢');
+  ok(/ds_policy_migrate/.test(ds) && /push=com\.tencent\.mm:push/.test(ds)
+     && /bak-policy2/.test(ds) && /nice=%s/.test(ds),
+     '一次性策略迁移：内置 IM 从 white= 移到 nice=/push=');
+  ok(/ds_push_pkg_list/.test(ds) && /push 列表的包也要进 Doze 白名单/.test(ds),
+     'push 包进 Doze 白名单，nice 包不进');
+  ok(/ds_policy_migrate_v3/.test(ds) && /policy_v3/.test(ds)
+     && /doze\.before-policy3/.test(ds) && /音乐\/健康\/Scene/.test(ds),
+     '音乐/健康/Scene 一次迁移出 Doze 白名单（不再整包常驻放行）');
+  ok(/媒体应用 \$pkg 已临时加白/.test(ds)
+     && /ds_enter\(\)[\s\S]{0,1400}ds_media_playing/.test(ds),
+     '正在播放的媒体进入深睡时临时加 Doze 白名单');
+  ok(/DS_APPOPS_ENABLED=\$\{DS_APPOPS:-1\}/.test(ds),
+     '唤醒锁有独立开关，台架可关');
   /* 熄屏巡检不能把 system_server 当轮询接口。 */
   {
     const calls = ds.split('\n').filter(l => /(^|[^#\w])dumpsys /.test(l) && !/^\s*#/.test(l));
@@ -3601,10 +3352,21 @@ console.log('\n== restart 不吊住调用者 ==');
      && /ds_screen_on\(\)[\s\S]{0,900}ds_screen_node/.test(ds)
      && /ds_dumpsys_awake\(\)[\s\S]{0,220}timeout 2 dumpsys power/.test(ds),
      '亮屏主判据是背光节点，dumpsys power 只做复核和兜底');
-  ok(/WAKE_SAMPLE_INTERVAL=\$\{DS_WAKE_INTERVAL:-60\}/.test(ds)
-     && /MEDIA_CHECK_INTERVAL=\$\{DS_MEDIA_INTERVAL:-30\}/.test(ds)
+  ok(/WAKE_SAMPLE_INTERVAL=\$\{DS_WAKE_INTERVAL:-900\}/.test(ds)
+     && /MEDIA_CHECK_INTERVAL=\$\{DS_MEDIA_INTERVAL:-300\}/.test(ds)
      && /t - ds_last_wake/.test(ds) && /t - ds_last_media/.test(ds),
-     '深睡期间唤醒数 60 秒、媒体 30 秒才读一次 dumpsys（累计计数器不会丢增量）');
+     '深睡中唤醒数 15 分钟、媒体 5 分钟才读一次 dumpsys（维护轮才读）');
+  /* 深睡激活后必须离开 2 秒轮询：阻塞等 screen_toggled，亮屏立刻醒；
+     事件源不可用才退回 30 秒定时。 */
+  ok(/DS_ACTIVE_TICK=120/.test(ds) && /DS_ACTIVE_FALLBACK=30/.test(ds)
+     && /logcat -b events -s screen_toggled/.test(ds)
+     && /grep -m1 'screen_toggled'/.test(ds)
+     && /ds_active_wait\(\)/.test(ds)
+     && /if \[ "\$ds_active" = "1" \]; then[\s\S]{0,220}ds_active_wait/.test(ds),
+     '深睡激活后阻塞等 screen_toggled，不再 2 秒轮询；事件源不可用退 30 秒');
+  ok(/ds_alarm_wait/.test(ds)
+     && /if \[ "\$ds_alarm_wait" = "1" \][\s\S]{0,180}return 0/.test(ds),
+     '闹钟等待态不会每轮掉进 ds_enter 重复 dumpsys alarm');
   ok(/DS_STATUS=\$\{DS_STATUS:-\$CONF_DIR\/run\/status\}/.test(ds)
      && /ds_game_active\(\)[\s\S]{0,700}game_pkg[\s\S]{0,300}fg/.test(ds)
      && /if ds_game_active; then[\s\S]{0,400}暂不进入深睡/.test(ds),
@@ -3637,8 +3399,8 @@ console.log('\n== restart 不吊住调用者 ==');
      && /_def_conf="\$DATA\/defaults\/socfreq.conf"/.test(apiSrc)
      && /cp -f "\$_def_conf" "\$CONF\.tmp"/.test(apiSrc)
      && /cp -f "\$_def_modes" "\$MODES\.tmp"/.test(apiSrc)
-     && /rm -f "\$LEARN" "\$LEARN_APP"/.test(apiSrc),
-     '恢复默认：后端重置配置/档位/深睡/覆盖/学习样本，游戏名单保留');
+     && /rm -f "\$DATA\/learn\.tsv" "\$DATA\/learn_app\.tsv"/.test(apiSrc),
+     '恢复默认：后端重置配置/档位/深睡/覆盖/旧版学习样本，游戏名单保留');
   ok(/id="reset-all"/.test(html) && /function resetAll\(\)/.test(html)
      && /await api\('reset_all'\)/.test(html),
      '关于页有「恢复全部默认」按钮，连点两次确认');
@@ -3695,8 +3457,8 @@ console.log('\n== restart 不吊住调用者 ==');
      '总开关关着时不常驻深睡进程');
 
   /* 页面：导航、开关、双榜、2 秒轮询只在本页可见时跑。 */
-  ok(/data-p="sleep"[\s\S]{0,260}>睡眠</.test(html), '导航栏有「睡眠」一项');
-  ok(/id="p-sleep"/.test(html) && /id="ds_enable"/.test(html),
+  ok(/onclick="go\('doze'\)"/.test(html), '功能页有「深度睡眠」入口');
+  ok(/id="p-doze"/.test(html) && /id="ds_enable"/.test(html),
      '睡眠页和总开关都在');
   ok(/id="ds-white"/.test(html) && /id="ds-run"/.test(html) && /id="ds-cur"/.test(html),
      '永久豁免名单 + 当次/累计两张榜都在页面上');
@@ -3765,13 +3527,13 @@ console.log('\n== restart 不吊住调用者 ==');
 
   /* 版本：四处一起改，页面兜底值也要同步。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V1.6$/m.test(mp) && /^versionCode=10600$/m.test(mp),
-     'module.prop 是 V1.6 / 10600');
-  ok(/SF_VERSION "1\.6"/.test(csrc), '守护源码里的版本号也是 1.6');
-  ok(/id="ver">V1\.6</.test(html) && /id="ver2">V1\.6</.test(html),
-     '页面两个版本兜底值都是 V1.6');
-  ok(/版本：V1\.6/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
-     'README 标题行同步到 V1.6');
+  ok(/^version=V2\.1$/m.test(mp) && /^versionCode=20100$/m.test(mp),
+     'module.prop 是 V2.1 / 20100');
+  ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号也是 2.1');
+  ok(/id="ver">V2\.1</.test(html) && /id="ver2">V2\.1</.test(html),
+     '页面两个版本兜底值都是 V2.1');
+  ok(/版本：V2\.1/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
+     'README 标题行同步到 V2.1');
 }
 
 console.log('\n' + (fail === 0 ? `全部通过 (${pass})` : `${fail} 项失败 / ${pass} 项通过`));
