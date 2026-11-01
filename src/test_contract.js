@@ -3328,8 +3328,9 @@ console.log('\n== restart 不吊住调用者 ==');
   ok(/ds_policy_migrate/.test(ds) && /push=com\.tencent\.mm:push/.test(ds)
      && /bak-policy2/.test(ds) && /nice=%s/.test(ds),
      '一次性策略迁移：内置 IM 从 white= 移到 nice=/push=');
-  ok(/ds_push_pkg_list/.test(ds) && /push 列表的包也要进 Doze 白名单/.test(ds),
-     'push 包进 Doze 白名单，nice 包不进');
+  ok(!/push 列表的包也要进 Doze 白名单/.test(ds)
+     && /不再\*\*把 push= 的包塞进 Doze 白名单|不再.*push=.*Doze 白名单/.test(ds),
+     'push 包不进 Doze 白名单（包级豁免 = 整包不受 Doze 限制，和"只放行进程"不符）');
   ok(/ds_policy_migrate_v3/.test(ds) && /policy_v3/.test(ds)
      && /doze\.before-policy3/.test(ds) && /音乐\/健康\/Scene/.test(ds),
      '音乐/健康/Scene 一次迁移出 Doze 白名单（不再整包常驻放行）');
@@ -3358,7 +3359,7 @@ console.log('\n== restart 不吊住调用者 ==');
      '深睡中唤醒数 15 分钟、媒体 5 分钟才读一次 dumpsys（维护轮才读）');
   /* 深睡激活后必须离开 2 秒轮询：阻塞等 screen_toggled，亮屏立刻醒；
      事件源不可用才退回 30 秒定时。 */
-  ok(/DS_ACTIVE_TICK=120/.test(ds) && /DS_ACTIVE_FALLBACK=30/.test(ds)
+  ok(/DS_ACTIVE_TICK=300/.test(ds) && /DS_ACTIVE_FALLBACK=30/.test(ds)
      && /logcat -b events -s screen_toggled/.test(ds)
      && /grep -m1 'screen_toggled'/.test(ds)
      && /ds_active_wait\(\)/.test(ds)
@@ -3525,15 +3526,16 @@ console.log('\n== restart 不吊住调用者 ==');
   ok(/只影响当前生效值/.test(html) && /不改这里显示的设定值/.test(html),
      '页头说明实时偏移只改当前生效值，不改适配表里的设定值');
 
-  /* 版本：四处一起改，页面兜底值也要同步。 */
+  /* 版本：module.prop / 页面模块版本 / README 一起改；
+     守护二进制这轮没重编，SF_VERSION 仍是 2.1，页面 #ver2 也跟着它。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.1$/m.test(mp) && /^versionCode=20100$/m.test(mp),
-     'module.prop 是 V2.1 / 20100');
-  ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号也是 2.1');
-  ok(/id="ver">V2\.1</.test(html) && /id="ver2">V2\.1</.test(html),
-     '页面两个版本兜底值都是 V2.1');
-  ok(/版本：V2\.1/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
-     'README 标题行同步到 V2.1');
+  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20101$/m.test(mp),
+     'module.prop 是 V2.1 Beta / 20101');
+  ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号仍是 2.1（本轮未重编）');
+  ok(/id="ver">V2\.1 Beta</.test(html) && /id="ver2">V2\.1</.test(html),
+     '页面：模块版本 V2.1 Beta，守护版本 2.1');
+  ok(/版本：V2\.1 Beta/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
+     'README 标题行同步到 V2.1 Beta');
 }
 
 console.log('\n' + (fail === 0 ? `全部通过 (${pass})` : `${fail} 项失败 / ${pass} 项通过`));

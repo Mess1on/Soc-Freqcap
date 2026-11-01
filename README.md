@@ -2,7 +2,7 @@
 
 Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏自动交还系统；附带 WebUI 与深度睡眠。
 
-作者：梦笙Mess1on & Ktwo　　版本：V2.1　　适用：KernelSU / Magisk / APatch · arm64-v8a
+作者：梦笙Mess1on & Ktwo　　版本：V2.1 Beta　　适用：KernelSU / Magisk / APatch · arm64-v8a
 
 ## 核心特性
 

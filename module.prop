@@ -1,6 +1,6 @@
 id=soc_freqcap
 name=Soc智能限频
-version=V2.1
-versionCode=20100
+version=V2.1 Beta
+versionCode=20101
 author=梦笙Mess1on & Ktwo
 description=按百分比自适配封顶 CPU 各簇与 GPU，支持固定限频与智能四档调度；检测到游戏在前台时自动放开并交还系统调度。任意 SoC，兼容高通 KGSL 与 MTK Mali。带 WebUI 与深度睡眠。

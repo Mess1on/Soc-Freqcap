@@ -21,7 +21,10 @@ SCREEN_OFF_DELAY=20
 POLL_INTERVAL=2
 # 深睡激活后不再 2 秒轮询：阻塞等 screen_toggled 事件（亮屏立即醒），
 # 最多 DS_ACTIVE_TICK 秒醒一次做维护（充电/7:30/名单）；事件源不可用时退 30 秒轮询。
-DS_ACTIVE_TICK=120
+# 亮屏是事件驱动（logcat 一有 screen_toggled 立刻回），所以这个值只影响
+# "充电/媒体/名单变更"的最迟发现时间，不影响亮屏响应。
+# 300 秒是为了待机：整夜每 2 分钟醒一次纯属白耗，5 分钟足够。
+DS_ACTIVE_TICK=300
 DS_ACTIVE_FALLBACK=30
 # 冻结时序：熄屏后先冻结后台，7:30 才一次性 force-idle。
 # 3 分钟内分批冻结，之后不再新增，减少冻结组里 D 状态进程把整组卡住的机会。
@@ -1373,12 +1376,11 @@ ds_enter() {
         ds_white_add "$pkg" "$old_white"
     done
     if [ "$DS_DOZE_ENABLED" = "1" ]; then
-        # push 列表的包也要进 Doze 白名单（只放行 push 进程，整包仍可能被冻结）。
-        for pkg in $(ds_push_pkg_list | tr ',' ' '); do
-            [ -n "$pkg" ] || continue
-            case " $ds_added " in *" $pkg "*) continue ;; esac
-            ds_white_add "$pkg" "$old_white"
-        done
+        # 这里**不再**把 push= 的包塞进 Doze 白名单。
+        # 白名单是包级豁免：加进去等于整个应用不受 Doze 限制，可以照常持唤醒锁、
+        # 跑 job、联网。而 push= 的包同时又不在冻结名单里（nice= 同理），
+        # 两头都不受限 = 熄屏后它和没开深睡时一样自由，深睡就白开了。
+        # 现在 push= 只表示"不冻结这个进程"；要整包完全豁免请用 white=。
         # 默认短信应用不在名单里也要临时加白：否则 SMS 广播会被压到出 Doze 才发。
         # 退出时按 ds_added 撤掉；用户名单里的那条不会被撤。
         sms="$(ds_sms_pkg)"
