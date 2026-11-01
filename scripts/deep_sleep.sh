@@ -111,16 +111,20 @@ now() { date +%s; }
 # shortcut: 不加锁。只有拿到运行锁的那个实例能把计数累加到 64 的倍数——
 # 抢锁失败的进程只写一行就退出（api.sh source 本文件时也只写零星几条），
 # 所以实际不存在两个进程同时裁剪、争同一个 $LOG.tmp。
-_ds_logn=0
-log_ds() {
-    echo "$(date '+%m-%d %H:%M:%S' 2>/dev/null) $*" >>"$LOG" 2>/dev/null
-    _ds_logn=$((_ds_logn + 1))
-    [ $((_ds_logn % 64)) -eq 0 ] || return 0
+ds_log_trim() {
     local n
     n=$(wc -c <"$LOG" 2>/dev/null)
     case "$n" in ''|*[!0-9]*) return 0 ;; esac
     [ "$n" -lt 262144 ] && return 0
     tail -c 131072 "$LOG" >"$LOG.tmp" 2>/dev/null && mv -f "$LOG.tmp" "$LOG" 2>/dev/null
+    return 0
+}
+_ds_logn=0
+log_ds() {
+    echo "$(date '+%m-%d %H:%M:%S' 2>/dev/null) $*" >>"$LOG" 2>/dev/null
+    _ds_logn=$((_ds_logn + 1))
+    [ $((_ds_logn % 64)) -eq 0 ] || return 0
+    ds_log_trim
     return 0
 }
 
@@ -1639,6 +1643,11 @@ ds_main() {
     ds_ops_restore_if_any
     ds_wakes_load
     ds_snap_restore_if_any
+    # 启动时先量一次大小。光靠 log_ds 里那个"每 64 条"不够：_ds_logn 是
+    # 每进程计数器，而守护会因为「退出（停止）」、看门狗重拉而重启，重启就
+    # 从 0 数起。文件一旦在重启前就已经超标，可能永远凑不满 64 条 ——
+    # 这台机上 520KB 就是这样挂了两小时没掉（两个生命周期分别只攒到 59 和 25 条）。
+    ds_log_trim
     ds_wait_pid=""
     rm -f "$DS_EVENT_TMP" "$DS_EVENT_FIFO" 2>/dev/null
     while true; do

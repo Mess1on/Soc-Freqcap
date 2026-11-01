@@ -369,6 +369,67 @@ ok "$(head -n 1 "$LOG" | md5sum | cut -d' ' -f1)" "$_h1" "追加写在尾巴上�
 ok "$(tail -n 1 "$LOG" | grep -c '裁剪后第二条')" "1" "新内容就在最后一行"
 : > "$LOG"
 
+echo "== 启动时先量一次（重启后计数器归零，这条路必须能自己收口）=="
+# 真机上就是这么挂的：文件 520KB 早就超标，但守护会因为「退出（停止）」和
+# 看门狗重拉而反复重启，_ds_logn 每次归零。那天两个生命周期分别只攒到
+# 59 条和 25 条，64 条那个闸门永远轮不到，520KB 挂了两小时没掉。
+# ds_main 启动时会先调一次 ds_log_trim；下面按同样顺序复现：
+# 新进程 → 一次启动检查 → 只写一条日志。
+# 这条用例在"只在 log_ds 里查"的旧写法上必红——只写 1 条离 64 差得远。
+awk -v p="$_pad" 'BEGIN{for(i=1;i<=3400;i++)printf "OLDSEG %06d %s\n",i,p}' >> "$LOG"
+awk -v p="$_pad" 'BEGIN{for(i=1;i<=6800;i++)printf "NEWSEG %06d %s\n",i,p}' >> "$LOG"
+printf 'ZZMARK-END\n' >> "$LOG"
+ok "$(grep -c OLDSEG "$LOG")" "3400" "重启前：文件停在超标的旧状态"
+
+ds_log_trim                       # ds_main 启动段做的事之一
+_ds_logn=0                        # 新进程，计数器归零
+log_ds "重启后第一条"              # 只写一条，离 64 条还差得远
+ok "$([ "$(wc -c < "$LOG")" -le 140000 ] && echo y || echo n)" "y" \
+   "只写 1 条也裁了（启动检查兜住，不等 64 条）"
+ok "$(grep -c OLDSEG "$LOG")" "0" "旧段没了"
+ok "$(grep -c ZZMARK-END "$LOG")" "1" "末尾哨兵还在"
+ok "$([ -f "$LOG.tmp" ] && echo y || echo n)" "n" "没留 .tmp"
+
+echo "== 启动检查的边界 =="
+: > "$LOG"; printf 'only-one-line\n' >> "$LOG"
+ds_log_trim
+ok "$(wc -l < "$LOG")" "1" "没超门槛：一行不动"
+rm -f "$LOG"
+ds_log_trim >/dev/null 2>&1
+ok "$?" "0" "日志不存在：不报错（wc 失败也走 return 0）"
+ok "$([ -f "$LOG.tmp" ] && echo y || echo n)" "n" "日志不存在时也不留 .tmp"
+
+# 上面测的是函数本身。下面真把 ds_main 跑起来：函数写得再好，
+# 没接进启动段等于没写。
+echo "== 真起一次 ds_main：启动那一下就得裁（接线证明）=="
+DS2="$TMP/data2"; mkdir -p "$DS2/run"
+: > "$DS2/dsleep.log"
+awk -v p="$_pad" 'BEGIN{for(i=1;i<=3400;i++)printf "OLDSEG %06d %s\n",i,p}' >> "$DS2/dsleep.log"
+awk -v p="$_pad" 'BEGIN{for(i=1;i<=6800;i++)printf "NEWSEG %06d %s\n",i,p}' >> "$DS2/dsleep.log"
+printf 'ZZMARK-END\n' >> "$DS2/dsleep.log"
+_before2=$(wc -c < "$DS2/dsleep.log")
+# 先让 Wakefulness 不是 Asleep，子进程就不会走 ds_enter；
+# 冻结也早就是 0（DS_FREEZE=0），于是它除了写沙箱里的文件什么都不做。
+printf 'Awake\n' > "$STATE/wake"
+SOCFREQ_DATA_DIR="$DS2" sh "$MOD/scripts/deep_sleep.sh" >/dev/null 2>&1 &
+_sp=$!
+_i=0
+while [ "$_i" -lt 40 ] && [ "$(wc -c < "$DS2/dsleep.log")" -ge "$_before2" ]; do
+  sleep 0.1; _i=$((_i + 1))
+done
+_after2=$(wc -c < "$DS2/dsleep.log")
+kill "$_sp" 2>/dev/null; wait "$_sp" 2>/dev/null
+printf 'Asleep\n' > "$STATE/wake"
+ok "$([ "$_after2" -le 140000 ] && echo y || echo n)" "y" \
+   "真进程启动后体积掉到 128KB 量级（$_before2 → $_after2 字节）"
+ok "$(grep -c OLDSEG "$DS2/dsleep.log")" "0" "真进程启动时裁掉了旧段"
+ok "$(grep -c ZZMARK-END "$DS2/dsleep.log")" "1" "末尾哨兵还在（留的是新的一半）"
+
+# 再把静态那条留作护栏：上面那条是行为证明，这条只防"启动段那行被删掉"。
+ok "$(awk '/^ds_main\(\)/,/^}/' "$MOD/scripts/deep_sleep.sh" | grep -c '^    ds_log_trim$')" "1" \
+   "ds_main 启动段里确实调了 ds_log_trim"
+: > "$LOG"
+
 echo
 if [ "$fail" -eq 0 ]; then echo "全部通过 ($pass)"; else echo "$fail 项失败 / $pass 项通过"; fi
 exit "$fail"
