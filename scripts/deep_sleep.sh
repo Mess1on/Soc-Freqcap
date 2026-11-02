@@ -1,6 +1,8 @@
 #!/system/bin/sh
 # 深度睡眠守护：熄屏且未充电满 20 秒后，按 Doze 收口：
-# 熄屏 7:30 一次性 force-idle，并临时放行 push/短信/媒体；亮屏或插电立即撤白名单并退出 Doze。
+# 熄屏满 60 秒 force-idle，并临时放行 push/短信/媒体；
+# 之后按 1/5/30/60 分钟复查，掉出 IDLE 就重新压回去（拦截所有退出，恒开）。
+# 亮屏或插电立即撤白名单并退出 Doze。
 # 不再冻结任何进程（墓碑功能已移除）；旧版本留下的冻结只在启动/退出时按账本解开。
 # 所有系统改动先写存档/账本，退出、启动、卸载都逐项逆操作。
 #
@@ -38,8 +40,14 @@ DS_FREEZE_ENABLED=0
 DS_DOZE_ENABLED=1
 DS_FREEZE_WINDOW=180
 DS_FREEZE_RESCAN=60
-DS_DOZE_AT=450
-DS_DOZE_RETRY=300
+# Doze 时序（对齐 LSPDoze 的 DeepDoze）：
+#   息屏满 DS_DOZE_AT 秒 → force-idle；
+#   之后按 DS_DOZE_CHECK_MIN 里的分钟数复查，掉出 IDLE 就立刻重新收口，
+#   走完最后一项以后每 60 分钟一次。时间单位：延迟是秒，复查是分钟。
+DS_DOZE_AT=60
+DS_DOZE_CHECK_MIN="1 5 30 60"
+# 进 Doze 被闹钟守卫挡下时，隔这么久再试一次（避免每轮 tick 都问 dumpsys alarm）。
+DS_DOZE_RETRY=60
 DS_FREEZE_BATCH=8
 DS_FREEZE_GROUP_NAME=${DS_FREEZE_GROUP_NAME:-socfreq_ds}
 DS_FREEZE_LEDGER=$CONF_DIR/run/freeze.saved
@@ -92,6 +100,10 @@ ds_freeze_done=0
 ds_frozen=""
 ds_doze_sent=0
 ds_doze_checked=0
+# Doze 复查阶梯：走到第几步、下一次复查的时刻、本轮维护最多睡多久。
+ds_doze_step=0
+ds_doze_next=0
+ds_wait_sec=0
 # 亮屏判定：节点优先，连续对不上就停用它，改问系统。
 ds_scr_ok=1
 ds_scr_bad=0
@@ -840,17 +852,49 @@ DS_FREEZE_SKIP=""
 # 媒体/新豁免应用需要跑：把它从这个包里单独解冻，其余保持冻结。
 
 # 7:30 一次性收口：cmd 优先，失败补发 dumpsys 兼容命令，仍失败不再重试。
-ds_doze_once() {
-    [ "$DS_DOZE_ENABLED" = "1" ] || return 0
-    [ "$ds_doze_sent" = "1" ] && return 0
-    ds_doze_sent=1
+# 第 i 步复查要等多少秒（i 从 0 开始）。走完列表就固定用最后一项。
+ds_doze_interval() {
+    local want="${1:-0}" i=0 v last=60
+    for v in $DS_DOZE_CHECK_MIN; do
+        last=$v
+        [ "$i" -eq "$want" ] && { echo $((v * 60)); return 0; }
+        i=$((i + 1))
+    done
+    echo $((last * 60))
+}
+
+# 真正下命令。不动 ds_doze_sent，所以复查发现掉出来时也走这里。
+ds_doze_force() {
     if timeout 2 cmd deviceidle force-idle deep >/dev/null 2>&1; then
         log_ds "系统已接受一次深度休眠请求"
     elif timeout 2 dumpsys deviceidle force-idle deep >/dev/null 2>&1; then
         log_ds "系统已接受一次兼容休眠请求"
     else
-        log_ds "深度休眠命令未被接受，本次不再重试"
+        log_ds "深度休眠命令未被接受，等下一次复查再试"
     fi
+}
+
+ds_doze_once() {
+    [ "$DS_DOZE_ENABLED" = "1" ] || return 0
+    [ "$ds_doze_sent" = "1" ] && return 0
+    ds_doze_sent=1
+    ds_doze_force
+    ds_doze_step=0
+    ds_doze_next=$(( $(now) + $(ds_doze_interval 0) ))
+}
+
+# 复查：还在 IDLE 就只排下一次；掉出来就重新收口。
+# 「拦截所有退出」恒开（没有开关）：息屏期间只要掉出 IDLE 就再压回去。
+ds_doze_check() {
+    local st
+    st="$(timeout 2 dumpsys deviceidle get deep 2>/dev/null | tr -d '\r\n')"
+    case "$st" in
+        IDLE) log_ds "Doze 复查：仍在深度空闲" ;;
+        *)    log_ds "Doze 复查：已退出（$st），重新收口"
+              ds_doze_force ;;
+    esac
+    ds_doze_step=$((ds_doze_step + 1))
+    ds_doze_next=$(( $(now) + $(ds_doze_interval "$ds_doze_step") ))
 }
 
 # ============================ 唤醒锁（appops） ===============================
@@ -1049,6 +1093,9 @@ ds_enter() {
     # 深睡只做 Doze：冻结（墓碑）已移除，这里不再建冻结组、不再扫候选、不再冻进程。
     ds_doze_sent=0
     ds_doze_checked=0
+    ds_doze_step=0
+    ds_doze_next=0
+    ds_wait_sec=0
     ds_frozen=""
     ds_freeze_done=1
     ds_alarm_wait=0
@@ -1082,6 +1129,9 @@ ds_exit() {
     DS_FREEZE_SKIP=""
     ds_doze_sent=0
     ds_doze_checked=0
+    ds_doze_step=0
+    ds_doze_next=0
+    ds_wait_sec=0
     ds_alarm_wait=0
     log_ds "已退出（$1），冻结/唤醒锁与白名单已还原"
 }
@@ -1231,15 +1281,19 @@ ds_tick() {
 
     # 冻结（墓碑）已移除：这里不再扫描候选、不再入组、不再冻进程。
     # 闹钟快响就先不收口：Doze 会把闹钟广播压到维护窗口，和“准点响”冲突。
-    if [ "$DS_DOZE_ENABLED" = "1" ] \
-       && [ $((t - ds_screen_off_ts)) -ge "$DS_DOZE_AT" ] && [ "$ds_doze_sent" != "1" ] \
-       && [ $((t - ds_doze_checked)) -ge "$DS_DOZE_RETRY" ]; then
-        ds_doze_checked=$t
-        if ds_alarm_soon; then
-            log_ds "闹钟在 ${ALARM_GUARD_SEC} 秒内，暂不进入系统 Doze"
-        else
-            ds_doze_once
+    if [ "$ds_doze_sent" != "1" ]; then
+        if [ $((t - ds_screen_off_ts)) -ge "$DS_DOZE_AT" ] \
+           && [ $((t - ds_doze_checked)) -ge "$DS_DOZE_RETRY" ]; then
+            ds_doze_checked=$t
+            if ds_alarm_soon; then
+                log_ds "闹钟在 ${ALARM_GUARD_SEC} 秒内，暂不进入系统 Doze"
+            else
+                ds_doze_once
+            fi
         fi
+    elif [ "$t" -ge "$ds_doze_next" ]; then
+        # 已收口：按 1/5/30/60 分钟复查，掉出来就重新压回去。
+        ds_doze_check
     fi
 
     # 计数器是累计量：隔一分钟读一次和每 2 秒读一次入账的增量完全一样。
@@ -1276,7 +1330,7 @@ ds_screen_event() {
             mkfifo "$DS_EVENT_FIFO" 2>/dev/null || exit 0
             logcat -b events -s screen_toggled -T "$stamp" > "$DS_EVENT_FIFO" 2>/dev/null &
             lp=$!
-            ( sleep "$DS_ACTIVE_TICK"; kill "$lp" 2>/dev/null ) &
+            ( sleep "${ds_wait_sec:-$DS_ACTIVE_TICK}"; kill "$lp" 2>/dev/null ) &
             wd=$!
             grep -m1 'screen_toggled' < "$DS_EVENT_FIFO" > "$DS_EVENT_TMP"
             kill "$lp" "$wd" 2>/dev/null
@@ -1323,24 +1377,17 @@ ds_screen_event() {
 
 # 已在深睡中的主循环：冻结窗口内 2 秒一步，之后只等事件/维护轮。
 ds_active_wait() {
-    local t busy
+    local t left
     while [ "$ds_active" = "1" ] && [ "$ds_quit" != "1" ]; do
         t=$(now)
-        busy=0
-        if [ $((t - ds_screen_off_ts)) -lt "$DS_FREEZE_WINDOW" ]; then
-            if [ "$DS_FREEZE_ENABLED" = "1" ] && [ "$ds_freeze_done" != "1" ]; then
-                busy=1
-            fi
+        # Doze 复查点可能比维护轮密（1 分钟、5 分钟），到点前就少睡一会儿；
+        # 否则 300 秒的维护轮会把 1 分钟那次直接睡过去。
+        ds_wait_sec=$DS_ACTIVE_TICK
+        if [ "$ds_doze_sent" = "1" ] && [ "$ds_doze_next" -gt 0 ]; then
+            left=$((ds_doze_next - t))
+            [ "$left" -lt "$ds_wait_sec" ] && ds_wait_sec="$left"
         fi
-        if [ "$busy" = "1" ]; then
-            sleep 2 &
-            ds_wait_pid=$!
-            wait $!
-            ds_wait_pid=""
-            ds_tick
-            [ "$ds_quit" = "1" ] && return 0
-            continue
-        fi
+        [ "$ds_wait_sec" -lt 5 ] && ds_wait_sec=5
         ds_screen_event
         if [ "$ds_event_on" = "1" ]; then
             ds_exit "亮屏"

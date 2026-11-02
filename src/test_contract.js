@@ -3260,12 +3260,20 @@ console.log('\n== restart 不吊住调用者 ==');
   ok(fs.existsSync(dsPath), '深度睡眠守护脚本随包存在（scripts/deep_sleep.sh）');
   const ds = fs.existsSync(dsPath) ? fs.readFileSync(dsPath, 'utf8') : '';
 
-  /* 产品语义：熄屏 20 秒、2 秒心跳、T0 冻结、7:30 一次性 Doze。 */
+  /* 产品语义：熄屏 20 秒进入，60 秒收口，之后 1/5/30/60 分钟复查。 */
   ok(/SCREEN_OFF_DELAY=20/.test(ds), '熄屏满 20 秒才进入（不是熄屏立刻）');
   ok(/POLL_INTERVAL=2/.test(ds), '心跳 2 秒（熄屏后不加密轮询）');
-  ok(/DS_FREEZE_WINDOW=180/.test(ds) && /DS_DOZE_AT=450/.test(ds)
-     && /DS_DOZE_RETRY=300/.test(ds),
-     '冻结窗口 3 分钟，7:30 才一次性收口，闹钟让路后 5 分钟再试');
+  ok(/DS_DOZE_AT=60/.test(ds) && /DS_DOZE_CHECK_MIN="1 5 30 60"/.test(ds),
+     '息屏 60 秒收口，之后按 1/5/30/60 分钟复查');
+  ok(/ds_doze_interval\(\)/.test(ds) && /ds_doze_check\(\)/.test(ds),
+     '复查阶梯与复查函数都在');
+  ok(/ds_doze_force/.test(ds) && /cmd deviceidle force-idle deep/.test(ds)
+     && /dumpsys deviceidle force-idle deep/.test(ds),
+     '收口命令 cmd 优先、dumpsys 兜底');
+  ok(/dumpsys deviceidle get deep/.test(ds) && /重新收口/.test(ds),
+     '掉出 IDLE 就重新收口（拦截所有退出，常开）');
+  ok(/ds_wait_sec/.test(ds) && /ds_doze_next/.test(ds),
+     '维护轮跟着复查点缩短，1 分钟那次不会被 5 分钟的 tick 睡过去');
   ok(/MAX_WAKE_APPS=63/.test(ds), '唤醒榜应用数封顶 63，防止文件无限膨胀');
 
   /* 不再改系统 Doze 常量：进入不再靠全局门槛，旧版快照仍能按原值还原。 */
@@ -3288,9 +3296,6 @@ console.log('\n== restart 不吊住调用者 ==');
      '配置仍支持 nice=/push= 列表');
   ok(/ds_push_pkg_list/.test(ds) && /push= 的包要进 Doze 白名单/.test(ds),
      'push= 的包进 Doze 白名单（不再冻结，只能靠 Doze 保住消息）');
-  ok(/ds_doze_once/.test(ds) && /cmd deviceidle force-idle deep/.test(ds)
-     && /dumpsys deviceidle force-idle deep/.test(ds) && /本次不再重试/.test(ds),
-     '7:30 一次性 Doze：cmd 优先、dumpsys 兜底、失败不重试');
   ok(/DS_DOZE_RETRY[\s\S]{0,800}ds_alarm_soon[\s\S]{0,200}暂不进入系统 Doze/.test(ds),
      'Doze 收口同样让路闹钟');
   /* 深睡：冻结 + 唤醒锁；nice=/push= 是进程级策略，深睡不碰 CPU 频率/调度。 */
@@ -3515,7 +3520,7 @@ console.log('\n== restart 不吊住调用者 ==');
   /* 版本：module.prop / 页面模块版本 / README 一起改；
      守护二进制这轮没重编，SF_VERSION 仍是 2.1，页面 #ver2 也跟着它。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20104$/m.test(mp),
+  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20105$/m.test(mp),
      'module.prop 是 V2.1 Beta / 20101');
   ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号仍是 2.1（本轮未重编）');
   ok(/id="ver">V2\.1 Beta</.test(html) && /id="ver2">V2\.1</.test(html),

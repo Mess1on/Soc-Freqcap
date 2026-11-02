@@ -60,6 +60,7 @@ case "$1" in
         esac ;;
       force-idle) echo 1 > "$d/forced" ;;
       unforce)    echo 0 > "$d/forced" ;;
+      get)        [ "$3" = "deep" ] && cat "$d/deep" 2>/dev/null ;;
       '')         echo "mForceIdle=$(cat "$d/forced" 2>/dev/null)" ;;
     esac ;;
 esac
@@ -86,6 +87,7 @@ chmod +x "$STUB/settings" "$STUB/dumpsys" "$STUB/timeout" "$STUB/cmd"
 printf 'Asleep\n' > "$STATE/wake"
 printf 'OFF\n'    > "$STATE/screen"
 echo 0            > "$STATE/forced"
+printf 'ACTIVE\n' > "$STATE/deep"
 : > "$STATE/whitelist"; : > "$STATE/settings"; : > "$STATE/media"; : > "$STATE/alarm"
 : > "$STATE/calls"
 
@@ -304,37 +306,71 @@ ds_screen_off_ts=0; ds_game_checked=0
 ds_tick
 ok "$(cat "$STATE/forced")" "0" "游戏离开前台后进入深睡（不立即压 Doze）"
 
-echo "== 7:30 一次性收口（Doze 不再随进入即发）=="
+echo "== Doze 时序：息屏 60 秒收口 =="
 : > "$STATE/alarm"; : > "$STATE/calls"
+echo 0 > "$STATE/forced"
+printf 'ACTIVE\n' > "$STATE/deep"
 ok "$([ "$(awk -F= '$1=="dsactive"{print $2}' "$STATE_FILE")" = "1" ] && echo y || echo n)" "y" \
    "此时仍在深睡"
 ok "$(grep -c '^deviceidle force-idle' "$STATE/calls" 2>/dev/null)" "0" \
    "进入阶段没有发出 force-idle"
-ds_screen_off_ts=$(( $(date +%s) - 430 ))
-ds_doze_sent=0; ds_doze_checked=0
+# 留 10 秒余量：两次 date 之间可能跨秒，59 会变成 60。
+ds_screen_off_ts=$(( $(date +%s) - 50 ))
+ds_doze_sent=0; ds_doze_checked=0; ds_doze_next=0
 : > "$STATE/calls"
 ds_tick
-ok "$(cat "$STATE/forced")" "0" "还没到 7:30 不收口"
-ds_screen_off_ts=$(( $(date +%s) - 451 ))
+ok "$(cat "$STATE/forced")" "0" "还不满 60 秒，不收口"
+ds_screen_off_ts=$(( $(date +%s) - 70 ))
 ds_tick
-ok "$(cat "$STATE/forced")" "1" "息屏满 7:30 收口一次"
+ok "$(cat "$STATE/forced")" "1" "息屏满 60 秒收口一次"
 ok "$(grep -c '^deviceidle force-idle deep$' "$STATE/calls")" "1" "force-idle 只发一次"
-ds_tick
-ok "$(grep -c '^deviceidle force-idle deep$' "$STATE/calls")" "1" "之后不重复发（不重试）"
+ok "$ds_doze_sent" "1" "记下已收口"
+ok "$ds_doze_step" "0" "复查阶梯从第 0 步开始"
+ok "$([ "$ds_doze_next" -gt "$(date +%s)" ] && echo y || echo n)" "y" "排好了下一次复查"
 
-echo "== 7:30 收口让路闹钟 =="
+echo "== 复查：还在 IDLE 就不打扰 =="
+printf 'IDLE\n' > "$STATE/deep"
+ds_doze_next=$(( $(date +%s) - 1 ))
+: > "$STATE/calls"
+ds_tick
+ok "$(grep -c '^deviceidle force-idle' "$STATE/calls")" "0" "仍在 IDLE：不重发命令"
+ok "$ds_doze_step" "1" "阶梯前进到第 1 步"
+ok "$([ "$(grep -c 'Doze 复查：仍在深度空闲' "$LOG" 2>/dev/null)" -ge 1 ] && echo y || echo n)" "y" \
+   "日志写明仍在深睡"
+
+echo "== 拦截所有退出：掉出 IDLE 立刻重新收口 =="
+printf 'ACTIVE\n' > "$STATE/deep"
 echo 0 > "$STATE/forced"
-ds_screen_off_ts=$(( $(date +%s) - 451 )); ds_doze_sent=0; ds_doze_checked=0
+ds_doze_next=$(( $(date +%s) - 1 ))
+: > "$STATE/calls"
+ds_tick
+ok "$(cat "$STATE/forced")" "1" "掉出来了就重新收口"
+ok "$(grep -c '^deviceidle force-idle deep$' "$STATE/calls")" "1" "只补发一次"
+ok "$([ "$(grep -c 'Doze 复查：已退出' "$LOG" 2>/dev/null)" -ge 1 ] && echo y || echo n)" "y" \
+   "日志写明是退出后重进"
+ok "$ds_doze_step" "2" "阶梯继续前进"
+
+echo "== 复查间隔按 1/5/30/60 分钟 =="
+ok "$(ds_doze_interval 0)" "60" "第 1 次：1 分钟"
+ok "$(ds_doze_interval 1)" "300" "第 2 次：5 分钟"
+ok "$(ds_doze_interval 2)" "1800" "第 3 次：30 分钟"
+ok "$(ds_doze_interval 3)" "3600" "第 4 次：60 分钟"
+ok "$(ds_doze_interval 9)" "3600" "之后每 60 分钟一次"
+
+echo "== 收口让路闹钟 =="
+echo 0 > "$STATE/forced"
+printf 'ACTIVE\n' > "$STATE/deep"
+ds_screen_off_ts=$(( $(date +%s) - 61 )); ds_doze_sent=0; ds_doze_checked=0; ds_doze_next=0
 printf 'RTC_WAKEUP #1: Alarm{abc origWhen %s} component ComponentInfo{com.coloros.alarmclock/.Alarm}\n' \
   "$(( ($(date +%s) + 600) ))000" > "$STATE/alarm"
 : > "$STATE/calls"
 ds_tick
-ok "$(cat "$STATE/forced")" "0" "闹钟在 30 分钟内：7:30 不收口"
+ok "$(cat "$STATE/forced")" "0" "闹钟在 30 分钟内：不收口"
 ok "$([ "$(grep -c '暂不进入系统 Doze' "$LOG" 2>/dev/null)" -ge 1 ] && echo y || echo n)" "y" \
    "日志写明是因为闹钟"
 ok "$(grep -c '^deviceidle force-idle' "$STATE/calls")" "0" "闹钟窗口内一次 force-idle 都不发"
 : > "$STATE/alarm"
-ds_doze_checked=$(( $(date +%s) - 301 ))
+ds_doze_checked=$(( $(date +%s) - 61 ))
 ds_tick
 ok "$(cat "$STATE/forced")" "1" "闹钟消失后的下一轮补收口"
 printf 'enable=0\n' > "$DSLEEP_CONF"; ds_tick
