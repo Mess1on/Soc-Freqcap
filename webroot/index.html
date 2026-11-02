@@ -978,10 +978,10 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
   <div class="subhd"><button class="back" onclick="go('func')">‹</button><b>永久豁免</b></div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 21s-8-5-8-11a5 5 0 018-3 5 5 0 018 3c0 6-8 11-8 11z"/></svg>永久豁免</h2>
-    <div class="hint">名单里的应用在深睡时也能被正常唤醒（等同系统电量设置里的「无限制」）。
-      深睡期间正在放音乐的应用会自动临时保护，退出深睡后自动撤销。
-      微信/QQ/企业微信等 IM 默认只保活：不冻结；微信额外放行 push 进程，QQ 等不进 Doze 白名单，
-      也不额外放行唤醒锁。要完全放行（随时收消息）请把它们加进下面的名单。
+    <div class="hint">名单里的应用在深睡时也不受 Doze 限制（等同系统电量设置里的「无限制」），
+      对应 LSPDoze 的「网络白名单」。深睡期间正在放音乐的应用会自动临时保护，退出深睡后自动撤销。
+      深睡不再冻结任何进程；push= 的包会被加进 Doze 白名单（包级豁免），保证熄屏后消息还能进来，
+      要长期完全放行就直接写进下面的名单。
       时钟/电话/信息等系统应用已默认豁免，闹钟前 30 分钟不强制深睡（名单可移除，升级不会塞回）。</div>
     <div class="list" id="ds-white"></div>
     <div class="btns">
@@ -1149,8 +1149,9 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
   <div class="subhd"><button class="back" onclick="go('func')">‹</button><b>深度睡眠</b></div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/><path d="M15 3.5l.7 1.8 1.8.7-1.8.7L15 8.5l-.7-1.8-1.8-.7 1.8-.7z"/></svg>深度睡眠</h2>
-    <div class="hint">熄屏且没在充电：满 20 秒先冻结第三方后台，满 7 分 30 秒再让系统进一次 Doze 深度空闲；
-      亮屏或插上电立刻解冻还原。闹钟前 30 分钟、正在放音乐、游戏挂机时不压。
+    <div class="hint">熄屏且没在充电：满 60 秒让系统进一次 Doze 深度空闲，并把 push / 短信 / 媒体临时加白；
+      之后按 1、5、30、60 分钟复查，系统一旦退出就立刻重新收口。亮屏或插电立即撤销。
+      闹钟前 30 分钟、正在放音乐、游戏挂机时不收口。深睡不再冻结任何进程，只做 Doze；
       Doze 会暂时限制非白名单应用的后台网络，来电 / 短信 / 闹钟不受影响。</div>
     <div class="row">
       <div class="lbl"><b>自动深度睡眠</b><span>熄屏后让系统进 Doze 深度空闲，并把 push / 短信 / 媒体临时加白；关闭则完全不碰系统 Doze</span></div>

@@ -2288,8 +2288,11 @@ console.log('\n== 分应用档位 ==');
        /origWhen/.test(ds2) && /暂不进入深睡/.test(ds2) &&
        /暂不进入系统 Doze/.test(ds2),
        '闹钟前 30 分钟不进入，7:30 收口也让路（防止早上闹钟不响）');
-    ok(/IM 默认只保活/.test(html) && /不冻结/.test(html) && /加进下面的名单/.test(html),
-       '睡眠页说明 IM 默认只保活、需要时加进永久豁免');
+    ok(/深睡不再冻结任何进程/.test(html) && /网络白名单/.test(html)
+       && /写进下面的名单/.test(html),
+       '睡眠页说明：不再冻结、white= 就是网络白名单、要完全放行写进名单');
+    ok(!/满 20 秒先冻结|7 分 30 秒再让系统|立刻解冻还原/.test(html),
+       '睡眠页不再出现过时的冻结/7:30/解冻文案');
     ok(/builtin_white\) builtin_white ;;/.test(apiSrc) &&
        /builtin_white\(\)\s*\{[\s\S]{0,600}?scripts\/builtin_white\.txt/.test(apiSrc),
        '内置豁免的中文名有后端命令（清单只读，不参与匹配）');
@@ -3520,7 +3523,7 @@ console.log('\n== restart 不吊住调用者 ==');
   /* 版本：module.prop / 页面模块版本 / README 一起改；
      守护二进制这轮没重编，SF_VERSION 仍是 2.1，页面 #ver2 也跟着它。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20105$/m.test(mp),
+  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20106$/m.test(mp),
      'module.prop 是 V2.1 Beta / 20101');
   ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号仍是 2.1（本轮未重编）');
   ok(/id="ver">V2\.1 Beta</.test(html) && /id="ver2">V2\.1</.test(html),
