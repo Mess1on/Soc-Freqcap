@@ -3324,8 +3324,9 @@ console.log('\n== restart 不吊住调用者 ==');
   ok(/媒体应用 \$pkg 已临时加白/.test(ds)
      && /ds_enter\(\)[\s\S]{0,1400}ds_media_playing/.test(ds),
      '正在播放的媒体进入深睡时临时加 Doze 白名单');
-  ok(/DS_APPOPS_ENABLED=\$\{DS_APPOPS:-1\}/.test(ds),
-     '唤醒锁有独立开关，台架可关');
+  ok(!/ds_conf_opt appops|ds_conf_opt doze/.test(ds)
+     && /^DS_DOZE_ENABLED=1$/m.test(ds),
+     '只剩一个总开关：doze/appops 不再从配置读，不出现"两个都叫 Doze"的选项');
   /* 熄屏巡检不能把 system_server 当轮询接口。 */
   {
     const calls = ds.split('\n').filter(l => /(^|[^#\w])dumpsys /.test(l) && !/^\s*#/.test(l));
@@ -3514,7 +3515,7 @@ console.log('\n== restart 不吊住调用者 ==');
   /* 版本：module.prop / 页面模块版本 / README 一起改；
      守护二进制这轮没重编，SF_VERSION 仍是 2.1，页面 #ver2 也跟着它。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20103$/m.test(mp),
+  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20104$/m.test(mp),
      'module.prop 是 V2.1 Beta / 20101');
   ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号仍是 2.1（本轮未重编）');
   ok(/id="ver">V2\.1 Beta</.test(html) && /id="ver2">V2\.1</.test(html),

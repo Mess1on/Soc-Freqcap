@@ -31,18 +31,16 @@ if (!searchChunk) {
 
 const FULL = [
   'enable=1', 'alive=1', 'dsactive=1', 'wcsince=1700000000',
-  'doze=1',
   'dsw=com.a:5:0,com.b:2:1,com.bad:oops:0',
   'dswc=com.a:9:0',
   'white=com.b', 'white=com.c',
 ].join('\n');
 const POLL = [
   'enable=1', 'alive=1', 'dsactive=1', 'wcsince=1700000000',
-  'doze=1',
   'dsw=com.a:7:0,com.b:3:1',
   'dswc=com.a:11:0',
 ].join('\n');
-const OFF = 'enable=0\nalive=0\ndsactive=0\nwcsince=0\ndoze=1\ndsw=\ndswc=\n';
+const OFF = 'enable=0\nalive=0\ndsactive=0\nwcsince=0\ndsw=\ndswc=\n';
 
 function mkEl(tag) {
   const el = {
@@ -127,7 +125,8 @@ function sandbox() {
     ok(box.classList.contains('on') && s.get('ds-stxt').textContent === '深度睡眠中',
        '深睡中状态条染成绿色并写「深度睡眠中」');
     ok(s.get('ds_enable').checked === true, '总开关跟着状态勾上');
-    ok(st.doze === 1 && s.get('ds_doze').checked === true, 'Doze 收口开关跟着状态勾上');
+    ok(!('freeze' in st) && !('fzb' in st) && !('doze' in st),
+       '页面不再解析冻结/Doze 独立开关（只剩一个总开关）');
     ok(!('freeze' in st) && !('fzb' in st), '页面不再解析冻结开关/后端（功能已移除）');
     ok(s.get('ds-run').children.length === 2, '当次榜画两行（坏条目不算）');
     ok(s.get('ds-cur').children.length === 1, '累计榜画一行');
@@ -152,12 +151,11 @@ function sandbox() {
   }
 
   {
-    // 冻结相关的开关和文案都已从页面移除
+    // 深睡页只剩一个总开关：冻结和 Doze 两个独立开关都已经移除
     const s = sandbox();
-    s.ctx.applyDs(s.ctx.parseDs('enable=1\ndoze=0\n'), false);
-    ok(s.get('ds_doze').checked === false, 'Doze 关掉时开关是关的');
-    ok(!s.nodes.ds_freeze && !s.nodes['ds-fzb'],
-       '页面上不再有墓碑冻结开关和冻结方式那一行');
+    s.ctx.applyDs(s.ctx.parseDs('enable=1\n'), false);
+    ok(!s.nodes.ds_freeze && !s.nodes['ds-fzb'] && !s.nodes.ds_doze,
+       '页面上不再有墓碑冻结 / Doze 收口 / 冻结方式那一行');
   }
 
   {

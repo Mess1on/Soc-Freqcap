@@ -1153,12 +1153,8 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
       亮屏或插上电立刻解冻还原。闹钟前 30 分钟、正在放音乐、游戏挂机时不压。
       Doze 会暂时限制非白名单应用的后台网络，来电 / 短信 / 闹钟不受影响。</div>
     <div class="row">
-      <div class="lbl"><b>自动深度睡眠</b><span>关闭时不碰系统 Doze 设置</span></div>
+      <div class="lbl"><b>自动深度睡眠</b><span>熄屏后让系统进 Doze 深度空闲，并把 push / 短信 / 媒体临时加白；关闭则完全不碰系统 Doze</span></div>
       <label class="sw"><input type="checkbox" id="ds_enable" onchange="setDsEnable(this.checked)"><i></i></label>
-    </div>
-    <div class="row">
-      <div class="lbl"><b>Doze 收口</b><span>熄屏后让系统进一次深度空闲，并把 push / 短信 / 媒体加进 Doze 白名单；关闭则完全不碰系统 Doze</span></div>
-      <label class="sw"><input type="checkbox" id="ds_doze" onchange="setDsDoze(this.checked)"><i></i></label>
     </div>
     <div class="ds-st off" id="ds-st">
       <span class="dot"></span><span id="ds-stxt">读取中…</span><span class="meta" id="ds-meta"></span>
@@ -3268,7 +3264,7 @@ function renderPicker(){
 /* ── 深度睡眠 ──
  * 数据来自 api.sh：ds_get 带白名单（首次加载），ds_state 只给状态与榜单（2 秒轮询）。
  * 唤醒榜格式 pkg:次数:是否白名单，逗号分隔，最多 12 条。 */
-const DS = {enable:0, doze:1, alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[], limit:80};
+const DS = {enable:0, alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[], limit:80};
 
 function dsBoard(v){
   if(!v) return [];
@@ -3279,7 +3275,7 @@ function dsBoard(v){
 }
 
 function parseDs(text){
-  const o = {enable:0, doze:1, alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[]};
+  const o = {enable:0, alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[]};
   String(text || '').split('\n').forEach(l=>{
     const i = l.indexOf('=');
     if(i < 0) return;
@@ -3288,7 +3284,6 @@ function parseDs(text){
     else if(k === 'dsw') o.run = dsBoard(v);
     else if(k === 'dswc') o.cur = dsBoard(v);
     else if(k === 'dsactive') o.active = +v || 0;
-    else if(k === 'doze') o.doze = +v || 0;
     else if(k === 'enable' || k === 'alive' || k === 'paused' || k === 'wcsince') o[k] = +v || 0;
   });
   return o;
@@ -3403,41 +3398,10 @@ function applyDs(st, full){
   if(full) DS.white = st.white;
   DS.enable = st.enable; DS.alive = st.alive; DS.paused = st.paused;
   DS.active = st.active;
-
-  DS.doze = st.doze;
   DS.wcsince = st.wcsince; DS.run = st.run; DS.cur = st.cur;
   paintDsStatus();
-  paintDsToggles();
   paintDsBoards();
   if(full) paintDsWhite();
-}
-
-/* 深睡页的开关状态。冻结（墓碑）已移除，这里只剩 Doze 收口。 */
-function paintDsToggles(){
-  const dz = document.getElementById('ds_doze');
-  if(dz) dz.checked = !!DS.doze;
-}
-
-let dsDozeBusy = false;
-async function setDsDoze(on){
-  if(dsDozeBusy){
-    document.getElementById('ds_doze').checked = !!DS.doze;
-    return;
-  }
-  dsDozeBusy = true;
-  const old = DS.doze;
-  DS.doze = on ? 1 : 0;
-  paintDsToggles();
-  try{
-    await api('ds_set', 'doze', on ? '1' : '0');
-    toast(on ? '已开启 Doze 收口' : '已关闭 Doze 收口（不再碰系统 Doze）');
-    await loadDs(false);
-  }catch(e){
-    DS.doze = old;
-    paintDsToggles();
-    toast(e.message, true);
-    loadDs(false);
-  }finally{ dsDozeBusy = false; }
 }
 
 async function loadDs(full){

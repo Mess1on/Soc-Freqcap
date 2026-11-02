@@ -1279,23 +1279,19 @@ ok "$(grep -c '^enable=0' dsleep.conf)" "1" "关掉后落盘"
 BADENV=$(DSA ds_set enable 2 2>&1); BADRC=$?
 ok "$BADRC" "1" "开关只收 0/1"
 
-echo "-- Doze 与唤醒锁开关 --"
-ok "$(DSA ds_get | sed -n 's/^appops=//p')" "1" "唤醒锁默认开"
-ok "$(DSA ds_get | sed -n 's/^doze=//p')" "1" "Doze 默认开"
-ok "$(DSA ds_set doze 0 | head -n 1)" "OK doze=0" "Doze 可以单独关"
-ok "$(grep -c '^doze=0' dsleep.conf)" "1" "关 Doze 落到配置里"
-ok "$(DSA ds_get | sed -n 's/^doze=//p')" "0" "读回来是 0"
-DSA ds_set doze 1 >/dev/null
-ok "$(DSA ds_get | sed -n 's/^doze=//p')" "1" "再打开读回来是 1"
-# 冻结（墓碑）已移除：ds_set 不再接受 freeze，ds_get 也不再报 freeze/fzb。
+echo "-- 只剩一个总开关 --"
+# 冻结移除后，深睡只剩 Doze 一件事，doze / appops 两个键一并下掉，
+# 避免页面上出现两个都叫 Doze 的开关。
+reject_rc() { local o; o=$(DSA "$@" 2>&1); echo $?; }
+ok "$(DSA ds_get | grep -c '^doze=')" "0" "ds_get 不再报 doze"
+ok "$(DSA ds_get | grep -c '^appops=')" "0" "ds_get 不再报 appops"
 ok "$(DSA ds_get | grep -c '^freeze=')" "0" "ds_get 不再报冻结开关"
 ok "$(DSA ds_get | grep -c '^fzb=')" "0" "ds_get 不再报冻结后端"
-BADFZ=$(DSA ds_set freeze 1 2>&1); BADFZRC=$?
-ok "$BADFZRC" "1" "ds_set 已不接受 freeze"
+ok "$(reject_rc ds_set doze 1)" "1" "ds_set 已不接受 doze"
+ok "$(reject_rc ds_set freeze 1)" "1" "ds_set 已不接受 freeze"
 
 BADKEY=$(DSA ds_set foo 1 2>&1)
-ok "$(printf '%s\n' "$BADKEY" | head -n 1)" "E/BAD_KEY" "只认 enable / appops / doze"
-reject_rc() { local o; o=$(DSA "$@" 2>&1); echo $?; }
+ok "$(printf '%s\n' "$BADKEY" | head -n 1)" "E/BAD_KEY" "只认 enable"
 ok "$(reject_rc ds_white_add 'bad pkg')" "1" "豁免名单拒非法包名"
 ok "$(reject_rc ds_white_add 'nodots')" "1" "没有点的包名拒收"
 

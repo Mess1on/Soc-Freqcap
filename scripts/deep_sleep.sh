@@ -33,9 +33,9 @@ DS_ACTIVE_FALLBACK=30
 # 这里保留一个恒为 0 的开关，是为了让下面"解冻清理"的代码还能跑 ——
 # 升级上来的机器可能有旧版本留下的冻结账本/冻结组，必须照样解开。
 DS_FREEZE_ENABLED=0
-# Doze 总闸。关掉后模块完全不碰 deviceidle：不加/删白名单、不 force-idle、不 unforce。
-# 留着它是因为"待机耗电"到底该记在冻结头上还是 Doze 头上，只有分开跑才说得清。
-DS_DOZE_ENABLED=${DS_DOZE:-1}
+# 冻结移除之后，深睡只剩 Doze 这一件事，所以不再单设 Doze 开关：
+# 打开「自动深度睡眠」就是做 Doze，关掉就是什么都不做。恒为 1。
+DS_DOZE_ENABLED=1
 DS_FREEZE_WINDOW=180
 DS_FREEZE_RESCAN=60
 DS_DOZE_AT=450
@@ -49,9 +49,8 @@ DS_SCAN_META=$CONF_DIR/run/freeze.meta
 DS_SCAN_CAND=$CONF_DIR/run/freeze.cand
 DS_EVENT_TMP=$CONF_DIR/run/ds_event.tmp
 DS_EVENT_FIFO=$CONF_DIR/run/ds_event.fifo
-# 深睡只做冻结 + appops 唤醒锁，不碰 CPU 频率/调度。
-# nice= 不冻结、不碰唤醒锁（保活）；push= 只放行指定进程（pkg[:proc]）并注入 Doze 白名单。
-DS_APPOPS_ENABLED=${DS_APPOPS:-1}
+# 深睡只做 Doze，不碰 CPU 频率/调度。
+# nice= 不碰；push= 只放行指定进程（pkg[:proc]）并注入 Doze 白名单。
 DS_OPS_LEDGER=$CONF_DIR/run/ops.saved
 DS_LOCK_DIR=$CONF_DIR/run/dsleep.lock.d
 # 只有维护轮才读 dumpsys（一次就是一次 system_server 往返）。计数器是累计量，
@@ -303,21 +302,14 @@ ds_conf_write() {
     cat - >"$DSLEEP_CONF.tmp" <<'EOF'
 # 深度睡眠配置
 # enable=1 打开；0 关闭。关闭只停止干预，不会保留任何系统改动。
+# 打开后：熄屏满 20 秒开始准备，满 7 分 30 秒让系统进一次 Doze 深度空闲，
+# 并把 push= / 默认短信 / 正在播放的媒体临时加进 Doze 白名单。
 enable=0
-# 有的 ROM 自带冻结器（如 ColorOS 的 HANS 就在同一个 /dev/freezer 上跑），
-# 两套一起冻会互相把对方刚冻上的进程解开。想对比待机耗电就把它设 0 跑一晚。
-# appops=1 冻结时顺手把后台应用的唤醒锁权限设成 ignore，退出时按账本还原；
-# 0 完全不碰唤醒锁。对比耗电时也可以单独关它。
-# appops=1
-# doze=1 熄屏 7 分 30 秒后让系统 force-idle 一次，并把 push/短信/媒体加进 Doze 白名单；
-# 0 完全不碰 deviceidle（不加白名单、不 force-idle、不 unforce）。
-# 注意白名单是"包级豁免"：加进去等于整个应用不受 Doze 限制。
-# doze=1
-# 每行一条 white=包名：完全豁免（不冻结/不限 CPU/不碰唤醒锁），并加入 Doze 白名单。
+# 每行一条 white=包名：完全豁免，深睡时也不受 Doze 限制（等同系统的「无限制」）。
 # white=com.tencent.mm
-# nice=包名：不冻结、不碰唤醒锁（保活类应用；深睡不碰 CPU）。
+# nice=包名：深睡不碰它（只是保留项，不影响 Doze）。
 # nice=com.tencent.mobileqq
-# push=包名[:进程]：只放行这个进程（不冻结/不限 CPU/不碰唤醒锁），并把包加入 Doze 白名单。
+# push=包名[:进程]：把这个包加入 Doze 白名单，保证熄屏后消息还能进来。
 # push=com.tencent.mm:push
 EOF
     mv -f "$DSLEEP_CONF.tmp" "$DSLEEP_CONF" 2>/dev/null
@@ -364,8 +356,6 @@ ds_conf_load() {
     DS_WHITE=$(ds_conf_list white)
     DS_NICE=$(ds_conf_list nice)
     DS_PUSH=$(ds_conf_list push)
-    DS_APPOPS_ENABLED=$(ds_conf_opt appops "${DS_APPOPS:-1}")
-    DS_DOZE_ENABLED=$(ds_conf_opt doze "${DS_DOZE:-1}")
     return 0
 }
 
@@ -1112,7 +1102,6 @@ ds_state_write() {
           printf "%s%s:%d:%d", sep, $1, $2, flag }')"
     new="enable=$ds_enabled
 dsactive=$ds_active
-doze=${DS_DOZE_ENABLED:-1}
 wcsince=$ds_wcsince
 dsw=$dsw
 dswc=$dswc"

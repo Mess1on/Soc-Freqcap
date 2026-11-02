@@ -1497,8 +1497,6 @@ _ds_stop() {
 _ds_dump() {
   _ds_conf_init
   printf 'enable=%s\n' "$(_ds_enable)"
-  printf 'appops=%s\n' "$(_ds_switch appops 1)"
-  printf 'doze=%s\n' "$(_ds_switch doze 1)"
   printf 'alive=%s\n' "$(_ds_alive)"
   printf 'paused=%s\n' "$([ -f "$PAUSE" ] && echo 1 || echo 0)"
   if [ -f "$DS_STATE" ]; then
@@ -1526,7 +1524,7 @@ cmd_ds_state() { _ds_dump; }
 cmd_ds_set() {
   _k=${1:-}; _v=${2:-}
   case "$_k" in
-    enable|appops|doze) ;;
+    enable) ;;
     *) die "BAD_KEY" ;;
   esac
   is_switch "$_v" || die "RANGE"
