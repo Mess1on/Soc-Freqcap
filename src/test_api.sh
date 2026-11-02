@@ -1301,8 +1301,8 @@ DSA ds_set enable 1 >/dev/null
 sleep 1
 FZB=$(DSA ds_get | sed -n 's/^fzb=//p')
 case "$FZB" in
-  v2|v1|sigstop) ok y y "开了冻结就报出后端（$FZB）" ;;
-  *) ok "$FZB" "v2/v1/sigstop" "开了冻结应报出后端" ;;
+  v2|v1|none|off) ok y y "开了冻结就报出后端（$FZB）" ;;
+  *) ok "$FZB" "v2/v1/none" "开了冻结应报出后端" ;;
 esac
 DSA ds_set enable 0 >/dev/null
 

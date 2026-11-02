@@ -3432,7 +3432,8 @@ function paintDsFreeze(){
   else if(!DS.freeze)     h.textContent = '冻结方式：已关闭，只做 Doze 白名单';
   else if(DS.fzb === 'v2')      h.textContent = '冻结方式：V2 · 每进程原地冻结（推荐）';
   else if(DS.fzb === 'v1')      h.textContent = '冻结方式：V1 · 独立 cgroup 组（旧内核回退）';
-  else if(DS.fzb === 'sigstop') h.textContent = '冻结方式：SIGSTOP · 内核没有 cgroup 冻结，兼容模式';
+  else if(DS.fzb === 'sigstop') h.textContent = '冻结方式：SIGSTOP · 旧版兼容模式（新版本不再使用）';
+  else if(DS.fzb === 'none')    h.textContent = '冻结方式：本机内核没有可用的 cgroup 冻结，已跳过（不会用 SIGSTOP 硬停进程）';
   else                          h.textContent = '冻结方式：识别中…';
 }
 

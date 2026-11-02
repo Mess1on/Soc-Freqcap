@@ -81,7 +81,9 @@
   `full` / `keep` 档位、正在放媒体的应用、本模块和管理器、Scene 都不冻。
   厂商自带应用（`com.coloros.` / `com.oplus.` / `com.hihonor.` / `com.google.` 等前缀）
   整片不冻：ColorOS 的时钟/健康/天气在 `-3` 清单里，冻了就是闹钟不响。
-- 后端顺序：**v2 `cgroup.freeze`（优先）→ v1 独立 freezer 层级 → `SIGSTOP`（最后的兼容兜底）**。
+- 后端顺序：**v2 `cgroup.freeze`（优先）→ v1 独立 freezer 层级 → 都不行就这一次不冻**。
+  不再有 SIGSTOP 兜底：它会进程硬按在原地，按到系统正在同步调用的进程就会把
+  system_server 卡在 binder 上，watchdog 60 秒后整机重启。
   现代 Android 是混合布局：统一 v2 层级在 `/sys/fs/cgroup`，app 各自待在
   `/sys/fs/cgroup/apps/uid_X/pid_Y`；而 `/dev/freezer` 这类 v1 挂载是旧路径。
   v2 里冻结是核心功能，`cgroup.freeze` 在每个 cgroup 里都有，**不会**出现在

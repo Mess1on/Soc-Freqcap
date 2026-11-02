@@ -43,6 +43,45 @@ su -c 'sh /data/adb/modules/soc_freqcap/tools/fix_metamodule.sh --fix'    # 重�
 
 它只删一个 `disable` 标记文件，不改系统分区、不碰任何配置。
 
+### 打开 WebUI 卡死 / 手机自己重启 / 重启后没 root
+
+这三件事经常被连在一起报，但成因完全不同，先别混着猜。
+
+**先取证（只读，什么都不改）：**
+
+```sh
+su -c 'sh /data/adb/modules/soc_freqcap/tools/collect_crash.sh'
+```
+
+它会把型号、`ro.boot.bootreason`、内核里有没有 `panic/watchdog/hung task`、
+pstore（上次崩溃的内核日志，有就是铁证）、全部模块列表（标出被停用的和
+`metamodule`）、本模块日志和频率节点现状写成一个 txt。把这个文件发出来，
+比描述十句都准。
+
+**几个判据：**
+
+- `ro.boot.bootreason` 是 `reboot,` / `shutdown,` = 正常重启（可能是长按电源或手动重启）；
+  带 `watchdog` / `panic` / `hard_reset` 才是系统自己挂掉。
+- 重启后"没 root"：先确认是不是**掉到了没装 KernelSU 的槽位/内核**，
+  以及 `/data/adb/modules` 里有没有被停用（`disable`）或标记卸载（`remove`）的模块。
+  装了 `metamodule=1` 的模块（常见 Hybrid Mount）被停用时，管理器还会**拒绝安装任何模块**，
+  见上一节。
+- 打开 WebUI 卡死：页面每个命令都有 12 秒超时，正常不会无限转圈。
+  如果整机都卡住（不只是页面），那更像内核/系统服务层面的问题，按上面取证。
+
+**怀疑是本模块时，先把它停掉再观察，不用卸载：**
+
+```sh
+su -c 'sh /data/adb/modules/soc_freqcap/tools/safemode.sh on' && reboot   # 进安全模式
+su -c 'sh /data/adb/modules/soc_freqcap/tools/safemode.sh off' && reboot  # 退出
+```
+
+安全模式下守护完全不启动：不改频率、不冻结、不碰 Doze，模块还在，随时能退出来。
+
+**本版起不再使用 SIGSTOP 兜底**：拿不到 cgroup 冻结就不冻。SIGSTOP 会把进程硬按在原地，
+一旦按到系统正在同步调用的进程，system_server 卡在 binder 上，watchdog 60 秒后整机重启
+—— 这是"突然强制重启"最像的一条路径。
+
 ### 卸载后频率没回原厂 / 出现“限制性能的组件”弹窗
 
 模块只写 CPU/GPU 的 `scaling_max_freq` 等节点，**重启后内核会把这些节点重置**。

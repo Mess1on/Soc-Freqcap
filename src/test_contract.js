@@ -3331,6 +3331,8 @@ console.log('\n== restart 不吊住调用者 ==');
   ok(!/push 列表的包也要进 Doze 白名单/.test(ds)
      && /不再\*\*把 push= 的包塞进 Doze 白名单|不再.*push=.*Doze 白名单/.test(ds),
      'push 包不进 Doze 白名单（包级豁免 = 整包不受 Doze 限制，和"只放行进程"不符）');
+  ok(!/ds_freeze_backend="sigstop"/.test(ds) && /ds_freeze_backend="none"/.test(ds),
+     '没有 cgroup 冻结时跳过，不再退到 SIGSTOP（SIGSTOP 停住被系统依赖的进程会触发 watchdog 重启）');
   ok(/ds_policy_migrate_v3/.test(ds) && /policy_v3/.test(ds)
      && /doze\.before-policy3/.test(ds) && /音乐\/健康\/Scene/.test(ds),
      '音乐/健康/Scene 一次迁移出 Doze 白名单（不再整包常驻放行）');
@@ -3529,7 +3531,7 @@ console.log('\n== restart 不吊住调用者 ==');
   /* 版本：module.prop / 页面模块版本 / README 一起改；
      守护二进制这轮没重编，SF_VERSION 仍是 2.1，页面 #ver2 也跟着它。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20101$/m.test(mp),
+  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20102$/m.test(mp),
      'module.prop 是 V2.1 Beta / 20101');
   ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号仍是 2.1（本轮未重编）');
   ok(/id="ver">V2\.1 Beta</.test(html) && /id="ver2">V2\.1</.test(html),

@@ -664,7 +664,12 @@ ds_freeze_probe() {
         ds_freeze_group="$m/$DS_FREEZE_GROUP_NAME"
         return 0
     fi
-    ds_freeze_backend="sigstop"
+    # 两套 cgroup 都用不了就干脆不冻结。
+    # 以前的兜底是 SIGSTOP：它能把任意进程按死在原地，一旦按到系统正在
+    # 同步调用的进程（content provider / bound service），system_server 会
+    # 卡在 binder 上，watchdog 60 秒后直接把整机重启 —— 那正是"用着用着
+    # 突然强制重启"最像的一条路径。宁可这次不冻，也不冒这个险。
+    ds_freeze_backend="none"
     return 0
 }
 
@@ -770,16 +775,16 @@ ds_freeze_group_reset() {
 ds_freeze_group_init() {
     case "$ds_freeze_backend" in
         # v2 不建组：每个进程在自己原来的 cgroup 里原地冻。
-        off|sigstop|v2) return 0 ;;
+        off|none|sigstop|v2) return 0 ;;
     esac
     ds_freeze_group_reset
     mkdir -p "$ds_freeze_group" 2>/dev/null || {
-        ds_freeze_backend="sigstop"
+        ds_freeze_backend="none"
         return 0
     }
     if [ ! -w "$ds_freeze_group/freezer.state" ]; then
         rmdir "$ds_freeze_group" 2>/dev/null
-        ds_freeze_backend="sigstop"
+        ds_freeze_backend="none"
         return 0
     fi
     echo THAWED > "$ds_freeze_group/freezer.state" 2>/dev/null
@@ -833,7 +838,7 @@ EOF
 ds_freeze_verify() {
     local i=0 all line pid st pkg cg
     case "$ds_freeze_backend" in
-        sigstop|off) return 0 ;;
+        sigstop|off|none) return 0 ;;
         v1)
             while [ "$i" -lt 6 ]; do
                 [ "$(cat "$ds_freeze_group/freezer.state" 2>/dev/null)" = "FROZEN" ] && return 0
@@ -922,7 +927,7 @@ EOF
     ds_frozen=""
     ds_freeze_frozen=0
     ds_freeze_done=0
-    [ "$b" != "off" ] && log_ds "冻结已还原（$b）"
+    [ "$b" != "off" ] && [ "$b" != "none" ] && log_ds "冻结已还原（$b）"
 }
 
 # 启动/停止兜底：账本在就按账本还原；只有自己的组在也要解冻清空。

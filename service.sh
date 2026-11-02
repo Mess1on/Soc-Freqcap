@@ -15,6 +15,12 @@ DS_PID="$DATA/run/dsleep.pid"
 DS_SH="$MODDIR/scripts/deep_sleep.sh"
 
 [ -f "$PAUSE" ] && exit 0
+# 安全模式：数据目录里放一个 safemode 文件，守护就不再启动。
+# 万一某个版本在某台机器上把系统带坏，或者你只想彻底停掉它：
+#   touch /data/adb/soc_freqcap/safemode && reboot
+# 不用卸载模块、不用改开机脚本；删掉这个文件再重启就恢复。
+# tools/safemode.sh 是它的开关。
+[ -f "$DATA/safemode" ] && exit 0
 
 # 启动看门狗自己的日志：WebUI「完整日志」的“启动”来源读这里。
 # 超过 256KB 砍半，和守护日志同一个规矩。

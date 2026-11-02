@@ -79,8 +79,9 @@ ds_freeze_probe
 echo "  backend=$ds_freeze_backend root=$ds_freeze_root"
 case "$ds_freeze_backend" in
     v1|v2) ok y y "拿到 cgroup freezer（$ds_freeze_backend）" ;;
-    sigstop) echo "  注意：只有 SIGSTOP 后端，下面跳过 cgroup 断言" ;;
-    *) ok "$ds_freeze_backend" "v1/v2" "应该能探测到 freezer" ;;
+    none)  echo "  本机没有可用的 cgroup 冻结：冻结被跳过（这是新行为，不再 SIGSTOP）" ;;
+    sigstop) ok sigstop none "探测结果不应再退回 SIGSTOP（会卡死系统）" ;;
+    *) ok "$ds_freeze_backend" "v1/v2/none" "应该能探测到 freezer" ;;
 esac
 
 echo "== 用 dummy 进程走完整冻结 =="
