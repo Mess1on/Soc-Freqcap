@@ -12,7 +12,7 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 | 智能调度 | 首页可在「限频 / 智能」间切换；智能按空闲、轻载、中载、重载四档动态给目标，`CPU_PCT_*` 只当天花板 |
 | 游戏与分应用放开 | `games.txt` 认包名，进游戏解除封顶并把节点权限交还系统；`app_modes.conf` 支持 `full` / `keep` / 单独数值 |
 | GPU 多后端 | 高通 KGSL、MTK Mali devfreq，以及天玑 9500 这类无 GPU devfreq 机型的 `gpufreqv2 limit_table` |
-| WebUI + 深度睡眠 | 页面调参 / 名单 / 建议；熄屏 20 秒冻结第三方后台、7:30 一次性 Doze，可配豁免与唤醒榜 |
+| WebUI + 深度睡眠 | 页面调参 / 名单 / 建议；熄屏后 Doze 收口（force-idle + 白名单），可配豁免与唤醒榜 |
 
 ## 安装
 
@@ -77,7 +77,7 @@ WebUI：管理器模块页 → 打开 WebUI。首页徽标显示「常态限频�
 | [设计与行为](docs/design.md) | 按簇分档、封顶吸附、与系统调度相处 |
 | [安装、升级与卸载](docs/install.md) | 兼容性、KernelSU 热安装、卸载 |
 | [配置](docs/configuration.md) | 全部配置键、分应用档位、实时偏移、SoC 频率表 |
-| [深度睡眠](docs/deep-sleep.md) | 冻结 / Doze 时序、豁免、唤醒榜、待机耗电排查 |
+| [深度睡眠](docs/deep-sleep.md) | Doze 时序、豁免、唤醒榜、待机耗电排查 |
 | [芯片适配包](docs/adaptation.md) | 自动探测扑空时怎么导出、修改、验证 |
 | [WebUI](docs/webui.md) | 页面、主题、发行商词典、图标边界 |
 | [命令行与音量键](docs/cli.md) | `socfreqd` 子命令、`action.sh` 按键菜单 |

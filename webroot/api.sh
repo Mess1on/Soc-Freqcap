@@ -1425,13 +1425,6 @@ _ds_switch() {
 
 # 当前会选哪个冻结后端：v2（原地）/ v1（独立层级）/ sigstop / off。
 # 用真脚本探一次，不自己抄一份判断 —— 抄的那份迟早和后端逻辑对不上。
-_ds_freezer() {
-  [ -f "$DS_SH" ] || { echo off; return 0; }
-  ( . "$DS_SH" >/dev/null 2>&1
-    DS_FREEZE_ENABLED=1
-    ds_freeze_probe
-    printf '%s\n' "${ds_freeze_backend:-off}" ) 2>/dev/null
-}
 
 # pid 文件只能当线索：kill -9 后文件会残留，真正判据是 /proc 里的 cmdline。
 _ds_alive() {
@@ -1504,22 +1497,8 @@ _ds_stop() {
 _ds_dump() {
   _ds_conf_init
   printf 'enable=%s\n' "$(_ds_enable)"
-  printf 'freeze=%s\n' "$(_ds_switch freeze 1)"
   printf 'appops=%s\n' "$(_ds_switch appops 1)"
   printf 'doze=%s\n' "$(_ds_switch doze 1)"
-  # 后端只报"实际会选哪个"，不报用户愿望：用户看到的必须是真在用的那一套。
-  # 2 秒轮询走状态文件里缓存的那份（守护每轮会写），只有 full 才现场探一次 ——
-  # 现场探要 source 一遍整份脚本，没必要每 2 秒做一次。
-  if [ "$(_ds_enable)" = "1" ] && [ "$(_ds_switch freeze 1)" = "1" ]; then
-    if [ "${1:-}" = "full" ]; then
-      printf 'fzb=%s\n' "$(_ds_freezer)"
-    else
-      _fzb=$(sed -n 's/^fzb=//p' "$DS_STATE" 2>/dev/null | head -n 1)
-      printf 'fzb=%s\n' "${_fzb:-}"
-    fi
-  else
-    printf 'fzb=off\n'
-  fi
   printf 'alive=%s\n' "$(_ds_alive)"
   printf 'paused=%s\n' "$([ -f "$PAUSE" ] && echo 1 || echo 0)"
   if [ -f "$DS_STATE" ]; then
@@ -1547,7 +1526,7 @@ cmd_ds_state() { _ds_dump; }
 cmd_ds_set() {
   _k=${1:-}; _v=${2:-}
   case "$_k" in
-    enable|freeze|appops|doze) ;;
+    enable|appops|doze) ;;
     *) die "BAD_KEY" ;;
   esac
   is_switch "$_v" || die "RANGE"

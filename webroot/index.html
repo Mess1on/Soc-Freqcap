@@ -1157,11 +1157,6 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
       <label class="sw"><input type="checkbox" id="ds_enable" onchange="setDsEnable(this.checked)"><i></i></label>
     </div>
     <div class="row">
-      <div class="lbl"><b>墓碑冻结</b><span>熄屏后冻结第三方后台；关闭则只做 Doze 白名单，不冻任何进程</span></div>
-      <label class="sw"><input type="checkbox" id="ds_freeze" onchange="setDsFreeze(this.checked)"><i></i></label>
-    </div>
-    <div class="hint" id="ds-fzb" style="margin:-2px 0 6px">冻结方式：读取中…</div>
-    <div class="row">
       <div class="lbl"><b>Doze 收口</b><span>熄屏后让系统进一次深度空闲，并把 push / 短信 / 媒体加进 Doze 白名单；关闭则完全不碰系统 Doze</span></div>
       <label class="sw"><input type="checkbox" id="ds_doze" onchange="setDsDoze(this.checked)"><i></i></label>
     </div>
@@ -3273,7 +3268,7 @@ function renderPicker(){
 /* ── 深度睡眠 ──
  * 数据来自 api.sh：ds_get 带白名单（首次加载），ds_state 只给状态与榜单（2 秒轮询）。
  * 唤醒榜格式 pkg:次数:是否白名单，逗号分隔，最多 12 条。 */
-const DS = {enable:0, freeze:1, doze:1, fzb:'', alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[], limit:80};
+const DS = {enable:0, doze:1, alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[], limit:80};
 
 function dsBoard(v){
   if(!v) return [];
@@ -3284,7 +3279,7 @@ function dsBoard(v){
 }
 
 function parseDs(text){
-  const o = {enable:0, freeze:1, doze:1, fzb:'', alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[]};
+  const o = {enable:0, doze:1, alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[]};
   String(text || '').split('\n').forEach(l=>{
     const i = l.indexOf('=');
     if(i < 0) return;
@@ -3293,9 +3288,7 @@ function parseDs(text){
     else if(k === 'dsw') o.run = dsBoard(v);
     else if(k === 'dswc') o.cur = dsBoard(v);
     else if(k === 'dsactive') o.active = +v || 0;
-    else if(k === 'freeze') o.freeze = +v || 0;
     else if(k === 'doze') o.doze = +v || 0;
-    else if(k === 'fzb') o.fzb = v;
     else if(k === 'enable' || k === 'alive' || k === 'paused' || k === 'wcsince') o[k] = +v || 0;
   });
   return o;
@@ -3410,54 +3403,19 @@ function applyDs(st, full){
   if(full) DS.white = st.white;
   DS.enable = st.enable; DS.alive = st.alive; DS.paused = st.paused;
   DS.active = st.active;
-  DS.freeze = st.freeze; DS.fzb = st.fzb;
+
   DS.doze = st.doze;
   DS.wcsince = st.wcsince; DS.run = st.run; DS.cur = st.cur;
   paintDsStatus();
-  paintDsFreeze();
+  paintDsToggles();
   paintDsBoards();
   if(full) paintDsWhite();
 }
 
-/* 冻结方式必须显示"实际在用的那套"。后端由守护按内核能力自动选，
-   页面不猜：v2 是每进程原地冻结，v1 是旧内核上的独立 cgroup 组。 */
-function paintDsFreeze(){
-  const el = document.getElementById('ds_freeze');
-  if(el) el.checked = !!DS.freeze;
+/* 深睡页的开关状态。冻结（墓碑）已移除，这里只剩 Doze 收口。 */
+function paintDsToggles(){
   const dz = document.getElementById('ds_doze');
   if(dz) dz.checked = !!DS.doze;
-  const h = document.getElementById('ds-fzb');
-  if(!h) return;
-  if(!DS.enable)          h.textContent = '冻结方式：未开启深度睡眠';
-  else if(!DS.freeze)     h.textContent = '冻结方式：已关闭，只做 Doze 白名单';
-  else if(DS.fzb === 'v2')      h.textContent = '冻结方式：V2 · 每进程原地冻结（推荐）';
-  else if(DS.fzb === 'v1')      h.textContent = '冻结方式：V1 · 独立 cgroup 组（旧内核回退）';
-  else if(DS.fzb === 'sigstop') h.textContent = '冻结方式：SIGSTOP · 旧版兼容模式（新版本不再使用）';
-  else if(DS.fzb === 'none')    h.textContent = '冻结方式：本机内核没有可用的 cgroup 冻结，已跳过（不会用 SIGSTOP 硬停进程）';
-  else                          h.textContent = '冻结方式：识别中…';
-}
-
-let dsFreezeBusy = false;
-async function setDsFreeze(on){
-  if(dsFreezeBusy){
-    // 忙碌期间再点：不排队，直接拨回当前目标状态。
-    document.getElementById('ds_freeze').checked = !!DS.freeze;
-    return;
-  }
-  dsFreezeBusy = true;
-  const old = DS.freeze;
-  DS.freeze = on ? 1 : 0;
-  paintDsFreeze();
-  try{
-    await api('ds_set', 'freeze', on ? '1' : '0');
-    toast(on ? '已开启墓碑冻结' : '已关闭墓碑冻结');
-    await loadDs(false);
-  }catch(e){
-    DS.freeze = old;
-    paintDsFreeze();
-    toast(e.message, true);
-    loadDs(false);
-  }finally{ dsFreezeBusy = false; }
 }
 
 let dsDozeBusy = false;
@@ -3469,14 +3427,14 @@ async function setDsDoze(on){
   dsDozeBusy = true;
   const old = DS.doze;
   DS.doze = on ? 1 : 0;
-  paintDsFreeze();
+  paintDsToggles();
   try{
     await api('ds_set', 'doze', on ? '1' : '0');
     toast(on ? '已开启 Doze 收口' : '已关闭 Doze 收口（不再碰系统 Doze）');
     await loadDs(false);
   }catch(e){
     DS.doze = old;
-    paintDsFreeze();
+    paintDsToggles();
     toast(e.message, true);
     loadDs(false);
   }finally{ dsDozeBusy = false; }

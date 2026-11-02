@@ -22,6 +22,14 @@ DS_SH="$MODDIR/scripts/deep_sleep.sh"
 # tools/safemode.sh 是它的开关。
 [ -f "$DATA/safemode" ] && exit 0
 
+# 开机先清一次旧版本留下的冻结：冻结功能已移除，但升级上来的机器可能还留着
+# 账本或 socfreq_ds 组。那些进程会一直停着、收不到消息 —— 深睡开关关着也一样，
+# 因为清理解冻和"要不要深睡"是两件事，必须无条件做。
+if [ -f "$DATA/run/freeze.saved" ] || [ -d /dev/freezer/socfreq_ds ] \
+   || [ -d /sys/fs/cgroup/apps/socfreq_ds ]; then
+  ( . "$DS_SH" >/dev/null 2>&1; ds_freeze_restore_if_any; ds_ops_restore_if_any ) >/dev/null 2>&1
+fi
+
 # 启动看门狗自己的日志：WebUI「完整日志」的“启动”来源读这里。
 # 超过 256KB 砍半，和守护日志同一个规矩。
 SVC_LOG="$DATA/service.log"

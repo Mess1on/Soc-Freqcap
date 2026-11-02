@@ -3273,32 +3273,21 @@ console.log('\n== restart 不吊住调用者 ==');
      && /settings delete global device_idle_constants/.test(ds),
      '不再写 device_idle_constants（旧快照还原仍能 delete/put 原值）');
 
-  /* 冻结：三种后端、排除项、账本与分批。 */
-  ok(/DS_FREEZE_ENABLED=\$\{DS_FREEZE:-1\}/.test(ds) && /ds_freeze_probe\(\)/.test(ds)
-     && /\/proc\/mounts/.test(ds) && /cgroup\.freeze/.test(ds) && /kill -STOP/.test(ds),
-     '冻结后端按 v1 freezer → v2 cgroup.freeze → SIGSTOP 依次降级');
-  ok(/ds_freeze_build_queue\(\)[\s\S]{0,1400}pm list packages -3/.test(ds)
-     && /oom_score_adj/.test(ds) && /oom\[p\] >= 200/.test(ds)
-     && /ps -A -o pid=,args=/.test(ds),
-     '只冻第三方包、只冻缓存/后台进程（adj >= 200），一次扫描只起固定几个子进程');
-  ok(/账本可能漏掉后来进组的子进程/.test(ds)
-     && /cgroup\.procs[\s\S]{0,400}rmdir/.test(ds),
-     '解冻按组内实际 PID 全部搬回根组再删组');
-  ok(/ds_freeze_add_skip/.test(ds) && /default_input_method/.test(ds)
-     && /enabled_accessibility_services/.test(ds) && /always_on_vpn_app/.test(ds)
-     && /app_modes\.conf/.test(ds) && /com\.coloros\.\*/.test(ds)
-     && /alarmclock/.test(ds),
-     '输入法/无障碍/VPN/桌面/当前前台/满血或 keep/厂商应用不冻（含 ColorOS 时钟）');
-  {
-    const code = ds.replace(/^[ \t]*#.*$/gm, '');
-    ok(/IFS='\|' read -r pid st pkg/.test(code) && !/\$\{line%%\|\*\}/.test(code),
-       '冻结队列用 IFS 切字段：mksh 把 | 当 ksh 模式的“或”，${x%%|*} 切不出 pid');
-  }
-  ok(/ds_freeze_ledger_save/.test(ds) && /ds_freeze_restore_if_any/.test(ds)
-     && /ds_freeze_thaw_all/.test(ds) && /freeze\.saved/.test(ds),
-     '冻结账本落盘，亮屏/关开关/启动/卸载都按账本解冻');
-  ok(/DS_FREEZE_BATCH=8/.test(ds) && /ds_freeze_thaw_pkg/.test(ds),
-     '冻结分批进行，媒体/新豁免应用能从组里单独解冻');
+  /* 冻结（墓碑）已从深睡移除：不能有任何"冻进程"的路径，
+     但旧版本留下的冻结账本/组仍必须能解开（否则升级上来的机器会被冻死）。 */
+  ok(/^DS_FREEZE_ENABLED=0$/m.test(ds), '冻结开关恒为 0（功能已移除）');
+  ok(!/ds_freeze_build_queue|ds_freeze_step|ds_freeze_add_pid/.test(ds),
+     '不再扫描候选、不再入组、不再冻进程');
+  ok(!/kill -STOP/.test(ds), '不再使用 SIGSTOP 硬停进程');
+  ok(/ds_freeze_restore_if_any/.test(ds) && /ds_freeze_thaw_all/.test(ds)
+     && /freeze\.saved/.test(ds) && /cgroup\.procs[\s\S]{0,400}rmdir/.test(ds),
+     '旧冻结仍按账本/组解开（启动与退出都做）');
+  ok(/DS_FREEZE_ENABLED=1[\s\S]{0,120}ds_freeze_probe/.test(ds),
+     '清理时临时按 1 探测，否则开关关着时找不到残留组');
+  ok(/DS_NICE=\$\(ds_conf_list nice\)/.test(ds) && /DS_PUSH=\$\(ds_conf_list push\)/.test(ds),
+     '配置仍支持 nice=/push= 列表');
+  ok(/ds_push_pkg_list/.test(ds) && /push= 的包要进 Doze 白名单/.test(ds),
+     'push= 的包进 Doze 白名单（不再冻结，只能靠 Doze 保住消息）');
   ok(/ds_doze_once/.test(ds) && /cmd deviceidle force-idle deep/.test(ds)
      && /dumpsys deviceidle force-idle deep/.test(ds) && /本次不再重试/.test(ds),
      '7:30 一次性 Doze：cmd 优先、dumpsys 兜底、失败不重试');
@@ -3308,14 +3297,11 @@ console.log('\n== restart 不吊住调用者 ==');
   ok(/DS_NICE=\$\(ds_conf_list nice\)/.test(ds) && /DS_PUSH=\$\(ds_conf_list push\)/.test(ds)
      && /nice=包名/.test(ds) && /push=包名\[:进程\]/.test(ds),
      '配置支持 nice=/push= 列表');
-  ok(/ds_push_match_proc\(\)/.test(ds) && /ds_push_match_proc "\$cmd" && continue/.test(ds)
-     && /ds_pkg_in_push "\$pkg" && return 0/.test(ds),
-     'push= 按进程放行；同包其它进程仍冻结');
-  ok(/cmd appops get "\$1" WAKE_LOCK 2>\/dev\/null < \/dev\/null/.test(ds)
-     && /cmd appops set "\$pkg" WAKE_LOCK ignore[^\n]*< \/dev\/null/.test(ds)
-     && /cmd appops set "\$pkg" WAKE_LOCK "\$old"[^\n]*< \/dev\/null/.test(ds)
+  ok(!/cmd appops set "\$pkg" WAKE_LOCK ignore/.test(ds),
+     '不再主动把唤醒锁设成 ignore（那是冻结的一环，已随冻结移除）');
+  ok(/cmd appops set "\$pkg" WAKE_LOCK "\$old"[^\n]*< \/dev\/null/.test(ds)
      && /DS_OPS_LEDGER/.test(ds) && /ds_ops_restore_all/.test(ds),
-     'appops 读写都断开 stdin（while read < 账本时 cmd 继承 fd 会事务失败）');
+     '只保留唤醒锁还原，且断开 stdin（while read < 账本时 cmd 继承 fd 会事务失败）');
   ok(/ds_ops_restore_all[\s\S]{0,160}ds_freeze_thaw_all/.test(ds),
      '恢复顺序：唤醒锁 -> 解冻 -> unforce');
   ok(/ds_freeze_thaw_all[\s\S]{0,220}\[ -f "\$DS_OPS_LEDGER" \] && ds_ops_restore_all/.test(ds),
@@ -3328,9 +3314,8 @@ console.log('\n== restart 不吊住调用者 ==');
   ok(/ds_policy_migrate/.test(ds) && /push=com\.tencent\.mm:push/.test(ds)
      && /bak-policy2/.test(ds) && /nice=%s/.test(ds),
      '一次性策略迁移：内置 IM 从 white= 移到 nice=/push=');
-  ok(!/push 列表的包也要进 Doze 白名单/.test(ds)
-     && /不再\*\*把 push= 的包塞进 Doze 白名单|不再.*push=.*Doze 白名单/.test(ds),
-     'push 包不进 Doze 白名单（包级豁免 = 整包不受 Doze 限制，和"只放行进程"不符）');
+  ok(/for pkg in \$\(ds_push_pkg_list/.test(ds),
+     'push 包进 Doze 白名单（冻结已移除，Doze 是唯一会压后台的机制）');
   ok(!/ds_freeze_backend="sigstop"/.test(ds) && /ds_freeze_backend="none"/.test(ds),
      '没有 cgroup 冻结时跳过，不再退到 SIGSTOP（SIGSTOP 停住被系统依赖的进程会触发 watchdog 重启）');
   ok(/ds_policy_migrate_v3/.test(ds) && /policy_v3/.test(ds)
@@ -3378,10 +3363,8 @@ console.log('\n== restart 不吊住调用者 ==');
      '强制深睡与解除强制成对出现');
   {
     const enter = (ds.match(/ds_enter\(\) \{[\s\S]*?\n\}/) || [''])[0];
-    ok(enter.indexOf('ds_snap_write') > 0
-       && enter.indexOf('ds_snap_write') < enter.indexOf('ds_freeze_build_queue')
-       && enter.indexOf('force-idle deep') < 0,
-       '先写快照再加冻：刚冻完就被杀时有还原依据；进入时不再 force-idle');
+    ok(enter.indexOf('ds_snap_write') > 0 && enter.indexOf('force-idle deep') < 0,
+       '进深睡前先写快照（白名单加完就落盘），进入时不再 force-idle');
   }
   ok(/rm -f "\$DS_SNAP"/.test(ds) && /ds_snap_restore_if_any/.test(ds),
      '快照在正常退出时删除，启动时发现残留就按存档还原');
@@ -3531,7 +3514,7 @@ console.log('\n== restart 不吊住调用者 ==');
   /* 版本：module.prop / 页面模块版本 / README 一起改；
      守护二进制这轮没重编，SF_VERSION 仍是 2.1，页面 #ver2 也跟着它。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20102$/m.test(mp),
+  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20103$/m.test(mp),
      'module.prop 是 V2.1 Beta / 20101');
   ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号仍是 2.1（本轮未重编）');
   ok(/id="ver">V2\.1 Beta</.test(html) && /id="ver2">V2\.1</.test(html),

@@ -1,6 +1,7 @@
 #!/system/bin/sh
-# 深度睡眠守护：熄屏且未充电满 20 秒后，先分批冻结第三方后台进程，
-# 息屏 7:30 一次性 force-idle；亮屏或插电立即解冻、撤白名单并退出 Doze。
+# 深度睡眠守护：熄屏且未充电满 20 秒后，按 Doze 收口：
+# 熄屏 7:30 一次性 force-idle，并临时放行 push/短信/媒体；亮屏或插电立即撤白名单并退出 Doze。
+# 不再冻结任何进程（墓碑功能已移除）；旧版本留下的冻结只在启动/退出时按账本解开。
 # 所有系统改动先写存档/账本，退出、启动、卸载都逐项逆操作。
 #
 # 本文件被 service.sh 以后台进程拉起，也被 api.sh source 一次用于按存档还原。
@@ -28,7 +29,10 @@ DS_ACTIVE_TICK=300
 DS_ACTIVE_FALLBACK=30
 # 冻结时序：熄屏后先冻结后台，7:30 才一次性 force-idle。
 # 3 分钟内分批冻结，之后不再新增，减少冻结组里 D 状态进程把整组卡住的机会。
-DS_FREEZE_ENABLED=${DS_FREEZE:-1}
+# 冻结（墓碑）已从深睡里移除：本模块不再冻结任何进程，只保留 Doze。
+# 这里保留一个恒为 0 的开关，是为了让下面"解冻清理"的代码还能跑 ——
+# 升级上来的机器可能有旧版本留下的冻结账本/冻结组，必须照样解开。
+DS_FREEZE_ENABLED=0
 # Doze 总闸。关掉后模块完全不碰 deviceidle：不加/删白名单、不 force-idle、不 unforce。
 # 留着它是因为"待机耗电"到底该记在冻结头上还是 Doze 头上，只有分开跑才说得清。
 DS_DOZE_ENABLED=${DS_DOZE:-1}
@@ -80,20 +84,15 @@ ds_wait_pid=""
 ds_tick_stamp=""
 DS_NICE=""
 DS_PUSH=""
-# 第三方包名单缓存：一次深睡只查一次 pm，补扫复用。
-DS_THIRD=""
-ds_ops_done=""
-# 冻结状态机
+# 冻结状态：冻结功能已移除，只剩"按账本把旧版本留下的冻结解开"这套还原用的状态。
 ds_freeze_backend=""
 ds_freeze_root=""
 ds_freeze_group=""
 ds_freeze_frozen=0
 ds_freeze_done=0
-ds_freeze_fail=0
 ds_frozen=""
 ds_doze_sent=0
 ds_doze_checked=0
-ds_freeze_scan_ts=0
 # 亮屏判定：节点优先，连续对不上就停用它，改问系统。
 ds_scr_ok=1
 ds_scr_bad=0
@@ -305,10 +304,8 @@ ds_conf_write() {
 # 深度睡眠配置
 # enable=1 打开；0 关闭。关闭只停止干预，不会保留任何系统改动。
 enable=0
-# freeze=1 熄屏后冻结第三方后台进程；0 只做 Doze/白名单，不冻结。
 # 有的 ROM 自带冻结器（如 ColorOS 的 HANS 就在同一个 /dev/freezer 上跑），
 # 两套一起冻会互相把对方刚冻上的进程解开。想对比待机耗电就把它设 0 跑一晚。
-# freeze=1
 # appops=1 冻结时顺手把后台应用的唤醒锁权限设成 ignore，退出时按账本还原；
 # 0 完全不碰唤醒锁。对比耗电时也可以单独关它。
 # appops=1
@@ -367,8 +364,6 @@ ds_conf_load() {
     DS_WHITE=$(ds_conf_list white)
     DS_NICE=$(ds_conf_list nice)
     DS_PUSH=$(ds_conf_list push)
-    # 这两项以前只能靠环境变量给，配置里改不了，用户没法自己做开关对照。
-    DS_FREEZE_ENABLED=$(ds_conf_opt freeze "${DS_FREEZE:-1}")
     DS_APPOPS_ENABLED=$(ds_conf_opt appops "${DS_APPOPS:-1}")
     DS_DOZE_ENABLED=$(ds_conf_opt doze "${DS_DOZE:-1}")
     return 0
@@ -734,21 +729,6 @@ ds_pid_in_group() {
 
 # 这个 pid 是不是已经被别的冻结器冻住了。
 # 两边都冻同一个进程没有意义，只会互相把对方刚冻上的解开。
-ds_freeze_frozen_elsewhere() {
-    local pid="$1" f
-    [ -n "$ds_freeze_root" ] || return 1
-    if [ "$ds_freeze_backend" = "v2" ]; then
-        # v2 上系统（CachedAppOptimizer / ColorOS 的 HANS）就是往进程自己的
-        # cgroup.freeze 写 1。已经是 1 就说明它先冻了。
-        ds_v2_is_frozen "$(ds_v2_path_of "$pid")" && return 0
-        return 1
-    fi
-    for f in "$ds_freeze_root/frozen/cgroup.procs" "$ds_freeze_root/frozen/tasks"; do
-        [ -r "$f" ] || continue
-        grep -qx -- "$pid" "$f" 2>/dev/null && return 0
-    done
-    return 1
-}
 
 # 清掉自己的残留组：先解冻，再把组里的进程迁回根组，最后删组。
 ds_freeze_group_reset() {
@@ -772,107 +752,10 @@ ds_freeze_group_reset() {
     esac
 }
 
-ds_freeze_group_init() {
-    case "$ds_freeze_backend" in
-        # v2 不建组：每个进程在自己原来的 cgroup 里原地冻。
-        off|none|sigstop|v2) return 0 ;;
-    esac
-    ds_freeze_group_reset
-    mkdir -p "$ds_freeze_group" 2>/dev/null || {
-        ds_freeze_backend="none"
-        return 0
-    }
-    if [ ! -w "$ds_freeze_group/freezer.state" ]; then
-        rmdir "$ds_freeze_group" 2>/dev/null
-        ds_freeze_backend="none"
-        return 0
-    fi
-    echo THAWED > "$ds_freeze_group/freezer.state" 2>/dev/null
-}
 
-ds_freeze_add_pid() {
-    local pid="$1" cg
-    ds_freeze_last_cg=""
-    case "$ds_freeze_backend" in
-        v1)
-            if [ -w "$ds_freeze_group/cgroup.procs" ]; then
-                printf '%s\n' "$pid" > "$ds_freeze_group/cgroup.procs" 2>/dev/null \
-                    && { ds_freeze_last_cg="$ds_freeze_group"; return 0; }
-            fi
-            printf '%s\n' "$pid" > "$ds_freeze_group/tasks" 2>/dev/null \
-                && { ds_freeze_last_cg="$ds_freeze_group"; return 0; }
-            ;;
-        v2)
-            # v2 只确认"这个进程有自己的 cgroup 且能写 freeze"，
-            # 真正的置位统一在 ds_freeze_set FROZEN 里做（和 v1 同一套节奏）。
-            cg="$(ds_v2_path_of "$pid")"
-            case "$cg" in ''|/) return 1 ;; esac
-            [ -w "$(ds_v2_file_of "$cg")" ] || return 1
-            ds_freeze_last_cg="$cg"
-            return 0
-            ;;
-        sigstop)
-            kill -STOP "$pid" 2>/dev/null && return 0
-            ;;
-    esac
-    return 1
-}
 
-ds_freeze_set() {
-    local line pid st pkg cg
-    case "$ds_freeze_backend" in
-        v1) echo "$1" > "$ds_freeze_group/freezer.state" 2>/dev/null ;;
-        v2)
-            for line in $ds_frozen; do
-                IFS='|' read -r pid st pkg cg <<EOF
-$line
-EOF
-                [ -n "$cg" ] || continue
-                if [ "$1" = "FROZEN" ]; then ds_v2_write "$cg" 1
-                else ds_v2_write "$cg" 0; fi
-            done
-            ;;
-    esac
-}
 
-ds_freeze_verify() {
-    local i=0 all line pid st pkg cg
-    case "$ds_freeze_backend" in
-        sigstop|off|none) return 0 ;;
-        v1)
-            while [ "$i" -lt 6 ]; do
-                [ "$(cat "$ds_freeze_group/freezer.state" 2>/dev/null)" = "FROZEN" ] && return 0
-                sleep 0.2; i=$((i+1))
-            done
-            return 1
-            ;;
-        v2)
-            while [ "$i" -lt 6 ]; do
-                all=1
-                for line in $ds_frozen; do
-                    IFS='|' read -r pid st pkg cg <<EOF
-$line
-EOF
-                    [ -n "$cg" ] || continue
-                    ds_v2_is_frozen "$cg" || { all=0; break; }
-                done
-                [ "$all" = "1" ] && return 0
-                sleep 0.2; i=$((i+1))
-            done
-            return 1
-            ;;
-    esac
-    return 1
-}
 
-ds_freeze_ledger_save() {
-    {
-        echo "backend=$ds_freeze_backend"
-        echo "root=$ds_freeze_root"
-        echo "group=$ds_freeze_group"
-        printf '%s\n' "$ds_frozen"
-    } | atomic_write "$DS_FREEZE_LEDGER" 0644
-}
 
 # 按账本/当前内存解冻。启动时也走这里：先 THAWED，再把进程迁回根组，
 # 最后删自己的组；SIGSTOP 后端只发 CONT。
@@ -930,9 +813,15 @@ EOF
     [ "$b" != "off" ] && [ "$b" != "none" ] && log_ds "冻结已还原（$b）"
 }
 
-# 启动/停止兜底：账本在就按账本还原；只有自己的组在也要解冻清空。
+# 启动/停止兜底：账本在就按账本解冻；只有自己的组在也要解冻清空。
+# 冻结功能已移除，这里唯一的作用是"把旧版本留下的冻结解开"。
+# 所以探测时临时把开关当 1：不是要冻，是要让 probe 找出组和挂载点，
+# 否则开关关着时 probe 直接返回 off，残留组就永远没人清。
 ds_freeze_restore_if_any() {
+    local _en="$DS_FREEZE_ENABLED"
+    DS_FREEZE_ENABLED=1
     ds_freeze_probe
+    DS_FREEZE_ENABLED="$_en"
     if [ -f "$DS_FREEZE_LEDGER" ]; then
         ds_freeze_thaw_all
         return 0
@@ -947,243 +836,18 @@ ds_freeze_restore_if_any() {
 # 排除名单：用户永久豁免、输入法、桌面、无障碍、VPN、当前前台、满血/熄屏也封顶、
 # 正在放媒体的应用、本模块/管理器和 Scene（后者负责耗电统计，冻了就断档）。
 DS_FREEZE_SKIP=""
-ds_freeze_add_skip() {
-    local p="$1"
-    case "$p" in ''|*[!A-Za-z0-9._]*) return 0 ;; esac
-    case " $DS_FREEZE_SKIP " in *" $p "*) return 0 ;; esac
-    DS_FREEZE_SKIP="$DS_FREEZE_SKIP $p"
-}
 
-ds_freeze_build_skip() {
-    local p x v ime
-    DS_FREEZE_SKIP=""
-    for p in $(echo "$DS_WHITE" | tr ',' ' '); do ds_freeze_add_skip "$p"; done
-    for p in com.android.systemui com.android.phone com.android.server.telecom \
-             com.sukisu.ultra me.weishu.kernelsu com.topjohnwu.magisk \
-             com.omarea.vtools \
-             com.sohu.inputmethod.sogou com.baidu.input com.iflytek.inputmethod \
-             com.google.android.inputmethod.latin com.samsung.android.honeyboard \
-             com.android.inputmethod.latin; do
-        ds_freeze_add_skip "$p"
-    done
-    ime="$(settings get secure default_input_method 2>/dev/null | tr -d '\r')"
-    [ -n "$ime" ] && ds_freeze_add_skip "${ime%%/*}"
-    ime="$(settings get secure enabled_input_methods 2>/dev/null | tr -d '\r')"
-    for x in $(echo "$ime" | tr ':' ' '); do ds_freeze_add_skip "${x%%/*}"; done
-    ime="$(cmd package resolve-activity --brief -c android.intent.category.HOME 2>/dev/null \
-          | sed -n 's#^[[:space:]]*\([A-Za-z0-9_.]*\)/.*#\1#p' | head -n 1)"
-    [ -n "$ime" ] && ds_freeze_add_skip "$ime"
-    ime="$(settings get secure enabled_accessibility_services 2>/dev/null | tr -d '\r')"
-    for x in $(echo "$ime" | tr ':' ' '); do ds_freeze_add_skip "${x%%/*}"; done
-    ime="$(settings get secure always_on_vpn_app 2>/dev/null | tr -d '\r')"
-    [ -n "$ime" ] && ds_freeze_add_skip "$ime"
-    for p in $(ds_media_playing); do ds_freeze_add_skip "$p"; done
-    if [ -f "$CONF_DIR/app_modes.conf" ]; then
-        while IFS='=' read -r p v; do
-            case "$p" in ''|'#'*|';'*) continue ;; esac
-            v="${v%%#*}"
-            v="$(printf '%s' "$v" | tr -d ' \t\r')"
-            case "$v" in full|FULL|keep|KEEP) ds_freeze_add_skip "$p" ;; esac
-        done < "$CONF_DIR/app_modes.conf"
-    fi
-    p="$(awk -F= '$1=="fg"{print $2; exit}' "$DS_STATUS" 2>/dev/null | tr -d '\r')"
-    case "$p" in ''|-) ;; *) ds_freeze_add_skip "$p" ;; esac
-}
 
 # 找第三方后台进程，写成 "pid|starttime|pkg" 队列。只看 -3 包；
 # 只冻 oom_score_adj >= 200（缓存/后台），前台和可见应用不动。
 #
 # 一轮扫描只起固定几个子进程：pm、ps、读 stat/oom 的 awk、拼队列的 awk。
 # 逐个 /proc 起 cat/tr/head/grep/awk 会产生几千次 fork，熄屏后反而把 CPU 拉醒。
-ds_freeze_build_queue() {
-    local pid cmd pkg st stt adj
-    : > "$DS_FREEZE_QUEUE" 2>/dev/null
-    [ "$DS_FREEZE_ENABLED" = "1" ] || return 0
-    if [ -n "${DS_FREEZE_TEST_PID:-}" ]; then
-        st="$(ds_proc_start "$DS_FREEZE_TEST_PID")"
-        [ -n "$st" ] && printf '%s|%s|%s\n' "$DS_FREEZE_TEST_PID" "$st" \
-            "${DS_FREEZE_TEST_PKG:-com.test.freeze}" > "$DS_FREEZE_QUEUE"
-        return 0
-    fi
-    if [ -z "$DS_THIRD" ]; then
-        DS_THIRD="$(pm list packages -3 2>/dev/null | sed -n 's/^package://p' \
-            | tr -d '\r' | tr '\n' ',')"
-        DS_THIRD="${DS_THIRD%,}"
-    fi
-    if [ -z "$DS_THIRD" ]; then
-        log_ds "冻结：pm 没返回第三方应用，本次跳过"
-        return 0
-    fi
-    [ -n "$DS_FREEZE_SKIP" ] || ds_freeze_build_skip
-    ps -A -o pid=,args= > "$DS_SCAN_PS" 2>/dev/null
-    # 一次 awk 同时读 stat 和 oom_score_adj：只留 adj>=200、状态不在 Z/D/T/X 的进程。
-    awk '
-        FILENAME ~ /\/stat$/ && FNR == 1 {
-            n = split(FILENAME, a, "/"); p = a[n-1]
-            rest = $0; sub(/^.*\) /, "", rest); split(rest, f, " ")
-            state[p] = f[1]; start[p] = f[20]
-            next
-        }
-        FILENAME ~ /\/oom_score_adj$/ && FNR == 1 {
-            n = split(FILENAME, a, "/"); p = a[n-1]
-            oom[p] = $1 + 0
-            next
-        }
-        END {
-            for (p in oom)
-                if (oom[p] >= 200 && state[p] != "" && state[p] !~ /^[ZDTX]$/)
-                    print p "|" start[p] "|" state[p] "|" oom[p]
-        }' /proc/[0-9]*/stat /proc/[0-9]*/oom_score_adj > "$DS_SCAN_META" 2>/dev/null
-    awk -v mf="$DS_SCAN_META" '
-        BEGIN {
-            FS = "|"
-            while ((getline l < mf) > 0) {
-                split(l, m, "|")
-                meta[m[1]] = m[2] "|" m[3] "|" m[4]
-            }
-        }
-        {
-            line = $0
-            sub(/^[ ]+/, "", line)
-            split(line, a, " ")
-            p = a[1]
-            if (!(p in meta)) next
-            cmd = line
-            sub(/^[0-9]+[ ]+/, "", cmd)
-            print p "|" meta[p] "|" cmd
-        }' "$DS_SCAN_PS" > "$DS_SCAN_CAND" 2>/dev/null
-    while IFS='|' read -r pid st stt adj cmd; do
-        case "$pid" in ''|*[!0-9]*) continue ;; esac
-        [ -n "$cmd" ] || continue
-        pkg="${cmd%%:*}"
-        case ",$DS_THIRD," in *",$pkg,"*) ;; *) continue ;; esac
-        case "$pkg" in
-            *inputmethod*|*keyboard*|*launcher*|*alarmclock*|*deskclock*) continue ;;
-            com.coloros.*|com.oplus.*|com.oppo.*|com.heytap.*|com.hihonor.*|com.huawei.*|com.miui.*|com.xiaomi.*|com.google.*|com.vivo.*|com.iqoo.*|com.bbk.*|com.samsung.*|com.mediatek.*|com.qualcomm.*|com.transsion.*|com.tecno.*|com.infinix.*|com.sony.*|com.asus.*|com.lenovo.*|com.nubia.*|com.meizu.*|com.oneplus.*|com.realme.*) continue ;;
-        esac
-        case " $DS_FREEZE_SKIP " in *" $pkg "*) continue ;; esac
-        ds_push_match_proc "$cmd" && continue
-        ds_list_has "$DS_NICE" "$pkg" && continue
-        printf '%s|%s|%s\n' "$pid" "$st" "$pkg" >> "$DS_FREEZE_QUEUE"
-    done < "$DS_SCAN_CAND"
-    log_ds "冻结候选 $(grep -c . "$DS_FREEZE_QUEUE" 2>/dev/null) 个进程"
-}
 
 # 每轮最多冻 8 个；第一批后把组置 FROZEN，后续迁入的进程自动冻结。
 # 队列空不代表冻结结束：3 分钟窗口里还有应用退到后台，由调用方补扫。
-ds_freeze_step() {
-    local line pid st pkg cur n=0
-    [ "$ds_freeze_done" = "1" ] && return 0
-    [ -s "$DS_FREEZE_QUEUE" ] || return 0
-    while [ "$n" -lt "$DS_FREEZE_BATCH" ] && [ -s "$DS_FREEZE_QUEUE" ]; do
-        line="$(head -n 1 "$DS_FREEZE_QUEUE" 2>/dev/null)"
-        tail -n +2 "$DS_FREEZE_QUEUE" > "$DS_FREEZE_QUEUE.n" 2>/dev/null
-        mv -f "$DS_FREEZE_QUEUE.n" "$DS_FREEZE_QUEUE" 2>/dev/null
-        case "$line" in *"|"*"|"*) ;; *) continue ;; esac
-        # mksh 里 | 是 ksh 模式的“或”，不能拿 ${x%%|*} 切字段。
-        IFS='|' read -r pid st pkg <<EOF
-$line
-EOF
-        case "$pid" in ''|*[!0-9]*) continue ;; esac
-        # 补扫会把已经冻住的进程再扫出来一次，按账本跳过，别重复入组。
-        # 必须按整行锚定（^pid|），不能拿 *pid| 在账本里做子串匹配：
-        # 账本里已有 1124 时，候选 124 会命中 "124|" 那段尾巴而被误判成已冻，
-        # 于是这个进程一直不入组，用户看到"后台应用还在跑"。
-        # pid 在上面已校验为纯数字，进 grep 的模式没有元字符风险。
-        printf '%s\n' "$ds_frozen" | grep -q "^$pid|" && continue
-        # 系统冻结器已经冻住的就别再入组：同一个进程被两套机制各冻一次，
-        # 解冻时两边记账不同步，会互相把对方刚冻上的进程解开。
-        ds_freeze_frozen_elsewhere "$pid" && continue
-        cur="$(ds_proc_start "$pid")"
-        [ "$cur" = "$st" ] || continue
-        case " $DS_FREEZE_SKIP " in *" $pkg "*) continue ;; esac
-        # 先掐唤醒锁，再冻；push 包整包不动 appops。
-        ds_ops_apply "$pkg"
-        ds_freeze_add_pid "$pid" || continue
-        ds_frozen="${ds_frozen}${pid}|${st}|${pkg}|${ds_freeze_last_cg}
-"
-        n=$((n+1))
-    done
-    [ -n "$ds_frozen" ] && ds_freeze_ledger_save
-    if [ -n "$ds_frozen" ] && [ "$ds_freeze_frozen" != "1" ]; then
-        ds_freeze_set FROZEN
-        if ! ds_freeze_verify; then
-            # 有 D 状态进程时整组会卡在 FREEZING。先回滚；补扫会跳过 D 状态，
-            # 下一轮用剩下的进程再试。连续 3 次不行就放弃，别整晚在冻/解之间抖。
-            ds_freeze_fail=$((ds_freeze_fail + 1))
-            log_ds "冻结未确认（第 $ds_freeze_fail 次，可能有 D 状态进程），已回滚"
-            ds_freeze_thaw_all
-            if [ "$ds_freeze_fail" -ge 3 ]; then
-                ds_freeze_done=1
-                log_ds "连续 3 次未确认，本次深睡不再尝试冻结"
-            else
-                ds_freeze_scan_ts=0
-            fi
-            return 0
-        fi
-        ds_freeze_frozen=1
-        log_ds "已冻结 $(printf '%s\n' "$ds_frozen" | grep -c .) 个后台进程（$ds_freeze_backend）"
-    fi
-}
 
 # 媒体/新豁免应用需要跑：把它从这个包里单独解冻，其余保持冻结。
-ds_freeze_thaw_pkg() {
-    local want="$1" line keep="" thaw="" pid st pkg cg tcg
-    [ -n "$ds_frozen" ] || return 0
-    case "$want" in ''|*[!A-Za-z0-9._]*) return 0 ;; esac
-    while IFS= read -r line; do
-        [ -n "$line" ] || continue
-        IFS='|' read -r pid st pkg cg <<EOF
-$line
-EOF
-        # 按字段比，不能按行尾子串：第 4 段是 cgroup 路径，行尾早不是包名了。
-        if [ "$pkg" = "$want" ]; then
-            thaw="$thaw $pid"
-        else
-            keep="$keep$line
-"
-        fi
-    done <<EOF
-$ds_frozen
-EOF
-    [ -n "$thaw" ] || return 0
-    if [ "$ds_freeze_backend" = "v2" ]; then
-        # v2 原地冻：只把要放行的那几个进程自己的 cgroup.freeze 写回 0，
-        # 其余不动，也就不需要"整组解冻再重冻"。
-        for pid in $thaw; do
-            tcg="$(printf '%s\n' "$ds_frozen" | awk -F'|' -v p="$pid" -v w="$want" \
-                   '$1 == p && $3 == w { print $4; exit }')"
-            [ -n "$tcg" ] && ds_v2_write "$tcg" 0
-        done
-        ds_frozen="$keep"
-        ds_freeze_ledger_save
-        if [ -n "$ds_frozen" ]; then
-            ds_freeze_verify || ds_freeze_thaw_all
-        else
-            ds_freeze_frozen=0
-        fi
-        log_ds "已解冻 $want 的后台进程（媒体/新豁免）"
-        return 0
-    fi
-    ds_freeze_set THAWED
-    for pid in $thaw; do
-        if [ "$ds_freeze_backend" = "sigstop" ]; then
-            kill -CONT "$pid" 2>/dev/null
-        else
-            ds_pid_in_group "$pid" "$ds_freeze_group" && ds_freeze_move_root "$pid"
-        fi
-    done
-    ds_frozen="$keep"
-    ds_freeze_ledger_save
-    if [ -n "$ds_frozen" ]; then
-        ds_freeze_set FROZEN
-        ds_freeze_verify || ds_freeze_thaw_all
-    else
-        [ -n "$ds_freeze_group" ] && rmdir "$ds_freeze_group" 2>/dev/null
-        ds_freeze_frozen=0
-    fi
-    log_ds "已解冻 $want 的后台进程（媒体/新豁免）"
-}
 
 # 7:30 一次性收口：cmd 优先，失败补发 dumpsys 兼容命令，仍失败不再重试。
 ds_doze_once() {
@@ -1207,23 +871,6 @@ ds_ops_get() {
         | awk '$1 == "WAKE_LOCK:" { sub(/;.*/, "", $2); print $2; exit }'
 }
 
-ds_ops_apply() {
-    local pkg="$1" old now
-    [ "$DS_APPOPS_ENABLED" = "1" ] || return 0
-    case ",$ds_ops_done," in *",$pkg,"*) return 0 ;; esac
-    ds_ops_done="$ds_ops_done,$pkg"
-    [ -f "$DS_OPS_LEDGER" ] && grep -q "^$pkg|" "$DS_OPS_LEDGER" 2>/dev/null && return 0
-    # 包级豁免：push 列表里的包可能还要靠 push 进程收消息，整包不碰。
-    ds_pkg_in_push "$pkg" && return 0
-    old="$(ds_ops_get "$pkg")"
-    case "$old" in
-        ''|ignore) return 0 ;;
-    esac
-    cmd appops set "$pkg" WAKE_LOCK ignore >/dev/null 2>&1 < /dev/null || return 0
-    now="$(ds_ops_get "$pkg")"
-    [ "$now" = "ignore" ] || return 0
-    printf '%s|%s\n' "$pkg" "$old" >> "$DS_OPS_LEDGER" 2>/dev/null
-}
 
 ds_ops_restore_all() {
     local line pkg old now keep=""
@@ -1381,11 +1028,14 @@ ds_enter() {
         ds_white_add "$pkg" "$old_white"
     done
     if [ "$DS_DOZE_ENABLED" = "1" ]; then
-        # 这里**不再**把 push= 的包塞进 Doze 白名单。
-        # 白名单是包级豁免：加进去等于整个应用不受 Doze 限制，可以照常持唤醒锁、
-        # 跑 job、联网。而 push= 的包同时又不在冻结名单里（nice= 同理），
-        # 两头都不受限 = 熄屏后它和没开深睡时一样自由，深睡就白开了。
-        # 现在 push= 只表示"不冻结这个进程"；要整包完全豁免请用 white=。
+        # push= 的包要进 Doze 白名单：现在已经不冻进程了，Doze 是唯一会压后台的
+        # 机制，不把它放进白名单，熄屏后消息会被压到维护窗口才进来。
+        # 代价是这台机上那个应用不受 Doze 限制 —— 和"只留 Doze"的取舍就是这个。
+        for pkg in $(ds_push_pkg_list | tr ',' ' '); do
+            [ -n "$pkg" ] || continue
+            case " $ds_added " in *" $pkg "*) continue ;; esac
+            ds_white_add "$pkg" "$old_white"
+        done
         # 默认短信应用不在名单里也要临时加白：否则 SMS 广播会被压到出 Doze 才发。
         # 退出时按 ds_added 撤掉；用户名单里的那条不会被撤。
         sms="$(ds_sms_pkg)"
@@ -1406,22 +1056,11 @@ ds_enter() {
         done
     fi
     ds_snap_write
-    # ZenCore 时序：先冻结/限流后台，7:30 才一次性 force-idle，不再 20 秒就压 Doze。
+    # 深睡只做 Doze：冻结（墓碑）已移除，这里不再建冻结组、不再扫候选、不再冻进程。
     ds_doze_sent=0
     ds_doze_checked=0
-    ds_freeze_done=0
-    ds_freeze_frozen=0
-    ds_freeze_fail=0
     ds_frozen=""
-    ds_freeze_scan_ts=$(now)
-    DS_THIRD=""
-    DS_FREEZE_SKIP=""
-    ds_freeze_probe
-    ds_freeze_group_init
-    ds_freeze_build_queue
-    ds_freeze_step
-    # 冻结关掉时没有窗口可等，直接进事件等待，别按 2 秒空转 3 分钟。
-    [ "$DS_FREEZE_ENABLED" = "1" ] || ds_freeze_done=1
+    ds_freeze_done=1
     ds_alarm_wait=0
     ds_event_ok=1
     ds_last_media=$(now)
@@ -1473,9 +1112,7 @@ ds_state_write() {
           printf "%s%s:%d:%d", sep, $1, $2, flag }')"
     new="enable=$ds_enabled
 dsactive=$ds_active
-freeze=${DS_FREEZE_ENABLED:-0}
 doze=${DS_DOZE_ENABLED:-1}
-fzb=${ds_freeze_backend:-off}
 wcsince=$ds_wcsince
 dsw=$dsw
 dswc=$dswc"
@@ -1587,7 +1224,6 @@ ds_tick() {
             [ "$_snap_done" = "1" ] || { _snap="$(ds_white_snapshot)"; _snap_done=1; }
             ds_white_add "$pkg" "$_snap"
         fi
-        ds_freeze_thaw_pkg "$pkg"
         ds_snap_write
         log_ds "新加入白名单的应用已加白"
     done
@@ -1597,31 +1233,14 @@ ds_tick() {
         media="$(ds_media_playing)"
         for pkg in $media; do
             case " $ds_added " in *" $pkg "*) continue ;; esac
-            # Doze 关着就只解冻、不加白：加白是"整包豁免 Doze"，正是要能关掉的那部分。
+            # Doze 关着就不加白：加白是"整包豁免 Doze"，正是要能关掉的那部分。
             [ "$DS_DOZE_ENABLED" = "1" ] && ds_white_add "$pkg" "$(ds_white_snapshot)"
-            ds_freeze_thaw_pkg "$pkg"
             ds_snap_write
             log_ds "检测到媒体播放，已临时加白保护"
         done
     fi
 
-    # ZenCore 时序：T0 分批冻结，3 分钟后停止新增，7:30 一次性 Doze。
-    if [ "$DS_FREEZE_ENABLED" = "1" ] && [ "$ds_freeze_done" != "1" ]; then
-        if [ $((t - ds_screen_off_ts)) -ge "$DS_FREEZE_WINDOW" ]; then
-            : > "$DS_FREEZE_QUEUE" 2>/dev/null
-            ds_freeze_done=1
-            log_ds "息屏满 3 分钟：停止新增冻结"
-        else
-            ds_freeze_step
-            # 队列清空后每分钟补扫一次，接住这几分钟里刚退到后台的进程。
-            if [ ! -s "$DS_FREEZE_QUEUE" ] \
-               && [ $((t - ds_freeze_scan_ts)) -ge "$DS_FREEZE_RESCAN" ]; then
-                ds_freeze_scan_ts=$t
-                ds_freeze_build_queue
-                ds_freeze_step
-            fi
-        fi
-    fi
+    # 冻结（墓碑）已移除：这里不再扫描候选、不再入组、不再冻进程。
     # 闹钟快响就先不收口：Doze 会把闹钟广播压到维护窗口，和“准点响”冲突。
     if [ "$DS_DOZE_ENABLED" = "1" ] \
        && [ $((t - ds_screen_off_ts)) -ge "$DS_DOZE_AT" ] && [ "$ds_doze_sent" != "1" ] \

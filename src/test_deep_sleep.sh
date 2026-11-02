@@ -374,19 +374,19 @@ ds_snap_restore_if_any >/dev/null 2>&1
 ok "$(grep -c 'deviceidle unforce' "$STATE/calls")" "0" "快照 dozed=0 时崩溃还原也不 unforce"
 rm -f "$DS_SNAP"
 
-echo "== freeze / appops 能从配置单独关（做开/关对照用）=="
-# 这两项以前只认环境变量，配置文件里写了也不生效，用户没法自己做对照。
-printf 'enable=1\nfreeze=0\nappops=0\n' > "$DSLEEP_CONF"
+echo "== 冻结已移除：配置里写什么都不再冻 =="
+# freeze= 这个键已经废弃。写 1 也只能是 0 —— 这是"关不掉还会冻"那类反馈的根治：
+# 不是靠开关，是根本没有冻结这条路径。
+printf 'enable=1\nfreeze=1\nappops=0\n' > "$DSLEEP_CONF"
 ds_conf_load
-ok "$DS_FREEZE_ENABLED" "0" "freeze=0 生效"
+ok "$DS_FREEZE_ENABLED" "0" "freeze=1 也不再冻结"
 ok "$DS_APPOPS_ENABLED" "0" "appops=0 生效"
-printf 'enable=1\nfreeze=1\n' > "$DSLEEP_CONF"
+printf 'enable=1\nappops=1\n' > "$DSLEEP_CONF"
 ds_conf_load
-ok "$DS_FREEZE_ENABLED" "1" "freeze=1 生效"
-ok "$DS_APPOPS_ENABLED" "$DS_APPOPS" "appops 没写时退回环境默认（台架是 $DS_APPOPS）"
+ok "$DS_APPOPS_ENABLED" "1" "appops=1 生效"
 printf 'enable=1\nfreeze=abc\n' > "$DSLEEP_CONF"
 ds_conf_load
-ok "$DS_FREEZE_ENABLED" "${DS_FREEZE:-1}" "非法值退回环境默认（台架 DS_FREEZE=$DS_FREEZE）"
+ok "$DS_FREEZE_ENABLED" "0" "非法值同样是 0（冻结根本不存在了）"
 
 echo "== Doze 总闸：关掉后一次 deviceidle 都不碰 =="
 # 白名单是"包级豁免"，加进去等于整包不受 Doze 限制。要判断待机耗电该记在
