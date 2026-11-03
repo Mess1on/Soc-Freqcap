@@ -2341,8 +2341,9 @@ async function loadConf(){
     pv('governor');
     /* 功能页的下拉档和"现在会怎么做"那几句，都按刚填好的控件重算 */
     syncFunc();
+    confLoaded = true;
     toast('已载入当前配置');
-  }catch(e){ toast(e.message, true); }
+  }catch(e){ confLoaded = false; toast(e.message, true); }
 }
 
 /* ── 功能页：人话档位 ↔ 具体数值 ────────────────────────────────
@@ -2474,11 +2475,20 @@ function paintFuncSum(){
 }
 
 let saveBusy = false;
+/* 配置是否真的读进来过。滑杆在 HTML 里没有 value，浏览器会按区间中点显示
+ * （CPU/GPU 就是 50%）。首条 exec 空回执导致 conf_get 失败时，这些中点值
+ * 会被「保存并生效」原样写进配置 —— 用户从没设过 50。没载入就不许存。 */
+let confLoaded = false;
 async function saveAll(){
   /* 以前的保存是三十多个 conf_set 串行：每次都是一次 root exec，
      手机上要十几秒，用户以为没点上就反复按。现在一次 conf_set_many 收走，
      同时把按钮锁住——重复点击不会排队再存一遍。 */
   if(saveBusy) return;
+  if(!confLoaded){
+    // 没成功读出配置时，滑杆显示的是浏览器给的区间中点，存下去就是
+    // 把用户没设过的 50% 写进配置。宁可拒绝，也不能静默改坏。
+    return toast('配置还没读出来，先点「放弃修改」重新载入再保存', true);
+  }
   saveBusy = true;
   const btns = Array.prototype.slice.call(
     document.querySelectorAll('button[onclick="saveAll()"]'));

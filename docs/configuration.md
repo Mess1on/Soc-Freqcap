@@ -340,6 +340,6 @@ GPU KGSL 45%   900 MHz  →   405 MHz
 机上手动确认（两条都要看）：
 
 ```sh
-sh $MODDIR/socfreqd export | grep '^soc='      # 期望 soc=sm8750
-sh $MODDIR/socfreqd export | grep -E 'gpu_(max|unit)'   # 期望 gpu_unit=Hz
+$MODDIR/socfreqd export | grep '^soc='      # 期望 soc=sm8750
+$MODDIR/socfreqd export | grep -E 'gpu_(max|unit)'   # 期望 gpu_unit=Hz
 ```

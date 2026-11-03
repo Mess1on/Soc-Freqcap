@@ -80,10 +80,14 @@ ui_print " "
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/socfreqd"       0 0 0755
 set_perm "$MODPATH/service.sh"     0 0 0755
+set_perm "$MODPATH/action.sh"      0 0 0755
 set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh"   0 0 0755
 set_perm "$MODPATH/scripts/deep_sleep.sh" 0 0 0755
 set_perm "$MODPATH/scripts/hotinstall.sh" 0 0 0755
+set_perm "$MODPATH/tools/fix_metamodule.sh" 0 0 0755
+set_perm "$MODPATH/tools/safemode.sh"       0 0 0755
+set_perm "$MODPATH/tools/collect_crash.sh"  0 0 0755
 
 # 配置文件用户可写，方便自己改
 set_perm "$MODPATH/socfreq.conf" 0 0 0644

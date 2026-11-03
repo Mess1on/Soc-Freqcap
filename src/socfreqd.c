@@ -575,6 +575,26 @@ static int journal_has(const char *file, const char *node) {
   return found;
 }
 
+/* 取 journal 里这个节点记的原始权限；没有返回 -1。
+ * 交还系统时要用它，不能用 read_mode()：那时节点已经被我们 chmod 成 0644，
+ * 记下来的"原始权限"就成了 0644，出厂 0664（root:system 可写）的机型
+ * 从此让厂商框架写不动节点。 */
+static int journal_mode(const char *file, const char *node) {
+  FILE *f = fopen(file, "r");
+  if (!f) return -1;
+  char line[512], p[512];
+  long v;
+  unsigned m;
+  int ret = -1;
+  while (fgets(line, sizeof line, f))
+    if (sscanf(line, "%511s %ld %o", p, &v, &m) == 3 && !strcmp(p, node)) {
+      ret = (int)m;
+      break;
+    }
+  fclose(f);
+  return ret;
+}
+
 static void journal_add(const char *file, const char *node, long val, int mode) {
   FILE *f = fopen(file, "a");
   if (!f) return;
@@ -1203,9 +1223,13 @@ static void mtk_restore_snapshot(void) {
   unlink(MTK_GPU_SNAP);
 }
 
-static int detect_gpu(void) {
+/* readonly=1：只探测，不碰任何节点。
+ * export / probe 是"只读"子命令，而 WebUI 每次 status 都跑 export ——
+ * 它们如果顺手把 MTK 快照恢复掉，等于用户一打开首页就把 GPU 封顶顶回去，
+ * 还删了快照；守护侧对 MTK 后端又补不回来（patrol 读不到 max_node）。 */
+static int detect_gpu(int readonly) {
   /* 上次被 kill -9 留下的 cap 先还原，别把"37/56"当成原始行再存一遍。 */
-  mtk_restore_snapshot();
+  if (!readonly) mtk_restore_snapshot();
   memset(&g_gpu, 0, sizeof g_gpu);
   long tbl[MAX_NODE];
   int n = 0;
@@ -1474,16 +1498,32 @@ static int is_vendor_gov(const char *g) {
   return !strncmp(g, "hmbird", 6) || !strncmp(g, "scx", 3);
 }
 
+/* 在空白分隔的列表里整词查找。
+ * 不能用 strstr(" gov ")：read_file 会把尾随空白剥掉，列表首项没有前导空格、
+ * 末项没有尾随空格，包着空白的 needle 对这两项永远失配 —— 出厂默认的
+ * conservative 常年排在第一个，等于调速器功能整体静默失效。 */
+static int token_has(const char *list, const char *word) {
+  size_t n = strlen(word);
+  if (!n) return 0;
+  const char *p = list;
+  while (*p) {
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    const char *s = p;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\n' && *p != '\r') p++;
+    if ((size_t)(p - s) == n && !strncmp(s, word, n)) return 1;
+  }
+  return 0;
+}
+
 static void apply_governor(const struct policy *p) {
   if (!cfg.governor[0]) return;
-  char path[224], cur[64], avail[512], needle[64];
+  char path[224], cur[64], avail[512];
   snprintf(path, sizeof path, "%s/scaling_governor", p->dir);
   if (read_file(path, cur, sizeof cur)) return;
   if (!strcmp(cur, cfg.governor) || is_vendor_gov(cur)) return;
   snprintf(path, sizeof path, "%s/scaling_available_governors", p->dir);
   if (read_file(path, avail, sizeof avail)) return;
-  snprintf(needle, sizeof needle, " %s ", cfg.governor);
-  if (!strstr(avail, needle)) {
+  if (!token_has(avail, cfg.governor)) {
     log("WARN %s 不支持调速器 %s（可用: %s）", p->name, cfg.governor, avail);
     return;
   }
@@ -2205,7 +2245,7 @@ static int reload_if_changed(uint64_t seen) {
   log("检测到配置变更，重新计算封顶值");
   load_cfg();
   screen_state_init(); /* SCREEN_STATE_PATH / 策略变了要重新挑信号 */
-  detect_gpu();        /* GPU 百分比变了要重新挑吸附频点 */
+  detect_gpu(0);        /* GPU 百分比变了要重新挑吸附频点 */
   /* 从某个调速器改成"不干预"：不能只是停止写入，要把模块改过的名字写回
    * 启动时的快照；否则节点会一直停在模块最后写入的那个调速器上。 */
   if (prev_gov[0] && !cfg.governor[0]) {
@@ -2218,6 +2258,18 @@ static int reload_if_changed(uint64_t seen) {
 /* 交还系统的公共动作：值放到硬件最高 + 写权限交给厂商框架。
  * 游戏解锁、熄屏解除、开机满血窗口三处都走这里，共用一份实现，
  * 避免任一处漏掉权限交换导致厂商调度接管不了。 */
+/* 交还写权限：优先还原 NODES journal 里记的出厂权限，没有才用 0666。
+ * 不能直接 read_mode()：那时节点已被运行期 chmod 成 0644，
+ * 记下来的"原始权限"就是 0644，出厂 0664（root:system 可写）的机型
+ * 从此让厂商框架写不动节点。 */
+static void hand_back_mode(const char *path) {
+  if (access(path, F_OK)) return;
+  int orig = journal_mode(NODES_JOURNAL, path);
+  if (!journal_has(PERM_JOURNAL, path))
+    journal_add(PERM_JOURNAL, path, 0, orig >= 0 ? orig : read_mode(path));
+  chmod(path, orig >= 0 ? (mode_t)orig : 0666);
+}
+
 static void hand_back_full(const char *why) {
   log("→ %s", why);
   for (int i = 0; i < g_npol; i++) {
@@ -2238,24 +2290,14 @@ static void hand_back_full(const char *why) {
   for (int i = 0; i < g_npol; i++) {
     char path[256];
     snprintf(path, sizeof path, "%s/scaling_max_freq", g_pol[i].dir);
-    if (!access(path, F_OK)) {
-      if (!journal_has(PERM_JOURNAL, path))
-        journal_add(PERM_JOURNAL, path, 0, read_mode(path));
-      chmod(path, 0666);
-    }
+    hand_back_mode(path);
     snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
-    if (!access(path, F_OK)) {
-      if (!journal_has(PERM_JOURNAL, path))
-        journal_add(PERM_JOURNAL, path, 0, read_mode(path));
-      chmod(path, 0666);
-    }
+    hand_back_mode(path);
   }
   const char *nodes[] = {g_gpu.max_node, g_gpu.min_node, g_gpu.pwr_node};
   for (size_t i = 0; i < 3; i++) {
-    if (!nodes[i][0] || access(nodes[i], F_OK)) continue;
-    if (!journal_has(PERM_JOURNAL, nodes[i]))
-      journal_add(PERM_JOURNAL, nodes[i], 0, read_mode(nodes[i]));
-    chmod(nodes[i], 0666);
+    if (!nodes[i][0]) continue;
+    hand_back_mode(nodes[i]);
   }
   log("  CPU/GPU 节点写权限已交由系统接管");
   /* state 由调用方决定：游戏/满血应用是 game，熄屏交还是 full。
@@ -2931,8 +2973,10 @@ int main(int argc, char **argv) {
        * 避免前端草稿态直接乘百分比得到的显示值和守护实际吸附值对不上。 */
       {
         char fb[4096], fpath[256];
+        fb[0] = 0;
         snprintf(fpath, sizeof fpath, "%s/scaling_available_frequencies", p[i].dir);
-        if (read_file(fpath, fb, sizeof fb))
+        /* read_file 返回 0 才是成功；写反了就会把栈残值当频点表吐给前端。 */
+        if (!read_file(fpath, fb, sizeof fb))
           printf("policyfreq_%s=%s\n", p[i].name + 6, fb);
       }
     }
@@ -2981,7 +3025,7 @@ int main(int argc, char **argv) {
       printf("ntier=%d\n", nt);
     }
     /* GPU 同样要硬件最高与当前封顶，否则 45% 对用户没意义 */
-    detect_gpu();
+    detect_gpu(1);
     /*
      * export 是独立进程，g_gpu.active 永远是 0，不能直接报它。
      * 运行中的守护每轮把生效值的前提（state / app_gpu / dlt）写进 status，
@@ -3095,7 +3139,7 @@ int main(int argc, char **argv) {
     }
     assign_pct(p, n);
     printf("=== GPU ===\n");
-    detect_gpu();
+    detect_gpu(1);
     printf("  node=%s 最高=%ldHz 封顶=%ldHz\n", g_gpu.max_node[0] ? g_gpu.max_node : "无",
            g_gpu.max_hz, g_gpu.normal);
     return 0;
@@ -3128,7 +3172,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   assign_pct(g_pol, g_npol);
-  detect_gpu();
+  detect_gpu(0);
 
   /*
    * 先按持久化快照回收上次崩溃留下的写入，再取新基准。

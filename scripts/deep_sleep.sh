@@ -23,13 +23,13 @@ PIDFILE=$CONF_DIR/run/dsleep.pid
 SCREEN_OFF_DELAY=20
 POLL_INTERVAL=2
 # 深睡激活后不再 2 秒轮询：阻塞等 screen_toggled 事件（亮屏立即醒），
-# 最多 DS_ACTIVE_TICK 秒醒一次做维护（充电/7:30/名单）；事件源不可用时退 30 秒轮询。
+# 最多 DS_ACTIVE_TICK 秒醒一次做维护（充电/复查/名单）；事件源不可用时退 30 秒轮询。
 # 亮屏是事件驱动（logcat 一有 screen_toggled 立刻回），所以这个值只影响
 # "充电/媒体/名单变更"的最迟发现时间，不影响亮屏响应。
 # 300 秒是为了待机：整夜每 2 分钟醒一次纯属白耗，5 分钟足够。
 DS_ACTIVE_TICK=300
 DS_ACTIVE_FALLBACK=30
-# 冻结时序：熄屏后先冻结后台，7:30 才一次性 force-idle。
+# Doze 时序：熄屏满 60 秒收口，之后按 1/5/30/60 分钟复查，掉出即重收口。
 # 3 分钟内分批冻结，之后不再新增，减少冻结组里 D 状态进程把整组卡住的机会。
 # 冻结（墓碑）已从深睡里移除：本模块不再冻结任何进程，只保留 Doze。
 # 这里保留一个恒为 0 的开关，是为了让下面"解冻清理"的代码还能跑 ——
@@ -314,7 +314,7 @@ ds_conf_write() {
     cat - >"$DSLEEP_CONF.tmp" <<'EOF'
 # 深度睡眠配置
 # enable=1 打开；0 关闭。关闭只停止干预，不会保留任何系统改动。
-# 打开后：熄屏满 20 秒开始准备，满 7 分 30 秒让系统进一次 Doze 深度空闲，
+# 打开后：熄屏满 60 秒让系统进一次 Doze 深度空闲，
 # 并把 push= / 默认短信 / 正在播放的媒体临时加进 Doze 白名单。
 enable=0
 # 每行一条 white=包名：完全豁免，深睡时也不受 Doze 限制（等同系统的「无限制」）。
@@ -611,7 +611,7 @@ ds_media_playing() {
 
 # ============================ 后台冻结 ========================================
 # 冻结第三方后台进程，替代“熄屏 20 秒就把整机压进 Doze”的高频做法：
-#   T0 冻结 → T+3min 停止新增 → T+7:30 一次性 force-idle。
+#   T0 进入 → T+60s 收口 → 之后按 1/5/30/60 分钟复查。
 # 只操作 /dev/freezer（或 v2 freezer）里的自有子组，不碰别的模块建的组。
 # 所有改动先写 run/freeze.saved 账本；亮屏、关开关、启动、卸载都按账本解冻。
 
@@ -851,7 +851,7 @@ DS_FREEZE_SKIP=""
 
 # 媒体/新豁免应用需要跑：把它从这个包里单独解冻，其余保持冻结。
 
-# 7:30 一次性收口：cmd 优先，失败补发 dumpsys 兼容命令，仍失败不再重试。
+# Doze 收口：cmd 优先，失败补发 dumpsys 兼容命令，失败等下一次复查。
 # 第 i 步复查要等多少秒（i 从 0 开始）。走完列表就固定用最后一项。
 ds_doze_interval() {
     local want="${1:-0}" i=0 v last=60
@@ -879,6 +879,10 @@ ds_doze_once() {
     [ "$ds_doze_sent" = "1" ] && return 0
     ds_doze_sent=1
     ds_doze_force
+    # 快照要在这里重写一次：进入时写的是 dozed=0，真正发过 force-idle 之后
+    # 不更新的话，被 kill -9 / 断电后启动会以为"没 force 过"，跳过 unforce，
+    # 亮屏期间系统仍在 forced Doze（后台被压、通知延迟）。
+    ds_snap_write
     ds_doze_step=0
     ds_doze_next=$(( $(now) + $(ds_doze_interval 0) ))
 }
@@ -1005,7 +1009,7 @@ ds_policy_migrate_v3() {
     local marker="$CONF_DIR/run/policy_v3" p installed
     [ -f "$marker" ] && return 0
     [ -f "$DSLEEP_CONF" ] || return 0
-    installed="$(pm list packages 2>/dev/null | sed 's/^package://' | tr -d '')"
+    installed="$(pm list packages 2>/dev/null | sed 's/^package://' | tr -d '\r')"
     [ -n "$installed" ] || return 0
     cp -f "$DSLEEP_CONF" "$DSLEEP_CONF.bak-policy3" 2>/dev/null
     timeout 2 dumpsys deviceidle whitelist 2>/dev/null > "$CONF_DIR/run/doze.before-policy3"
@@ -1015,7 +1019,7 @@ ds_policy_migrate_v3() {
                 v = $0
                 sub(/^[^=]*=/, "", v)
                 sub(/#.*/, "", v)
-                gsub(/[[:space:]]/, "", v)
+                gsub(/[[:space:]]/, "", v)
                 if (v == "com.netease.cloudmusic" || v == "com.tencent.qqmusic" ||
                     v == "com.kugou.android" || v == "cn.kuwo.player" ||
                     v == "com.ximalaya.ting.android" || v == "com.mi.health" ||
@@ -1027,18 +1031,25 @@ ds_policy_migrate_v3() {
             }
             { print }
         ' "$DSLEEP_CONF"
-        for p in com.netease.cloudmusic com.tencent.qqmusic com.kugou.android                  cn.kuwo.player com.ximalaya.ting.android com.mi.health                  com.xiaomi.hm.health com.huawei.health com.hihonor.health                  com.heytap.health com.heytap.health.international                  com.oplus.healthservice com.vivo.health com.sec.android.app.shealth                  com.omarea.vtools; do
-            printf '%s
-' "$installed" | grep -qx -- "$p" || continue
-            printf 'nice=%s
-' "$p"
+        for p in com.netease.cloudmusic com.tencent.qqmusic com.kugou.android \
+                 cn.kuwo.player com.ximalaya.ting.android com.mi.health \
+                 com.xiaomi.hm.health com.huawei.health com.hihonor.health \
+                 com.heytap.health com.heytap.health.international \
+                 com.oplus.healthservice com.vivo.health com.sec.android.app.shealth \
+                 com.omarea.vtools; do
+            printf '%s\n' "$installed" | grep -qx -- "$p" || continue
+            printf 'nice=%s\n' "$p"
         done
     } | atomic_write "$DSLEEP_CONF" 0644 || return 0
-    for p in com.netease.cloudmusic com.tencent.qqmusic com.kugou.android              cn.kuwo.player com.ximalaya.ting.android com.mi.health              com.xiaomi.hm.health com.huawei.health com.hihonor.health              com.heytap.health com.heytap.health.international              com.oplus.healthservice com.vivo.health com.sec.android.app.shealth              com.omarea.vtools; do
+    for p in com.netease.cloudmusic com.tencent.qqmusic com.kugou.android \
+             cn.kuwo.player com.ximalaya.ting.android com.mi.health \
+             com.xiaomi.hm.health com.huawei.health com.hihonor.health \
+             com.heytap.health com.heytap.health.international \
+             com.oplus.healthservice com.vivo.health com.sec.android.app.shealth \
+             com.omarea.vtools; do
         timeout 2 dumpsys deviceidle whitelist "-$p" >/dev/null 2>&1
     done
-    printf '%s
-' "policy_v3 $(now)" > "$marker" 2>/dev/null
+    printf '%s\n' "policy_v3 $(now)" > "$marker" 2>/dev/null
     ds_conf_raw=""
     log_ds "深睡策略已迁移：音乐/健康/Scene 移出 Doze 白名单（改为保活）"
     return 0
@@ -1306,7 +1317,7 @@ ds_tick() {
 }
 
 # 深睡激活后的等待：阻塞等 screen_toggled，亮屏立刻醒；最多 DS_ACTIVE_TICK 秒
-# 醒一次做维护（充电/7:30/名单/媒体）。事件源不可用时退 30 秒定时。
+# 醒一次做维护（充电/复查/名单/媒体）。事件源不可用时退 30 秒定时。
 # 返回 0 = 拿到事件，1 = 超时或事件源不可用。
 ds_screen_event() {
     local t0 t1 wp lp wd stamp backlog

@@ -430,8 +430,10 @@ console.log('\n== P0.5 巡检瘦身 ==');
      '守护每轮写心跳，退出时删除');
   ok(/HB="\$DATA\/run\/heartbeat"/.test(svc) &&
      /stat -c %Y "\$HB"/.test(svc) &&
-     /\[ "\$\(\(_now - _mt\)\)" -gt 90 \]/.test(svc),
-     '看门狗按心跳 mtime 判 90s 过期（不只看 pid）');
+     /\[ "\$\(\(_now - _mt\)\)" -gt "\$_lim" \]/.test(svc),
+     '看门狗按心跳 mtime 判过期（不只看 pid）');
+  ok(/SOFF_INTERVAL/.test(svc) && /IDLE_INTERVAL/.test(svc) && /_v=\$\(\(_v \+ 60\)\)/.test(svc),
+     '阈值按配置里的最长睡眠现算（固定 90s 会误杀合法的 300s 长睡）');
   ok(/sleep 60/.test(svc) && /kill -9 "\$PID"/.test(svc),
      '看门狗 60s 一轮；心跳过期但进程还在时先杀掉再拉起');
 }
@@ -3263,6 +3265,22 @@ console.log('\n== restart 不吊住调用者 ==');
   ok(fs.existsSync(dsPath), '深度睡眠守护脚本随包存在（scripts/deep_sleep.sh）');
   const ds = fs.existsSync(dsPath) ? fs.readFileSync(dsPath, 'utf8') : '';
 
+  /* 状态键必须对得上：守护发什么，api.sh 的白名单就得放行什么。
+     这条以前是硬编码名单（写死 8 个偏移键），加新键会静默逃逸 ——
+     漏掉 strat/smart/tick/fgprobe 就是这样漏过去的：页面把"智能"显示成"限频"。
+     现在从 publish_status 的 fprintf 里派生键集，谁再加键都跑不掉。 */
+  {
+    const pub = (csrc.match(/static void publish_status\(void\) \{[\s\S]*?\n\}/) || [''])[0];
+    // 源码里的 "\n" 是反斜杠+n 两个字符，不先换成真换行的话，
+    // 键名会被粘成 "nscreen" 这种。
+    const norm = pub.replace(/\\n/g, '\n');
+    const keys = Array.from(new Set((norm.match(/[a-z_]+=%/g) || []).map(s => s.slice(0, -2))));
+    const wl = (apiSrc.match(/_st=\$\(grep -E '\^\(([^)]*)\)='/) || [, ''])[1].split('|');
+    const missing = keys.filter(k => !wl.includes(k) && k !== 'ver' && k !== 'ntier');
+    ok(keys.length > 20 && missing.length === 0,
+       `api 白名单覆盖守护发布的状态键（缺：${missing.join(',') || '无'}）`);
+  }
+
   /* 产品语义：熄屏 20 秒进入，60 秒收口，之后 1/5/30/60 分钟复查。 */
   ok(/SCREEN_OFF_DELAY=20/.test(ds), '熄屏满 20 秒才进入（不是熄屏立刻）');
   ok(/POLL_INTERVAL=2/.test(ds), '心跳 2 秒（熄屏后不加密轮询）');
@@ -3523,7 +3541,7 @@ console.log('\n== restart 不吊住调用者 ==');
   /* 版本：module.prop / 页面模块版本 / README 一起改；
      守护二进制这轮没重编，SF_VERSION 仍是 2.1，页面 #ver2 也跟着它。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20106$/m.test(mp),
+  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20107$/m.test(mp),
      'module.prop 是 V2.1 Beta / 20101');
   ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号仍是 2.1（本轮未重编）');
   ok(/id="ver">V2\.1 Beta</.test(html) && /id="ver2">V2\.1</.test(html),

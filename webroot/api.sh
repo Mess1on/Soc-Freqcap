@@ -211,7 +211,7 @@ st_status() {
   _st=""
   for _f in "$STATUS" "$ROOT/run/status"; do
     [ -f "$_f" ] || continue
-    _st=$(grep -E '^(state|screen|soff|soff_keep|game_pkg|reason|fg|app_mode|app_gpu|pid|dlt|batt|bcut|stall|psib|avg10|temp|chg|psi|th)=' "$_f" 2>/dev/null)
+    _st=$(grep -E '^(state|screen|soff|soff_keep|game_pkg|reason|fg|app_mode|app_gpu|pid|dlt|batt|bcut|stall|psib|avg10|temp|chg|psi|th|strat|smart|tick|fgprobe|gminw)=' "$_f" 2>/dev/null)
     [ -n "$_st" ] && break
   done
   if [ -n "$_st" ]; then
@@ -432,6 +432,10 @@ cmd_conf_set_many() {
     _k=${_kv%%=*}
     _v=${_kv#*=}
     [ -n "$_k" ] || die "BAD_KV"
+    # 键名必须先验：conf_read 是把键原样拼进 sed 程序的，键里带换行就能
+    # 闭合出额外的 sed 命令（w 写文件）。下面那行"值没变就跳过"的快路径
+    # 跑在 cfg_set 的校验之前，所以校验只能加在这里。
+    is_key "$_k" || [ "$_k" = CPU_GOVERNOR ] || die "BAD_KEY"
     _n=$((_n + 1))
     # 值没变就不动文件：既省写入，也不会因为"原样保存"误改配置。
     [ "$(conf_read "$_k")" = "$_v" ] && continue
@@ -1479,12 +1483,17 @@ _ds_stop() {
   case "$_p" in
     ''|*[!0-9]*) ;;
     *)
-      kill "$_p" 2>/dev/null
-      # 同样按 200ms 探：TERM 后的 unforce 通常几百毫秒内就退完，
-      # 按整秒等会让"关开关"白卡一秒多。
-      _i=0
-      while [ "$_i" -lt 25 ] && [ -d "/proc/$_p" ]; do sleep 0.2; _i=$((_i + 1)); done
-      [ -d "/proc/$_p" ] && kill -9 "$_p" 2>/dev/null
+      # 只判数字不够：pid 文件残留几天后这个号可能已经被别的进程回收，
+      # 一按"关深睡"就误杀无关进程。和 _ds_alive 用同一个判据。
+      if [ -d "/proc/$_p" ] \
+         && tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q 'deep_sleep\.sh'; then
+        kill "$_p" 2>/dev/null
+        # 同样按 200ms 探：TERM 后的 unforce 通常几百毫秒内就退完，
+        # 按整秒等会让"关开关"白卡一秒多。
+        _i=0
+        while [ "$_i" -lt 25 ] && [ -d "/proc/$_p" ]; do sleep 0.2; _i=$((_i + 1)); done
+        [ -d "/proc/$_p" ] && kill -9 "$_p" 2>/dev/null
+      fi
       ;;
   esac
   rm -f "$DS_PID" 2>/dev/null
@@ -1662,27 +1671,27 @@ cmd_reset_all() {
 case "${1:-}" in
   ping)       cmd_ping ;;
   status)     st_status ;;
-  log)        st_log "$2" ;;
+  log)        st_log "${2:-}" ;;
   logs)       shift; cmd_logs "$@" ;;
   about)      st_about ;;
   conf_get)   cfg_get ;;
-  conf_set)   cfg_set "$2" "$3" ;;
+  conf_set)   cfg_set "${2:-}" "${3:-}" ;;
   conf_set_many) shift; cmd_conf_set_many "$@" ;;
   # 默认只列"这台机上真装了的"。要用全量预设名单时传 all。
   games_list) [ "${2:-}" = all ] && list_all || list_installed ;;
   games_suggest) games_suggest ;;
-  games_add)  list_add "$2" ;;
-  games_del)  list_del "$2" ;;
+  games_add)  list_add "${2:-}" ;;
+  games_del)  list_del "${2:-}" ;;
   modes_list) modes_list ;;
   apps_list)  apps_list "${2:-}" ;;
   mode_apps)  mode_apps "${2:-}" ;;
   builtin_white) builtin_white ;;
   builtin_labels) builtin_labels ;;
   labels)     shift; cmd_labels "$@" ;;
-  modes_set)  modes_set "$2" "$3" ;;
-  modes_del)  modes_del "$2" ;;
+  modes_set)  modes_set "${2:-}" "${3:-}" ;;
+  modes_del)  modes_del "${2:-}" ;;
   cores)      [ -f "$BIN" ] && "$BIN" cores ;;
-  icon)       cmd_icon "$2" ;;
+  icon)       cmd_icon "${2:-}" ;;
   icons)      shift; cmd_icons "$@" ;;
   reset_all)  cmd_reset_all ;;
   pkg)        cmd_pkg ;;
@@ -1692,9 +1701,9 @@ case "${1:-}" in
   ovr_clear)  cmd_ovr_clear ;;
   ds_get)     cmd_ds_get ;;
   ds_state)   cmd_ds_state ;;
-  ds_set)     cmd_ds_set "$2" "$3" ;;
-  ds_white_add) cmd_ds_white_add "$2" ;;
-  ds_white_del) cmd_ds_white_del "$2" ;;
+  ds_set)     cmd_ds_set "${2:-}" "${3:-}" ;;
+  ds_white_add) cmd_ds_white_add "${2:-}" ;;
+  ds_white_del) cmd_ds_white_del "${2:-}" ;;
   start)      cmd_start ;;
   stop)       cmd_stop ;;
   restart)    cmd_restart ;;

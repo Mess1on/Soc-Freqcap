@@ -28,8 +28,8 @@ Magisk Manager 很可能不注入 `magisk.exec`（它那套是 `requestRoot` + W
 
 ```sh
 D=/data/adb/modules/soc_freqcap   # APatch 则是 /data/adb/ap/modules/soc_freqcap
-sh $D/socfreqd status
-sh $D/socfreqd probe
+$D/socfreqd status
+$D/socfreqd probe
 ```
 
 ## WebUI

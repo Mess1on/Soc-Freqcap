@@ -16,7 +16,7 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 
 ## 安装
 
-需要 root（KernelSU / Magisk / APatch）。CPU / GPU 封顶不挑 Android 版本；深睡的 7:30 收口依赖 Android 12+ 的 DeviceIdleController shell 接口。
+需要 root（KernelSU / Magisk / APatch）。CPU / GPU 封顶不挑 Android 版本；深睡的 60 秒收口依赖 Android 12+ 的 DeviceIdleController shell 接口。
 
 | 管理器 | 安装 |
 |---|---|
@@ -36,8 +36,8 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 
 ```sh
 D=/data/adb/modules/soc_freqcap      # APatch: /data/adb/ap/modules/soc_freqcap
-sh $D/socfreqd status                 # 守护在不在、当前档位
-sh $D/socfreqd probe                  # 会封到多少（只读，不改任何东西）
+$D/socfreqd status                 # 守护在不在、当前档位
+$D/socfreqd probe                  # 会封到多少（只读，不改任何东西）
 ```
 
 WebUI：管理器模块页 → 打开 WebUI。首页徽标显示「常态限频中」或「游戏中 · 已解锁」。

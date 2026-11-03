@@ -5,6 +5,9 @@ DAEMON="$MODDIR/socfreqd"
 # 管理器已经标记卸载（remove）：即使 service.sh 还被调到，也绝不拉起守护。
 # 否则卸载到重启之间会继续写频率节点，看起来像"删了还在限频"。
 [ -f "$MODDIR/remove" ] && exit 0
+# 管理器里"停用"会写 disable：停用期间不能再把守护拉回来，
+# 否则用户看到的是"停用了还在限频"。
+[ -f "$MODDIR/disable" ] && exit 0
 # 可变状态位于模块目录之外，升级模块不会把它一起删掉。
 # 路径需与守护的 SF_DATADIR、api.sh 的 DATA 三处一致。
 DATA=/data/adb/soc_freqcap
@@ -65,7 +68,25 @@ stale() {
   _mt=$(stat -c %Y "$HB" 2>/dev/null | head -n 1)
   case "$_now" in ''|*[!0-9]*) return 0 ;; esac
   case "$_mt" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$((_now - _mt))" -gt 90 ]
+  # 守护睡觉期间不写心跳，而合法睡眠可以到 SOFF/IDLE_INTERVAL 秒（上限 300），
+  # 游戏态还有 INTERVAL*2。阈值写死 90 会把健康守护每 90~180s kill -9 一次，
+  # 变成周期性唤醒风暴。按配置现算：最大睡眠 + 60 秒余量。
+  _lim=90
+  if [ -f "$DATA/socfreq.conf" ]; then
+    _v=$(awk -F= '
+      $1 == "SOFF_INTERVAL" || $1 == "IDLE_INTERVAL" {
+        v = $2; gsub(/[^0-9]/, "", v); if (v + 0 > m) m = v + 0
+      }
+      $1 == "INTERVAL" {
+        v = $2; gsub(/[^0-9]/, "", v); v = v * 2; if (v + 0 > m) m = v + 0
+      }
+      END { print m + 0 }' "$DATA/socfreq.conf" 2>/dev/null)
+    case "$_v" in
+      ''|*[!0-9]*) ;;
+      *) _v=$((_v + 60)); [ "$_v" -gt "$_lim" ] && _lim="$_v" ;;
+    esac
+  fi
+  [ "$((_now - _mt))" -gt "$_lim" ]
 }
 
 # 深度睡眠是独立 shell 进程，靠 pid 文件 + cmdline 认人。
@@ -150,6 +171,7 @@ ds_start() {
     # 心跳文件被删后 stale 立刻为真 → 一分钟内又把守护拉起来继续写频率，
     # 用户看到的就是"模块删了还在限频"。所以在子 shell 里退出（不影响别的模块）。
     [ -f "$MODDIR/remove" ] && exit 0
+    [ -f "$MODDIR/disable" ] && exit 0
     if [ ! -f "$PAUSE" ] && stale; then
       if alive; then
         PID=$(cat "$LOCK" 2>/dev/null)

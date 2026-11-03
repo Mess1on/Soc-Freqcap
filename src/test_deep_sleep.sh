@@ -116,7 +116,7 @@ ds_conf_load
 
 echo "== 进入 =="
 ds_tick
-ok "$(cat "$STATE/forced")" "0" "进入深睡（不再立即 force-idle，7:30 才收口）"
+ok "$(cat "$STATE/forced")" "0" "进入深睡（不再立即 force-idle，满 60 秒才收口）"
 ok "$(cat "$STATE/settings")" "" "不再改 device_idle_constants"
 ok "$(has "$STATE/whitelist" com.white)" "yes" "用户白名单应用在进入时加白"
 ok "$(has "$STATE/whitelist" com.test.sms)" "yes" "默认短信应用进入时临时加白（不靠用户名单）"
