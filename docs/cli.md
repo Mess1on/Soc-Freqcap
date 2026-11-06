@@ -111,22 +111,29 @@ CPU 封顶 ±5%（四簇同步）、重启守护、暂停/恢复、停掉并还�
 `update.json` 只认 `version`、`versionCode`、`zipUrl`、`changelog` 四个字段，
 多写的会被管理器忽略，别指望用自定义字段传地址。
 
-改完推到 `main`，再清一次 jsDelivr 缓存，发版才算生效：
+改完推到 `main` 就生效，不用重新发包，也不用清缓存——清单走的是实时代理。
 
-```sh
-curl "https://purge.jsdelivr.net/gh/Mess1on/Soc-Freqcap@main/update.json"
-curl "https://purge.jsdelivr.net/gh/Mess1on/Soc-Freqcap@main/CHANGELOG.md"
+### 清单地址为什么不用 raw.githubusercontent.com
+
+实测一加 13（ColorOS，无代理）：`raw.githubusercontent.com` **完全不通**（HTTP 000，DNS 污染）。
+
+更麻烦的是管理器拉失败时**不报错**——它把「拉不到」和「没有新版」当成同一件事，
+界面永远停在「已是最新」。作者这边看一切正常，用户那边什么都收不到。
+
+所以 `module.prop` 的 `updateJson` 和 `update.json` 的 `changelog` 都写成：
+
+```
+https://gh-proxy.com/https://raw.githubusercontent.com/Mess1on/Soc-Freqcap/main/update.json
 ```
 
-不清的话，jsDelivr 对分支引用有最长 12 小时的缓存，发完版用户还得等半天才看得到。
+这是服务端反代，实时透传，没有缓存，发版即生效。同一份仓库试过几个地址，实测结果：
 
-### 为什么不用 raw.githubusercontent.com
+| 地址 | 手机实测 | 说明 |
+|---|---|---|
+| `raw.githubusercontent.com` | **000 不通** | 被污染 |
+| `cdn.jsdelivr.net` | 200，但**内容是旧的** | 有 12h 分支缓存；未命中时 **301 回源到 raw**，设备跟着跳到不通的域名 |
+| `gh-proxy.com` | 200，内容实时 | 目前用的 |
+| `ghproxy.net` / `ghfast.top` | 200，内容实时 | 备选，一个挂了可以换 |
 
-实测一加 13（ColorOS，无代理）上 `raw.githubusercontent.com` **完全不通**（HTTP 000，
-DNS 污染），而 `cdn.jsdelivr.net` 返回 200。
-
-管理器拉清单失败时**不报错**——它把「拉不到」和「没有新版」当成同一件事，界面就
-永远停在「已是最新」。作者这边看起来一切正常，用户那边什么都收不到，这个坑很难自己发现。
-
-所以 `module.prop` 的 `updateJson` 和 `update.json` 的 `changelog` 都走 jsDelivr，
-代价就是上面那个缓存要手动清。
+jsDelivr 那条要特别记一下：它看着能用，但缓存没命中时会把你重定向到
+`raw.githubusercontent.com`，等于把用户送回那个不通的域名。别用。
