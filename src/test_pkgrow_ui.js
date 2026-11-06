@@ -22,7 +22,8 @@ function fn(name) {
 const iconChunk = (html.match(/\nconst ICONS = \{\};[\s\S]*?\n\}\n\nasync function loadGames\(/) || [''])[0]
   .replace(/\n\nasync function loadGames\($/, '');
 const chunks = [fn('makeIconEl'), fn('makeNameEl'), iconChunk,
-                '\nconst LABELS = {};', fn('applyLabel'), fn('pkgRow')];
+                '\nconst LABELS = {};', fn('applyLabel'),
+                '\nlet rowIO = null;', fn('rowObserver'), fn('pkgRow')];
 if (chunks.some(c => c.length < 15)) {
   console.log('  FAIL 页面里缺函数：' + chunks.map(c => c.length).join(','));
   process.exit(1);

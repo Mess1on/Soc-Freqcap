@@ -97,7 +97,7 @@ conf_read() {
 }
 
 # 可写的键。区间在 cfg_set 里按键名分支，键增删时这里必须同步。
-KEYS='STRATEGY INTERVAL GAME_GRACE_SEC CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT GPU_MIN_LOCK SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT'
+KEYS='STRATEGY INTERVAL GAME_GRACE_SEC CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT GPU_MIN_LOCK GPU_BOOST_OFF BIG_MIN SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT'
 
 is_key() {
   for k in $KEYS; do [ "$1" = "$k" ] && return 0; done
@@ -211,7 +211,7 @@ st_status() {
   _st=""
   for _f in "$STATUS" "$ROOT/run/status"; do
     [ -f "$_f" ] || continue
-    _st=$(grep -E '^(state|screen|soff|soff_keep|game_pkg|reason|fg|app_mode|app_gpu|pid|dlt|batt|bcut|stall|psib|avg10|temp|chg|psi|th|strat|smart|tick|fgprobe|gminw)=' "$_f" 2>/dev/null)
+    _st=$(grep -E '^(state|screen|soff|soff_keep|game_pkg|reason|fg|app_mode|app_big|app_little|app_gpu|pid|dlt|batt|bcut|stall|psib|avg10|temp|chg|psi|th|psifrz|strat|smart|tick|fgprobe|gminw)=' "$_f" 2>/dev/null)
     [ -n "$_st" ] && break
   done
   if [ -n "$_st" ]; then
@@ -220,7 +220,7 @@ st_status() {
     # 状态文件还没生成时也要给出可解析的字段。
     # 前端拿到缺字段的对象能显示"未运行"，拿到空串只会白屏。
     # 实时偏移那几项给 -1：读不到不等于 0，页面据此不显示"温控降了 0 档"这种假话。
-    printf 'state=unknown\nscreen=on\nsoff=15\nsoff_keep=0\ngame_pkg=-\nreason=-\nfg=-\napp_mode=\napp_gpu=\npid=\ndlt=-1\nbatt=-1\nbcut=0\nstall=-1\npsib=-1\navg10=-1\ntemp=-1\nchg=-1\npsi=-1\nth=-1\n'
+    printf 'state=unknown\nscreen=on\nsoff=15\nsoff_keep=0\ngame_pkg=-\nreason=-\nfg=-\napp_mode=\napp_big=0\napp_little=0\napp_gpu=\npid=\ndlt=-1\nbatt=-1\nbcut=0\nstall=-1\npsib=-1\navg10=-1\ntemp=-1\nchg=-1\npsi=-1\nth=-1\npsifrz=0\n'
   fi
 }
 
@@ -274,6 +274,27 @@ cmd_logs() {
       ;;
   esac
   return 0
+}
+
+# 日志导出：由后端落到 Download，回执给真实路径。
+# 页面里的 <a download> 在多数管理器的 WebView 里没有下载监听，点了没反应，
+# 却照样弹"已导出"——导出必须真的落盘，前端只负责显示路径。
+cmd_log_export() {
+  mkdir -p "$PKG_DIR" 2>/dev/null
+  [ -d "$PKG_DIR" ] || die "PKG_DIR" 7
+  _b=$(getprop ro.product.brand 2>/dev/null)
+  _m=$(getprop ro.product.model 2>/dev/null)
+  _fn=$(printf '%s-%s' "$_b" "$_m" | tr -c 'A-Za-z0-9._-' '_')
+  _t=$(date +%Y%m%d-%H%M%S 2>/dev/null || echo unknown)
+  _f="$PKG_DIR/soclog-$_fn-$_t.txt"
+  _tmp="$_f.$$"
+  {
+    printf '# Soc智能限频 日志导出 %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+    cmd_logs export 0
+  } > "$_tmp" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; die "WRITE" 5; }
+  mv -f "$_tmp" "$_f" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; die "WRITE" 5; }
+  chmod 0644 "$_f" 2>/dev/null
+  printf 'OK %s\n' "$_f"
 }
 
 st_about() {
@@ -330,6 +351,13 @@ cfg_get() {
       for (i = 1; i <= n; i++) print ks[i] "=" ((ks[i] in val) ? val[ks[i]] : "")
     }
   ' "$CONF"
+  # 荣耀 / 华为内核不切换调速器（守护侧同一判断，见 socfreqd.c 的
+  # governor_locked）。页面据此把下拉固定为「不干预」，别让用户以为
+  # 选了一个实际不会生效的值。
+  case "$(getprop ro.product.brand 2>/dev/null | tr 'a-z' 'A-Z') $(getprop ro.product.manufacturer 2>/dev/null | tr 'a-z' 'A-Z')" in
+    *HONOR*|*HUAWEI*|*SAMSUNG*) printf 'gov_locked=1\n' ;;
+    *)                          printf 'gov_locked=0\n' ;;
+  esac
 }
 
 cfg_set() {
@@ -341,7 +369,7 @@ cfg_set() {
   elif [ "$_k" = STRATEGY ]; then
     case "$_v" in cap|smart) ;; *) die "BAD_STRATEGY" ;; esac
   elif [ "$_k" = SCREEN_POLICY ]; then
-    case "$_v" in uncap|keep) ;; *) die "BAD_POLICY" ;; esac
+    case "$_v" in uncap|keep|cap|cap_off) ;; *) die "BAD_POLICY" ;; esac
   elif [ "$_k" = SCREEN_STATE_PATH ] || [ "$_k" = BATT_CURRENT_PATH ]; then
     case "$_v" in ''|/sys/*) ;; *) die "BAD_PATH" ;; esac
   elif [ "$_k" = BATT_CURRENT_UNIT ]; then
@@ -355,6 +383,8 @@ cfg_set() {
       INTERVAL)       [ "$_v" -ge 2 ] && [ "$_v" -le 60 ] || die "RANGE" ;;
       GAME_GRACE_SEC) [ "$_v" -ge 2 ] && [ "$_v" -le 300 ] || die "RANGE" ;;
       GPU_MIN_LOCK)   is_switch "$_v" || die "RANGE" ;;
+      GPU_BOOST_OFF)  is_switch "$_v" || die "RANGE" ;;
+      BIG_MIN)        is_switch "$_v" || die "RANGE" ;;
       SCREEN_UNCAP)   is_switch "$_v" || die "RANGE" ;;
       SOFF_INTERVAL)  [ "$_v" -ge 5 ] && [ "$_v" -le 300 ] || die "RANGE" ;;
       IDLE_CURRENT_MA) [ "$_v" -ge 20 ] && [ "$_v" -le 2000 ] || die "RANGE" ;;
@@ -404,6 +434,27 @@ cfg_set() {
       _cr=$(conf_read BATT_CRIT)
       case "$_cr" in ''|*[!0-9]*) : ;; *) [ "$_v" -gt "$_cr" ] || die "BATT_ORDER" ;; esac
     fi
+    # 0 = 关；非 0 时必须至少能凑出一整档，否则界面上填 5、实际一档 10。
+    if [ "$_k" = PSI_GAIN ] && [ "$_v" -gt 0 ]; then
+      _st=$(conf_read PSI_STEP)
+      case "$_st" in ''|*[!0-9]*) _st=5 ;; esac
+      [ "$_v" -ge "$_st" ] || die "PSI_ORDER"
+    fi
+    if [ "$_k" = PSI_STEP ]; then
+      _g=$(conf_read PSI_GAIN)
+      case "$_g" in ''|*[!0-9]*) _g=10 ;; esac
+      { [ "$_g" -eq 0 ] || [ "$_v" -le "$_g" ]; } || die "PSI_ORDER"
+    fi
+    if [ "$_k" = TH_MAX ] && [ "$_v" -gt 0 ]; then
+      _ts=$(conf_read TH_STEP)
+      case "$_ts" in ''|*[!0-9]*) _ts=5 ;; esac
+      [ "$_v" -ge "$_ts" ] || die "TH_ORDER"
+    fi
+    if [ "$_k" = TH_STEP ]; then
+      _tm=$(conf_read TH_MAX)
+      case "$_tm" in ''|*[!0-9]*) _tm=25 ;; esac
+      { [ "$_tm" -eq 0 ] || [ "$_v" -le "$_tm" ]; } || die "TH_ORDER"
+    fi
     if [ "$_k" = BATT_CRIT ]; then
       _lo=$(conf_read BATT_LOW)
       case "$_lo" in ''|*[!0-9]*) : ;; *) [ "$_v" -lt "$_lo" ] || die "BATT_ORDER" ;; esac
@@ -446,6 +497,84 @@ cmd_conf_set_many() {
     fi
   done
   printf 'OK %s\n' "$_n"
+}
+
+# ── 芯片推荐预设 ────────────────────────────────────────────────
+# 预设只在"全新安装"时自动套用；覆盖安装不会动老配置。这里给页面一个
+# 手动入口：按当前 SoC 找 adapt/*.conf，读到什么就应用什么。
+# 匹配规则与 customize.sh 完全一致：每条 #match 都要命中，soc 用包含匹配。
+_preset_match() {
+  PRESET_FILE=
+  [ -d "$ROOT/adapt" ] || return 1
+  _pb=$(getprop ro.product.brand 2>/dev/null | tr 'a-z' 'A-Z')
+  _pm=$(getprop ro.product.model 2>/dev/null | tr 'a-z' 'A-Z')
+  _ps=$(getprop ro.soc.model 2>/dev/null | tr 'a-z' 'A-Z')
+  [ -z "$_ps" ] && _ps=$(getprop ro.board.platform 2>/dev/null | tr 'a-z' 'A-Z')
+  PRESET_SOC=$_ps
+  for _f in "$ROOT"/adapt/*.conf; do
+    [ -f "$_f" ] || continue
+    _ml=$(grep '^#match ' "$_f" 2>/dev/null)
+    [ -n "$_ml" ] || continue
+    _hit=1
+    _oifs=$IFS; IFS='
+'
+    for _l in $_ml; do
+      case "$_l" in
+        *model=*) [ "$_pm" = "$(printf '%s' "${_l#*model=}" | tr 'a-z' 'A-Z')" ] || _hit=0 ;;
+        *brand=*) [ "$_pb" = "$(printf '%s' "${_l#*brand=}" | tr 'a-z' 'A-Z')" ] || _hit=0 ;;
+        *soc=*)   case "$_ps" in *"$(printf '%s' "${_l#*soc=}" | tr 'a-z' 'A-Z')"*) : ;; *) _hit=0 ;; esac ;;
+        *) _hit=0 ;;
+      esac
+    done
+    IFS=$_oifs
+    if [ "$_hit" = 1 ]; then PRESET_FILE=$_f; return 0; fi
+  done
+  return 1
+}
+
+_preset_val() {
+  sed -n "s/^$1=//p" "$PRESET_FILE" 2>/dev/null | head -n 1 | tr -d ' \r\t'
+}
+
+preset_get() {
+  if ! _preset_match; then
+    printf 'none=1\nsoc=%s\n' "${PRESET_SOC:-未知}"
+    return 0
+  fi
+  _title=$(sed -n 's/^# *//p' "$PRESET_FILE" | head -n 1)
+  printf 'none=0\nsoc=%s\nname=%s\ntitle=%s\n' \
+    "${PRESET_SOC:-未知}" "$(basename "$PRESET_FILE" .conf)" "$_title"
+  for _pk in big mid2 mid little gpu th_high th_low psi_gain; do
+    case "$_pk" in
+      big)      _v=$(_preset_val default_cpu_pct_big) ;;
+      mid2)     _v=$(_preset_val default_cpu_pct_mid2) ;;
+      mid)      _v=$(_preset_val default_cpu_pct_mid) ;;
+      little)   _v=$(_preset_val default_cpu_pct_little) ;;
+      gpu)      _v=$(_preset_val default_gpu_pct) ;;
+      th_high)  _v=$(_preset_val default_th_high) ;;
+      th_low)   _v=$(_preset_val default_th_low) ;;
+      psi_gain) _v=$(_preset_val default_psi_gain) ;;
+    esac
+    case "$_v" in ''|*[!0-9]*) continue ;; esac
+    printf '%s=%s\n' "$_pk" "$_v"
+  done
+}
+
+preset_apply() {
+  _preset_match || die "NO_PRESET"
+  _args=
+  _add() { [ -n "$2" ] && _args="$_args $1=$2"; }
+  _add CPU_PCT_BIG      "$(_preset_val default_cpu_pct_big)"
+  _add CPU_PCT_MID2     "$(_preset_val default_cpu_pct_mid2)"
+  _add CPU_PCT_MID      "$(_preset_val default_cpu_pct_mid)"
+  _add CPU_PCT_LITTLE   "$(_preset_val default_cpu_pct_little)"
+  _add GPU_PCT          "$(_preset_val default_gpu_pct)"
+  _add TH_HIGH          "$(_preset_val default_th_high)"
+  _add TH_LOW           "$(_preset_val default_th_low)"
+  _add PSI_GAIN         "$(_preset_val default_psi_gain)"
+  [ -n "$_args" ] || die "NO_VALUES"
+  # shellcheck disable=SC2086
+  cmd_conf_set_many $_args
 }
 
 # ── 名单 ────────────────────────────────────────────────────────
@@ -797,6 +926,28 @@ list_del() {
 is_mode_val() {
   case "${1:-}" in
     full|FULL|keep|KEEP) return 0 ;;
+    */*)
+      # big/little[:gpu]：两段 CPU 都必须给，1~100；GPU 段可空。
+      _mc=${1%%:*}
+      _mg=${1#*:}
+      [ "$_mg" = "$1" ] && _mg=""
+      _n=0; _r=$_mc
+      while [ -n "$_r" ]; do
+        case "$_r" in
+          */*) _s=${_r%%/*}; _r=${_r#*/} ;;
+          *)   _s=$_r; _r="" ;;
+        esac
+        case "$_s" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$_s" -ge 1 ] && [ "$_s" -le 100 ] || return 1
+        _n=$((_n + 1))
+      done
+      [ "$_n" -eq 2 ] || return 1
+      if [ -n "$_mg" ]; then
+        case "$_mg" in *[!0-9]*) return 1 ;; esac
+        [ "$_mg" -ge 1 ] && [ "$_mg" -le 100 ] || return 1
+      fi
+      return 0
+      ;;
     *:*)
       _mc=${1%%:*}
       _mg=${1#*:}
@@ -1078,9 +1229,8 @@ cmd_icons() {
 #   导出：把现场（能读到的节点、频率表、探测结论）打成一个 txt 发过来。
 # 改好的节点表由作者写进下一个模块版本，装机时放进数据目录当 override.conf，
 # 守护在自动探测扑空时才按它兜底 —— 用户不需要自己导任何东西。
-# pkg_import / ovr_clear 两个子命令留着，但只走命令行：作者在自己机器上
-# 验一份改好的表要用它，把它做成页面上的按钮等于给用户一个
-# 能把机器钉死在别人节点表上的入口。
+# 不提供导入：用户拿到一份别人机器的表没有意义，做成页面入口等于给他一个
+# 把机器钉死在别人节点表上的开关。改好的表由作者随下一个版本发。
 # 落点选公共 Download：QQ / 微信 的发送框能直接翻到，不用 root 文件管理器。
 PKG_DIR="${SOCFREQ_PKG_DIR:-/storage/emulated/0/Download/Soc智能限频}"
 OVR="$DATA/override.conf"
@@ -1292,83 +1442,6 @@ cmd_pkg() {
 
 # 一行覆盖项在这台机上到底存不存在 —— 导入回执要说清：
 # "导入成功"但路径全是别人机器上的，等于什么都没适配。
-pkg_ovr_check() {
-  _k=$(printf '%s\n' "$1" | awk '{print $1}')
-  _a=$(printf '%s\n' "$1" | awk '{print $2}')
-  _b=$(printf '%s\n' "$1" | awk '{print $3}')
-  case "$_k" in
-    cpu-dir) [ -d "$_a" ] && printf '  在   ' || printf '  本机没有 '
-      printf '%s（硬件上限 %s）\n' "$_a" "$_b" ;;
-    gpu-max|gpu-min) [ -e "$_a" ] && printf '  在   ' || printf '  本机没有 '
-      printf '%s\n' "$_a" ;;
-    gpu-freqs) printf '  频率表 %s 个频点\n' \
-      "$(printf '%s\n' "$1" | sed 's/^gpu-freqs //' | wc -w)" ;;
-    *) printf '  未知键，原样留着：%s\n' "$1" ;;
-  esac
-}
-
-# 导入：从包里抽出 #ovr 行 → 校验 → 写 override.conf → 重启守护
-cmd_pkg_import() {
-  _f=${1:-}
-  [ -n "$_f" ] || _f=$(ls -1t "$PKG_DIR"/socpkg-*.txt 2>/dev/null | head -n 1)
-  [ -n "$_f" ] && [ -f "$_f" ] || die "PKG_NOFILE" 4
-  tr -d '\r' < "$_f" | head -n 1 | grep -q '^#SOCPKG 1$' || die "PKG_FMT" 4
-  _soc=$(tr -d '\r' < "$_f" | sed -n 's/^#soc=//p' | head -n 1)
-
-  # 先收进临时文件，全绿才落盘：半收半拒会留下一份没人知道缺了什么的覆盖
-  _tmp="$DATA/.ovr.$$"
-  mkdir -p "$DATA" 2>/dev/null
-  tr -d '\r' < "$_f" | sed -n 's/^#ovr //p' > "$_tmp" 2>/dev/null || die "WRITE" 5
-  if [ ! -s "$_tmp" ]; then
-    rm -f "$_tmp" 2>/dev/null
-    die "PKG_NOOVR" 4
-  fi
-  _bad=0
-  # 逐行按前缀切：gpu-freqs 那行有十几个数，用 read 分列会丢掉后面的
-  while IFS= read -r _ln; do
-    [ -n "$_ln" ] || continue
-    case "$_ln" in
-      'cpu-dir '*)
-        _p=$(printf '%s\n' "$_ln" | awk '{print $2}')
-        _h=$(printf '%s\n' "$_ln" | awk '{print $3}')
-        case "$_p" in /*) : ;; *) _bad=1 ;; esac
-        case "$_h" in ''|*[!0-9]*) _bad=1 ;; esac ;;
-      'gpu-max '*|'gpu-min '*)
-        _p=$(printf '%s\n' "$_ln" | awk '{print $2}')
-        case "$_p" in /*) : ;; *) _bad=1 ;; esac ;;
-      'gpu-freqs '*)
-        _t=$(printf '%s\n' "$_ln" | sed 's/^gpu-freqs //; s/[[:space:]]//g')
-        case "$_t" in ''|*[!0-9]*) _bad=1 ;; esac ;;
-      *) _bad=1 ;;
-    esac
-  done < "$_tmp"
-  if [ "$_bad" = 1 ]; then
-    rm -f "$_tmp" 2>/dev/null
-    die "PKG_OVR" 4
-  fi
-  mv -f "$_tmp" "$OVR" 2>/dev/null || { rm -f "$_tmp" 2>/dev/null; die "WRITE" 5; }
-  chmod 0644 "$OVR" 2>/dev/null
-
-  printf 'OK import %s\n' "${_soc:-未知芯片}"
-  # 回执要写清导入的是哪一份：目录里同时躺着"自己导出的"和"作者回的那份"，
-  # 默认取最新一份，不写路径的话用户没法确认导入的到底是哪个文件。
-  printf '  用的文件：%s\n' "$_f"
-  printf '  覆盖已写入 %s，逐条对照本机：\n' "$OVR"
-  while IFS= read -r _ln; do
-    [ -n "$_ln" ] || continue
-    pkg_ovr_check "$_ln"
-  done < "$OVR"
-  # 覆盖只在守护启动时读，所以导入完直接重启，用户不用再点一次
-  if [ -f "$BIN" ]; then
-    "$BIN" restart >/dev/null 2>&1
-    printf '  守护已重启，探测结果：\n'
-    # -E 是必须的：toybox sed 的 BRE 不认 \|，写成 \(a\|b\) 这段回执会一行不出
-    "$BIN" export 2>/dev/null | sed -nE 's/^(ncores|ntier|gpu_ok)=/    \1 /p'
-  else
-    printf '  （守护二进制不在，没重启）\n'
-  fi
-}
-
 cmd_pkg_dir() { printf '%s\n' "$PKG_DIR"; }
 
 cmd_ovr_clear() {
@@ -1673,6 +1746,7 @@ case "${1:-}" in
   status)     st_status ;;
   log)        st_log "${2:-}" ;;
   logs)       shift; cmd_logs "$@" ;;
+  log_export) cmd_log_export ;;
   about)      st_about ;;
   conf_get)   cfg_get ;;
   conf_set)   cfg_set "${2:-}" "${3:-}" ;;
@@ -1695,10 +1769,11 @@ case "${1:-}" in
   icons)      shift; cmd_icons "$@" ;;
   reset_all)  cmd_reset_all ;;
   pkg)        cmd_pkg ;;
-  pkg_import) shift; cmd_pkg_import "$@" ;;
   pkg_dir)    cmd_pkg_dir ;;
   ovr_show)   cmd_ovr_show ;;
   ovr_clear)  cmd_ovr_clear ;;
+  preset_get)   preset_get ;;
+  preset_apply) preset_apply ;;
   ds_get)     cmd_ds_get ;;
   ds_state)   cmd_ds_state ;;
   ds_set)     cmd_ds_set "${2:-}" "${3:-}" ;;

@@ -314,8 +314,19 @@ ok(/cfg\.screen_policy = SCREEN_KEEP;/.test(csrc) &&
 ok(/!uncap_seen \? SCREEN_UNCAP/.test(csrc) &&
    /cfg\.screen_uncap \? SCREEN_UNCAP : SCREEN_KEEP/.test(csrc),
    '没有 SCREEN_POLICY 时旧 SCREEN_UNCAP 照旧映射；两个键都没有才按新装默认 uncap');
-ok(/if \(cfg_get\("SCREEN_POLICY", v\) == 0\)[\s\S]{0,220}?uncap[\s\S]{0,120}?keep/.test(csrc),
-   'SCREEN_POLICY 只认 uncap / keep（坏值回落旧映射）');
+ok(/if \(cfg_get\("SCREEN_POLICY", v\) == 0\)[\s\S]{0,360}?uncap[\s\S]{0,160}?keep[\s\S]{0,200}?cap_off/.test(csrc),
+   'SCREEN_POLICY 认 uncap / keep / cap（坏值回落旧映射）');
+ok(/static void cpu_min_to_floor\(void\)[\s\S]{0,400}scaling_min_freq[\s\S]{0,200}hw_min/.test(csrc) &&
+   /static void cpu_min_restore\(void\)[\s\S]{0,200}boost_restore_path/.test(csrc),
+   'CPU 下限只在熄屏压到 cpuinfo_min，亮屏按账本还原');
+ok(/int adapt_screen_off_tick\(const struct adapt_cfg \*c, int dt\)/.test(fs.readFileSync(MOD0 + '/src/adapt.c', 'utf8')) &&
+   /cfg\.screen_policy == SCREEN_CAP && \+\+g_soff_th >= 4/.test(csrc),
+   '熄屏温控每 4 拍采一次（只有 cap 策略）');
+ok(/!per_app && !g_screen_off && a\.chg_on/.test(csrc) &&
+   /g_app_gpu <= 0 && !g_screen_off && a\.chg_on/.test(csrc),
+   '熄屏不吃充电地板（CPU/GPU 同口径）');
+ok(/probe_min/.test(csrc) && /=== CPU 下限（写一次立刻还原）===/.test(csrc),
+   'probe_min 子命令写一次、读回、立刻还原');
 ok(/\[ "\$_k" = SCREEN_POLICY \] && continue/.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')),
    '升级不把 SCREEN_POLICY 补进老用户配置（否则老用户会被改成 uncap）');
 /* 判断失败必须当"亮屏"：读不到就放开，等于在最不可靠的时候取消所有保护 */
@@ -344,17 +355,18 @@ ok(/static void leave_screen_off\(void\)/.test(csrc) &&
    '亮屏只把熄屏交还的那一支压回；游戏态保持解锁');
 ok(/strcmp\(g_state, "game"\) != 0 && strcmp\(g_state, "full"\) != 0/.test(csrc),
    'reclaim_caps_allowed 同时排除 game/full（熄屏热重载不会抢回节点）');
-ok(/cfg\.screen_policy == SCREEN_UNCAP\) \{[\s\S]{0,260}?g_screen_off/.test(csrc),
-   '熄屏轻巡检分支在主循环里，早于 adapt_tick/foreground_pkg');
+ok(/cfg\.screen_policy != SCREEN_KEEP\) \{[\s\S]{0,260}?g_screen_off/.test(csrc),
+   '熄屏轻巡检分支在主循环里，早于 adapt_tick/foreground_pkg；uncap 与 cap 共用');
 ok(/fprintf\(f, "state=%s\\nscreen=%s\\nsoff=%d\\n/.test(csrc) &&
    /screen=on\\nsoff=15/.test(apiSrc),
    '状态里发布 screen/soff，页面能区分 ACTIVE 与熄屏');
 ok(/st === 'full'/.test(html) && /s\.soff/.test(html),
    '页面能渲染 state=full（熄屏轻巡检），不会落到"未运行"');
 // 开关落到两个键：新键给守护，旧键留给回退/兼容
-ok(/pairs\.push\(\['SCREEN_POLICY', suOn \? 'uncap' : 'keep'\]\)/.test(html) &&
-   /pairs\.push\(\['SCREEN_UNCAP', suOn \? '1' : '0'\]\)/.test(html),
-   '页面开关同时写 SCREEN_POLICY 和兼容的 SCREEN_UNCAP');
+ok(/pairs\.push\(\['SCREEN_POLICY', suOn \? 'uncap' : \(scOn \? 'cap' : 'keep'\)\]\)/.test(html) &&
+   /pairs\.push\(\['SCREEN_UNCAP', suOn \? '1' : '0'\]\)/.test(html) &&
+   /id="screen_cap"/.test(html),
+   '页面三档：交还 / 轻巡检保持封顶 / 旧行为，并兼容写 SCREEN_UNCAP');
 ok(/c\.SCREEN_POLICY === 'uncap'/.test(html) &&
    /c\.SCREEN_POLICY === undefined &&/.test(html) &&
    /c\.SCREEN_UNCAP === undefined \|\| c\.SCREEN_UNCAP === '1'/.test(html),
@@ -389,7 +401,8 @@ console.log('\n== P0b 深度空闲 / 分应用 keep ==');
      '深度空闲切换到 IDLE_INTERVAL，亮屏信号仍每轮读');
   ok(/MODE_KEEP/.test(csrc) && /!strcmp\(val, "keep"\)/.test(csrc),
      '守护能把 pkg=keep 与数字档位区分开');
-  ok(/g_soff_keep/.test(csrc) && /mode_lookup\(g_fg, &mpct, NULL\) && mpct == MODE_KEEP/.test(csrc),
+  ok(/g_soff_keep/.test(csrc) &&
+     /mode_lookup\(g_fg, &mpct, &mbig, &mlit, NULL\) && mpct == MODE_KEEP/.test(csrc),
      'keep 只认熄屏瞬间的前台包，不交还');
   ok(/if \(has_mode && mpct == MODE_KEEP\) has_mode = 0;/.test(csrc),
      '亮屏时 keep 不改变全局分档（只影响熄屏）');
@@ -408,6 +421,8 @@ console.log('\n== P0.5 巡检瘦身 ==');
 {
   const adaptSrc = fs.readFileSync(MOD0 + '/src/adapt.c', 'utf8');
   const svc = fs.readFileSync(MOD0 + '/service.sh', 'utf8');
+  ok(/: > "\$LOCK"/.test(svc) && !/rm -f "\$LOCK"/.test(svc),
+     '看门狗自救只清空锁文件、不删除（删了会换 inode，旧守护还能再锁一份）');
   ok(/#define MAX_THERMAL 128/.test(adaptSrc) &&
      /static char g_thm_paths\[MAX_THERMAL\]\[256\]/.test(adaptSrc) &&
      /static int\s+g_thm_scanned/.test(adaptSrc),
@@ -457,7 +472,7 @@ console.log('\n== P2 电量阶梯 ==');
      '电量阶梯并入 delta，并共用 ADAPT_DOWN_MAX 总闸');
   ok(/if \(per_app\) d \+= a\.batt_cut;/.test(csrc),
      '分应用 CPU 档不吃电量阶梯（和不吃充电地板同一个口径）');
-  ok(/if \(g_app_gpu > 0\) d \+= adapt_batt_cut\(\);/.test(csrc),
+  ok(/if \(g_app_gpu > 0\) d \+= a\.batt_cut;/.test(csrc),
      '分应用 GPU 档也不吃电量阶梯');
   ok(/batt=%d\\nbcut=%d/.test(csrc) && /batt=-1\\nbcut=0/.test(apiSrc),
      '状态发布容量与电量收紧量，兜底字段齐全');
@@ -487,12 +502,57 @@ console.log('\n== 出厂默认（熄屏交还 / 充电不封顶 / 电量阶梯�
      '充电态默认不封顶');
   ok(/cfg\.ad\.chg = 1;\s+cfg\.ad\.chg_pct = 100;/.test(csrc),
      '守护缺键兜底也是充电不封顶');
+  ok(/^BIG_MIN=0$/m.test(conf) && /cfg\.big_min = 0;/.test(csrc),
+     '超大核最低频默认关，缺键兜底也是 0');
+  ok(/int big_min_hit = \(cfg\.big_min && tierkey == 0\);/.test(csrc) &&
+     /if \(big_min_hit\) pct = 1;/.test(csrc) &&
+     /if \(!explicit && cfg\.big_min && t == 0\)/.test(csrc),
+     'BIG_MIN 在全局分档和分应用档位里都压到 1%（应用显式 BIG 优先）');
+  ok(/id="big_min"/.test(html) && /pairs\.push\(\['BIG_MIN'/.test(html),
+     '页面有超大核最低频开关并会保存');
+  /* 禁止 GPU Boost：关源头（dcvs_boost / touch_wake / devfreq_boost），
+     不是再压一道上限；交权态必须还原。 */
+  ok(/if \(g_lock_fd >= 0\)[\s\S]{0,160}ftruncate\(g_lock_fd, 0\)/.test(csrc) &&
+     !/unlink\(LOCK_FILE\)/.test(csrc),
+     'cleanup 只清空锁文件、不删除（删了会出现两个守护各锁一个 inode）');
+  ok(/int stale = lock_has_pid\(\) && !daemon_alive\(\)/.test(csrc),
+     '干净退出后不误报"残留锁"');
+  ok(/^GPU_BOOST_OFF=1$/m.test(conf) && /cfg\.gpu_boost_off = 1;/.test(csrc),
+     'GPU Boost 默认开，缺键兜底也是 1（与页面 !== 0 一致）');
+  ok(/gbo\.checked = c\.GPU_BOOST_OFF !== '0'/.test(html),
+     '页面缺键时按开显示，和守护缺键默认一致');
+  ok(/dcvs_boost[\s\S]{0,200}touch_wake/.test(csrc) &&
+     /static void boost_off_apply\(void\)[\s\S]{0,400}write_journaled\(NODES_JOURNAL, p, 0\)/.test(csrc),
+     '开关打开时把 boost 源写 0，并先记账原值');
+  ok(/if \(cfg\.gpu_boost_off\) boost_off_apply\(\);\s*else boost_off_restore\(\);/.test(csrc),
+     '常态按开关应用/还原，页面上关掉能立刻恢复');
+  {
+    const hb = (csrc.match(/static void hand_back_full[\s\S]*?\n\}/) || [''])[0];
+    ok(/boost_off_restore\(\)/.test(hb),
+       '游戏/满血/熄屏交权时还原 boost 源（不把省电项带进游戏）');
+  }
+  ok(/mtk_opp_lowest_index_text\([\s\S]{0,900}best_hz/.test(csrc) &&
+     /write_journaled\(NODES_JOURNAL, MTK_BOOST_NODE, idx\)/.test(csrc),
+     '天玑按 OPP 表最低频档的索引写 custom_boost_gpu_freq（不写死 0）');
+  ok(/boost_restore_path\(MTK_BOOST_NODE\)/.test(csrc) &&
+     /if \(idx == -2\) idx = mtk_boost_lowest_index\(\)/.test(csrc),
+     '天玑 boost 节点同样记账、交权/关闭时还原；索引只算一次');
+  ok(/GPU_BOOST_OFF\)\s+is_switch/.test(apiSrc) && /GPU_BOOST_OFF/.test(apiSrc),
+     'api 侧校验 GPU_BOOST_OFF 只能是 0/1');
+  ok(/id="gpu_boost_off"/.test(html) && /pairs\.push\(\['GPU_BOOST_OFF'/.test(html),
+     '页面有禁止 GPU Boost 开关并会保存');
+  ok(/id="pk-split-big"/.test(html) && /id="pk-split-little"/.test(html) &&
+     /m === 'split'/.test(html) && /b \+ '\/' \+ l/.test(html),
+     '分应用选择器有 big/little 输入并拼成 70/50');
   ok(/^TH_CAP=1$/m.test(conf) && /^TH_HIGH=75$/m.test(conf) &&
      /^TH_LOW=68$/m.test(conf) && /^TH_MAX=25$/m.test(conf),
      '降速时机默认「适中」（75/68/压 25）');
   ok(/^PSI_ADAPT=1$/m.test(conf) && /^PSI_GAIN=10$/m.test(conf),
      '真的卡的时候默认「适中」（借 10）');
-  for (const f of ['adapt/sm8750.conf', 'adapt/sm8850.conf']) {
+  for (const f of ['adapt/sm8750.conf', 'adapt/sm8850.conf',
+                   'adapt/sm8845.conf', 'adapt/sm8975.conf',
+                   'adapt/sm8650.conf', 'adapt/sm8550.conf', 'adapt/sm8475.conf',
+                   'adapt/mt6991.conf', 'adapt/mt6993.conf', 'adapt/mt6995.conf']) {
     const a = fs.readFileSync(MOD0 + '/' + f, 'utf8');
     ok(/^default_th_high=75$/m.test(a) && /^default_th_low=68$/m.test(a) &&
        /^default_psi_gain=10$/m.test(a),
@@ -543,8 +603,10 @@ ok(mainLoop.length > 0, '找到主循环');
  * 节点永远停在旧应用的下限上。 */
 ok(/missing_since = 0;[\s\S]{0,900}apply_normal\(caps_changed \|\| adapt_changed\)/.test(mainLoop),
    '稳态分支仍在巡检 CPU 上限（厂商顶回来会被压回）');
-ok(csrc.includes('int caps_changed = (want_pct != g_app_pct);'),
-   'force 的来源是"档位换没换"，不是写死的 0 或 1');
+ok(/int caps_changed = \(want_pct != g_app_pct\) \|\|/.test(csrc) &&
+   /\(want_big != g_app_big\)/.test(csrc) &&
+   /\(want_little != g_app_little\)/.test(csrc),
+   'force 的来源是"档位换没换"（含分核改动），不是写死的 0 或 1');
 ok(!/apply_normal\(0\)/.test(mainLoop), '主循环没有残留的写死 apply_normal(0)',
    (mainLoop.match(/apply_normal\([^)]*\)/g) || []).join(' , '));
 const calls = (csrc.match(/apply_normal\([^)]*\)/g) || []);
@@ -843,7 +905,8 @@ console.log('\n== 默认值 ==');
     ok(/input\[type=range\]\{[^}]*touch-action:\s*pan-y/.test(css),
        '滑杆声明 touch-action:pan-y（竖滑滚页面、横滑才改值）');
     const hz = (css.match(/input\[type=range\]\{[^}]*?height:\s*(\d+)px/) || [])[1];
-    ok(!!hz && +hz <= 22, '滑杆热区高度收到 22px 以内', hz ? hz + 'px' : '没找到 height');
+    /* 触摸目标 ≥44px；竖滑靠 touch-action + 抓取区判断，不靠把热区压窄。 */
+    ok(!!hz && +hz >= 44, '滑杆热区高度 ≥44px（触摸目标）', hz ? hz + 'px' : '没找到 height');
     /* 新拟物的判据不是"好不好看"，而是这几条硬约束：
        卡片靠阴影塑形。V2 的卡片允许一条极淡的分隔描边（视觉上仍以阴影为主），
        但阴影和亮/暗两层色必须在。 */
@@ -1068,8 +1131,9 @@ console.log('\n== 默认值 ==');
     ok(unsorted.length === 0, '每节内部按包名排好序',
        unsorted.map(([k, a]) => k).join('、'));
   }
-  ok(/static int is_game[\s\S]*?strcmp\(g_pkgs\[i\], pkg\)/.test(csrc),
-     'is_game 是整串精确比对（顺序无关，分节安全）');
+  ok(/static int pkg_base_eq[\s\S]*?strcspn\(a, ":"\)/.test(csrc) &&
+     /static int is_game[\s\S]*?pkg_base_eq\(g_pkgs\[i\], pkg\)/.test(csrc),
+     'is_game 按包名基名比对（容忍 :进程后缀，分节安全）');
   ok(new RegExp('define MAX_PKG ' + Math.max(512, pkgs.length + 16)).test(csrc),
      'MAX_PKG 容得下当前名单', (csrc.match(/#define MAX_PKG \d+/) || [''])[0]);
   // 用户那份清单里的包必须都在
@@ -2036,6 +2100,17 @@ const uninSrc  = fs.readFileSync(MOD0 + '/uninstall.sh', 'utf8');
      '卸载兜底：无账本也恢复 CPU 上限；深睡快照不依赖脚本也能还原');
   ok(/rm -rf \/data\/adb\/modules_update\/soc_freqcap/.test(uninSrc),
      '卸载时清掉同模块的待更新目录（防止重启后又装回来）');
+  ok(/ap\/modules_update\/soc_freqcap/.test(uninSrc),
+     'APatch 的待更新目录也清（另一棵树）');
+  /* 旧守护/看门狗/深睡都可能活过卸载脚本：必须按 /proc 认人停掉，
+     还原完再停一遍，否则心跳被删后看门狗一分钟内又把守护拉起来。 */
+  ok(/stop_procs\(\)/.test(uninSrc) && /service\.sh/.test(uninSrc) &&
+     /deep_sleep\.sh/.test(uninSrc) && /stop_procs KILL/.test(uninSrc),
+     '卸载先停看门狗/守护/深睡，还原后再杀一遍');
+  ok(/soc_freqcap_restore/.test(uninSrc),
+     '还原失败时账本备份到 /data/local/tmp（不随数据目录删）');
+  ok(/stat -c %a "\$A"/.test(uninSrc) && /chmod "\$_before"/.test(uninSrc),
+     '调速器兜底恢复节点权限（先记原权限，写完还回去）');
 
   // perms.saved 的第二列恒为 0（只是占位，perms_restore 也只取第三列）。
   // 兜底里绝不能把 VAL 写回去：max_pwrlevel 这种 0 是合法索引值，
@@ -2077,7 +2152,7 @@ const uninSrc  = fs.readFileSync(MOD0 + '/uninstall.sh', 'utf8');
   // 而真正的名字那行只有两列、返回 2，被挡掉了。
   // 恢复完的调速器是个 "0"，内核多半拒收。
   const csrcAll = fs.readFileSync(process.argv[2], 'utf8');
-  const govFn = (csrcAll.match(/static void restore_governors[\s\S]*?\n\}/) || [''])[0];
+  const govFn = (csrcAll.match(/static int restore_governors_core\(int keep\)[\s\S]*?\n\}/) || [''])[0];
   ok(govFn && /sscanf\(line,\s*"%511s\s+%63s"\s*,\s*node,\s*gov\)\s*!=\s*2/.test(govFn),
      'restore_governors 认得两列的名字行',
      '只按三列解析的话会读到字面量 0');
@@ -2090,6 +2165,16 @@ const uninSrc  = fs.readFileSync(MOD0 + '/uninstall.sh', 'utf8');
   ok(/static int cfg_key_present/.test(csrcAll)
      && /cfg_key_present\("CPU_GOVERNOR"\)/.test(csrcAll),
      '空值 CPU_GOVERNOR= 能被识别（不干预）');
+  {
+    const hb = (csrcAll.match(/static void hand_back_full[\s\S]*?\n\}/) || [''])[0];
+    ok(/restore_governors_core\(1\)/.test(hb),
+       '进游戏/熄屏/满血交权时把调速器还原成接管前的名字（账本保留）');
+    const an = (csrcAll.match(/static void apply_normal\(int force\)[\s\S]*?\n\}/) || [''])[0];
+    ok(/for \(int i = 0; i < g_npol; i\+\+\) apply_governor\(&g_pol\[i\]\)/.test(an),
+       '回到常态重新写入用户选的调速器（不靠封顶恰好变化时顺带）');
+    ok(/if \(!keep\) \{[\s\S]{0,160}unlink\(GOV_JOURNAL\)/.test(govFn),
+       '停用/卸载路径仍会删账本，交权路径不会');
+  }
   const startIdx = csrcAll.lastIndexOf('journal_restore(NODES_JOURNAL);');
   const mainGov = csrcAll.slice(startIdx, csrcAll.indexOf('load_game_pkgs();', startIdx));
   const govRestoreIdx = mainGov.indexOf('restore_governors();');
@@ -2180,14 +2265,14 @@ console.log('\n== 分应用档位 ==');
   /* 优先级：命中判断必须在 game 与 boost 都排除之后。
    * 用 has_mode = (!game && !boost && ...) 这个式子当锚点——
    * 顺序一旦改回去，这行就变了，断言才会红。 */
-  ok(/int has_mode = \(!game && !boost && fg\[0\]\) \? mode_lookup\(fg, &mpct, &mgpu\) : 0;/.test(csrc),
+  ok(/int has_mode = \(!game && !boost && fg\[0\]\)[\s\S]{0,120}?mode_lookup\(fg, &mpct, &mbig, &mlit, &mgpu\) : 0;/.test(csrc),
      '优先级 游戏名单 > 满血窗口 > 应用专属（判断式是这条的唯一锚点）',
-     (csrc.match(/int has_mode[^\n]*/) || ['没找到'])[0]);
+     (csrc.match(/int has_mode[\s\S]{0,160}/) || ['没找到'])[0]);
   ok(csrc.indexOf('int game = foreground_pkg') < csrc.indexOf('int has_mode ='),
      '先算游戏再算应用档位（顺序反了应用档位会永久压住游戏名单）');
 
   // 换档必须 force：巡检的 cur<=cap 跳过逻辑对"升档"方向是坏的
-  ok(/int caps_changed = \(want_pct != g_app_pct\);/.test(csrc) &&
+  ok(/int caps_changed = \(want_pct != g_app_pct\) \|\|/.test(csrc) &&
      /apply_normal\(caps_changed \|\| adapt_changed\)/.test(csrc),
      '档位变了就强制重写（含稳态巡检那一处）',
      (csrc.match(/apply_normal\([^)]*\)/g) || []).join(' , '));
@@ -2198,18 +2283,20 @@ console.log('\n== 分应用档位 ==');
   // 因为生效值还要叠加实时偏移，必须等本轮传感器算完）
   {
     const body = (csrc.match(/if \(cfg_changed \|\| adapt_changed(?: \|\| smart_changed)?\) \{[\s\S]*?\n    \}/) || [''])[0];
-    ok(/if \(g_app_pct > 0\) set_caps\(g_app_pct,/.test(body),
-       '重算块里 assign_pct 之后重新套上生效中的应用档位', body ? '' : '重算块没抠到');
-    ok(body.indexOf('assign_pct') < body.indexOf('set_caps(g_app_pct'),
+    ok(/if \(g_app_pct > 0 \|\| g_app_big > 0 \|\| g_app_little > 0\)[\s\S]{0,120}?set_caps_tiers\(g_app_pct, g_app_big, g_app_little,/.test(body),
+       '重算块里 assign_pct 之后重新套上生效中的应用档位（含分核）', body ? '' : '重算块没抠到');
+    ok(body.indexOf('assign_pct') < body.indexOf('set_caps_tiers(g_app_pct'),
        '顺序对：先按全局重算，再用应用档位盖上去');
     ok(/apply_normal\(1\)/.test(body), '重算块里带 force（升档方向不吃 cur<=cap 跳过）');
   }
 
   // 数字档：CPU 段和 GPU 段分开取；两段都可以缺省（0 = 跟随全局）
   ok(/int want_pct = \(has_mode && !is_full && mpct > 0\) \? mpct : 0;/.test(csrc) &&
-     /int want_gpu = \(has_mode && !is_full\) \? mgpu : 0;/.test(csrc),
-     'full 不参与百分比档位（它走交还系统那条路）；数字档按 CPU/GPU 两段取');
-  ok(/cfg\.pct\[g_pol\[i\]\.tier\]/.test(csrc),
+     /int want_gpu = \(has_mode && !is_full\) \? mgpu : 0;/.test(csrc) &&
+     /int want_big = \(has_mode && !is_full\) \? mbig : 0;/.test(csrc) &&
+     /int want_little = \(has_mode && !is_full\) \? mlit : 0;/.test(csrc),
+     'full 不参与百分比档位；数字档按 CPU/大小核/GPU 分段取');
+  ok(/int t = g_pol\[i\]\.tier & 3;/.test(csrc) && /cfg\.pct\[t\]/.test(csrc),
      '全局档沿用 assign_pct 算好的档位归属，不各档各算');
 
   // 读的一侧要容忍坏行，但不能把坏行当"命中"
@@ -2404,6 +2491,11 @@ console.log('\n== 分应用档位 ==');
   ok(/MODE_OPTS\.some\(o => o\[0\] === cv\)/.test(ui) &&
      /GPU_MODE_OPTS\.some\(o => o\[0\] === gv\)/.test(ui),
      'CPU/GPU 当前值不在预设里时会临时插进下拉（不会把 75% 悄悄改成 90%）');
+  {
+    const pkm = (ui.match(/const PK_MODE_OPTS = \[[\s\S]*?\]\;/) || [''])[0];
+    ok(/'50','50%'/.test(pkm) && /'40','40%'/.test(pkm) && /'30','30%'/.test(pkm),
+       '分应用新加档位开放到 50/40/30%（自定义仍可到 1%）');
+  }
   ok(/SEARCH_LABELS_ARMED/.test(ui) && /SEARCH_LABELS_DS_ARMED/.test(ui)
      && /ensureLabels\(APPS_MODE\)/.test(ui) && /ensureLabels\(APPS\)/.test(ui),
      '一输入搜索就后台补全全部应用名（分页只画 80 行，搜索仍匹配全量）');
@@ -2415,17 +2507,21 @@ console.log('\n== 分应用档位 ==');
 
   // CPU:GPU 双值：两段各判各的，空段表示那一边跟随全局
   ok(/char \*colon = strchr\(val, ':'\);/.test(csrc) &&
-     /strspn\(cp, "0123456789"\)/.test(csrc) &&
-     /strspn\(gp, "0123456789"\)/.test(csrc),
-     '守护把 70:40 拆成两段分别校验');
-  ok(/if \(!cp\[0\] && !gp\[0\]\) continue;/.test(csrc), '两段都空的行整条丢掉');
-  ok(/if \(colon\) \{[\s\S]{0,600}?\} else if \(!strcmp\(val, "full"\)/.test(csrc),
+     /strspn\(bp, "0123456789"\)/.test(csrc) &&
+     /strspn\(lp, "0123456789"\)/.test(csrc) &&
+     /strspn\(gpu_part, "0123456789"\)/.test(csrc),
+     '守护把 70:40 / 70/50:40 拆段分别校验');
+  ok(/if \(!val\[0\] && \(!gpu_part \|\| !gpu_part\[0\]\)\) continue;/.test(csrc),
+     'CPU/GPU 两段都空的行整条丢掉');
+  ok(csrc.indexOf('if (colon)') >= 0 &&
+     csrc.indexOf('if (colon)') < csrc.indexOf('strcmp(val, "full")'),
      '冒号判断在先：full:40 不会被当成满血');
-  ok(/_mc=\$\{1%%:\*\}/.test(apiSrc) && /_mg=\$\{1#\*:\}/.test(apiSrc),
-     'api.sh 的 is_mode_val 拆两段各自校验（70: / :40 也收）');
+  ok(/_mc=\$\{1%%:\*\}/.test(apiSrc) && /_mg=\$\{1#\*:\}/.test(apiSrc) &&
+     /\[ "\$_n" -eq 2 \]/.test(apiSrc) && /\*\/\*\)/.test(apiSrc),
+     'api.sh 的 is_mode_val 收 big/little，并拆 CPU/GPU 各自校验');
   ok(/if \(g_app_gpu > 0\) snprintf\(gmode/.test(csrc) &&
-     /app_mode=%s\\napp_gpu=%s/.test(csrc),
-     '状态里 app_gpu 是独立字段，空 = 跟随全局（前端不用拆 70:40）');
+     /app_mode=%s\\napp_big=%d\\napp_little=%d\\napp_gpu=%s/.test(csrc),
+     '状态里 app_big/app_little/app_gpu 独立字段，空 = 跟随全局');
   ok(/function parseModeVal\(/.test(ui) && /function joinModeVal\(/.test(ui) &&
      /function modeGpuSelect\(/.test(ui) && /function modeText\(/.test(ui),
      '页面能拆/拼 CPU:GPU，档位行和选择器都有 GPU 控件');
@@ -2604,13 +2700,83 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   {
     const s8750 = fs.readFileSync(MOD0 + '/adapt/sm8750.conf', 'utf8');
     const s8850 = fs.readFileSync(MOD0 + '/adapt/sm8850.conf', 'utf8');
+    const s8845 = fs.readFileSync(MOD0 + '/adapt/sm8845.conf', 'utf8');
+    const s8975 = fs.readFileSync(MOD0 + '/adapt/sm8975.conf', 'utf8');
     ok(/^#match soc=SM8750$/m.test(s8750) && /^default_cpu_pct_big=46$/m.test(s8750) &&
-       /^default_cpu_pct_little=65$/m.test(s8750) && /^default_gpu_pct=50$/m.test(s8750) &&
+       /^default_cpu_pct_little=51$/m.test(s8750) && /^default_gpu_pct=45$/m.test(s8750) &&
        /^default_th_high=75$/m.test(s8750) && /^default_psi_gain=10$/m.test(s8750),
-       '8E 默认值在 adapt/sm8750.conf（46/65、GPU50、TH75、PSI10）');
-    ok(/^#match soc=SM8850$/m.test(s8850) && /^default_cpu_pct_big=64$/m.test(s8850) &&
-       /^default_cpu_pct_little=69$/m.test(s8850) && /^default_gpu_pct=50$/m.test(s8850),
-       '8E5 默认值在 adapt/sm8850.conf（64/69、GPU50，Prime 比 Gold 低是特性）');
+       '8E 默认值在 adapt/sm8750.conf（46/51、GPU45、TH75、PSI10）');
+    ok(/^#match soc=SM8850$/m.test(s8850) && /^default_cpu_pct_big=46$/m.test(s8850) &&
+       /^default_cpu_pct_little=52$/m.test(s8850) && /^default_gpu_pct=42$/m.test(s8850),
+       '8E5 默认值在 adapt/sm8850.conf（46/52、GPU42）');
+    ok(/^#match soc=SM8845$/m.test(s8845) && /^default_cpu_pct_big=51$/m.test(s8845) &&
+       /^default_cpu_pct_little=53$/m.test(s8845) && /^default_gpu_pct=41$/m.test(s8845),
+       '8 Gen 5 默认值在 adapt/sm8845.conf（51/53、GPU41）');
+    ok(/^#match soc=SM8975$/m.test(s8975) && /^default_cpu_pct_big=40$/m.test(s8975) &&
+       /^default_cpu_pct_mid=47$/m.test(s8975) && /^default_cpu_pct_little=51$/m.test(s8975) &&
+       /^default_gpu_pct=41$/m.test(s8975),
+       '8E Extreme Gen 6 默认值在 adapt/sm8975.conf（40/47/51、GPU41）');
+
+    /* 天玑三套：峰值不同，但都是 3 簇（BIG/MID/LITTLE）。 */
+    const s8650 = fs.readFileSync(MOD0 + '/adapt/sm8650.conf', 'utf8');
+    const s8550 = fs.readFileSync(MOD0 + '/adapt/sm8550.conf', 'utf8');
+    const s8475 = fs.readFileSync(MOD0 + '/adapt/sm8475.conf', 'utf8');
+    ok(/^#match soc=SM8650$/m.test(s8650) && /^default_cpu_pct_big=74$/m.test(s8650) &&
+       /^default_cpu_pct_mid2=66$/m.test(s8650) && /^default_cpu_pct_mid=66$/m.test(s8650) &&
+       /^default_cpu_pct_little=68$/m.test(s8650) && /^default_gpu_pct=56$/m.test(s8650),
+       '8 Gen 3 默认值在 adapt/sm8650.conf（74/66/66/68、GPU55）');
+    ok(/^#match soc=SM8550$/m.test(s8550) && /^default_cpu_pct_big=70$/m.test(s8550) &&
+       /^default_cpu_pct_mid=69$/m.test(s8550) && /^default_cpu_pct_little=73$/m.test(s8550) &&
+       /^default_gpu_pct=59$/m.test(s8550),
+       '8 Gen 2 默认值在 adapt/sm8550.conf（70/69/73、GPU59）');
+    ok(/^#match soc=SM8475$/m.test(s8475) && /^default_cpu_pct_big=69$/m.test(s8475) &&
+       /^default_cpu_pct_mid=66$/m.test(s8475) && /^default_cpu_pct_little=73$/m.test(s8475) &&
+       /^default_gpu_pct=47$/m.test(s8475),
+       '8+ Gen 1 默认值在 adapt/sm8475.conf（69/66/73、GPU47）');
+
+    const m6991 = fs.readFileSync(MOD0 + '/adapt/mt6991.conf', 'utf8');
+    const m6993 = fs.readFileSync(MOD0 + '/adapt/mt6993.conf', 'utf8');
+    const m6995 = fs.readFileSync(MOD0 + '/adapt/mt6995.conf', 'utf8');
+    ok(/^#match soc=MT6991$/m.test(m6991) && /^default_cpu_pct_big=80$/m.test(m6991) &&
+       /^default_cpu_pct_mid=67$/m.test(m6991) && /^default_cpu_pct_little=75$/m.test(m6991) &&
+       /^default_gpu_pct=35$/m.test(m6991),
+       '天玑 9400/9400+ 默认值在 adapt/mt6991.conf（80/67/75、GPU35）');
+    ok(/^#match soc=MT6993$/m.test(m6993) && /^default_cpu_pct_big=72$/m.test(m6993) &&
+       /^default_cpu_pct_mid=63$/m.test(m6993) && /^default_cpu_pct_little=71$/m.test(m6993) &&
+       /^default_gpu_pct=35$/m.test(m6993),
+       '天玑 9500 默认值在 adapt/mt6993.conf（72/63/71、GPU35）');
+    ok(/^#match soc=MT6995$/m.test(m6995) && /^default_cpu_pct_big=73$/m.test(m6995) &&
+       /^default_cpu_pct_mid=56$/m.test(m6995) && /^default_cpu_pct_little=65$/m.test(m6995) &&
+       /^default_gpu_pct=37$/m.test(m6995),
+       '天玑 9600 Pro 默认值在 adapt/mt6995.conf（73/56/65、GPU37）');
+    ok(!/default_cpu_pct_mid2/.test(m6991 + m6993 + m6995),
+       '天玑三套都是 3 簇，不写 MID2');
+    /* 覆盖安装不会自动套预设，页面手动入口必须能按当前 SoC 找到同一份文件 */
+    ok(/preset_get\)\s+preset_get/.test(apiSrc) &&
+       /preset_apply\)\s+preset_apply/.test(apiSrc) &&
+       /_preset_match\(\)[\s\S]{0,500}#match/.test(apiSrc) &&
+       /getprop ro\.soc\.model/.test(apiSrc),
+       'api 有推荐预设：按 SoC 匹配 adapt/*.conf（和装机同一套规则）');
+    ok(/id="preset-hint"/.test(html) && /id="preset-apply"/.test(html) &&
+       /没有对应预设/.test(html),
+       'CPU/GPU 封顶页有"应用推荐预设"，无匹配时显示"无"');
+    {
+      /* 后声明的同名函数会静默覆盖前面的：这次推荐预设按钮就是被
+         功能页的 applyPreset(group) 盖掉，点了直接抛错。 */
+      const script = (html.match(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/) || ['', ''])[1];
+      const names = [...script.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)]
+                      .map(m => m[1]);
+      const dups = names.filter((n, i) => names.indexOf(n) !== i);
+      ok(dups.length === 0, '页面脚本没有重名函数（否则后一个会静默覆盖前一个）',
+         [...new Set(dups)].join(','));
+    }
+    ok(/async function applyChipPreset[\s\S]{0,1800}set\('CPU_PCT_BIG'/.test(html) &&
+       /onclick="applyChipPreset\(\)"/.test(html) &&
+       !/onclick="applyPreset\(\)"/.test(html) &&
+       !/api\('preset_apply'\)/.test(html) &&
+       /id="preset-diff"/.test(html) &&
+       /保存并生效/.test(html),
+       '推荐预设只填控件并列出 diff，必须按保存才写入；函数名不与 applyPreset 冲突');
   }
   // 只对全新安装：_FRESH_CONF=1 才调 _soc_defaults；升级不碰
   ok(/if \[ "\$_FRESH_CONF" = 1 \]; then\s*\n\s*_soc_defaults/.test(cz) &&
@@ -2619,6 +2785,8 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   {
     const body = (cz.match(/_soc_defaults\(\)\s*\{[\s\S]*?\n\}/) || [''])[0];
     ok(/default_cpu_pct_big\)\s+_key=CPU_PCT_BIG/.test(body) &&
+       /default_cpu_pct_mid2\)\s+_key=CPU_PCT_MID2/.test(body) &&
+       /default_cpu_pct_mid\)\s+_key=CPU_PCT_MID/.test(body) &&
        /default_cpu_pct_little\)\s+_key=CPU_PCT_LITTLE/.test(body) &&
        /default_th_high\)\s+_key=TH_HIGH/.test(body) &&
        /default_psi_gain\)\s+_key=PSI_GAIN/.test(body),
@@ -2655,8 +2823,8 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
  *   "把应用名写在第一行，包名写在第二行"（白名单、候选、分应用档位都要）
  *   "获取应用图标有些也没生效，比如 com.tencent.tmgp.osgame"
  *   "分应用档位放到应用页 / 导航栏改成应用 / 首页那格删掉"
- *   "日常调速器默认为 conservative"
- *   "SM8750 预设默认大核 46%、小核 65%"
+ *   "日常调速器默认不干预（荣耀/华为内核切 conservative 会硬重启）"
+ *   "SM8750 预设默认超大核 46%、小核 51%、GPU 45%"
  * 外加一条自己加的：action.sh 那句"大概 15 秒就退出"必须留下事后查得到的证据。
  *
  * 这里钉的是**接线**（谁调谁、键对不对、位置在哪）；
@@ -2672,12 +2840,23 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   // 注释会干扰"代码里有没有这句"的判断，先剥掉再比
   const uiCode = html.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
 
-  /* ── 日常调速器：默认必须是 conservative ───────────────────── */
-  // 老配置里那对字面双引号是三处不一致的根源：守护认不出引号（等价于空），
+  /* ── 日常调速器：默认必须是不干预 ───────────────────────────── */
+  // 荣耀 / 华为内核切到 conservative 会硬重启；全新安装不能写这个默认。
+  // 老配置里那对字面双引号也是三处不一致的根源：守护认不出引号（等价于空），
   // WebUI 的下拉框也匹配不到 option，于是显示成"谁都没选"，用户以为默认值丢了。
   const govM = conf.match(/^CPU_GOVERNOR=([^\n]*)$/m);
   ok(govM !== null, '打包的 socfreq.conf 里有 CPU_GOVERNOR 这一行');
-  ok(govM && govM[1] === 'conservative', '出厂默认是 conservative', '实到 [' + (govM && govM[1]) + ']');
+  ok(govM && govM[1] === '', '出厂默认不干预调速器', '实到 [' + (govM && govM[1]) + ']');
+  ok(/governor_locked\(\)/.test(csrc) && /ro\.product\.brand/.test(csrc) &&
+     /ro\.product\.manufacturer/.test(csrc),
+     '守护对荣耀/华为机型跳过调速器写入');
+  const customizeSrc = fs.readFileSync(P.join(MODDIR, 'customize.sh'), 'utf8');
+  ok(/gov_locked=%d/.test(csrc) && /\.gov_default_fix/.test(customizeSrc) &&
+     /CPU_GOVERNOR=/.test(customizeSrc),
+     '守护报 gov_locked，装机脚本会把旧默认的 conservative 清成空');
+  ok(/samsung/.test(csrc) && /SAMSUNG/.test(customizeSrc) &&
+     /SAMSUNG/.test(apiSrc),
+     '三星同样跳过调速器写入并做 conservative 迁移');
   {
     const cr = (apiSrc.match(/conf_read\(\)\s*\{[\s\S]*?\n\}/) || [''])[0];
     ok((cr.match(/\bsed\b/g) || []).length >= 3,
@@ -3030,15 +3209,11 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
     ok(DOC.includes(f.split('/').pop()),
        'README 的自检清单里点了 ' + f + ' 的名字');
   }
-  ok(/pkg_import\) shift; cmd_pkg_import/.test(apiSrc),
-     'pkg_import 允许不带参数（作者侧命令行取目录里最新的包）');
+  ok(!/cmd_pkg_import|pkg_import\)/.test(apiSrc),
+     'api.sh 不再提供 pkg_import（用户只导出，适配表随版本发）');
   ok(/api\('pkg'\)/.test(html) && /api\('ovr_show'\)/.test(html) &&
      !/api\('pkg_import'\)/.test(html) && !/api\('ovr_clear'\)/.test(html),
-     '页面只有导出与只读状态两个动作（导入/清除只留作者侧命令行）',
-     /api\('(pkg_import|ovr_clear)'\)/.exec(html)?.[0] || '没找到导入调用');
-  // 导入的是哪一份文件必须打在回执里：目录里同时躺着"自己导出的"和"作者回的"
-  ok(/printf '  用的文件：%s\\n' "\$_f"/.test(apiSrc),
-     '导入回执打印用的是哪一份文件（默认取最新，不打印就没法核对）');
+     '页面只有导出与只读状态两个动作');
   // "缺什么"那段判 GPU 上限节点要逐个试。三个候选塞一条 ls 的话
   // 只要有一个打不开就返回非零 —— 高通机器上 mali 那条必然不存在，
   // 明明有 devfreq/…/max_freq 也会被报成"没找到"（真机导出实测踩过）。
@@ -3116,19 +3291,33 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      'adapt_apply 对最终 delta 做一次 clamp（不是只靠单项上限）');
   ok(/cfg\.ad\.up_max = 15;/.test(csrc) && /cfg\.ad\.down_max = 30;/.test(csrc),
      '总闸默认 +15 / -30');
-  // PSI 基线：交权态和偏移生效期只读不写
+  // PSI 基线：交权态只读；正在借额度时也不学（否则持续高载会把自己顶盲）
   ok(/static void step_psi\([\s\S]{0,160}?int allow_base\)/.test(adaptC) &&
-     /if \(allow_base\) \{/.test(adaptC),
-     'PSI 基线更新有闸门（allow_base=0 时只读）');
-  ok(/int base_ok = !strcmp\(g_state, "normal"\) && adapt_delta\(\) == 0;/.test(csrc) &&
-     /adapt_tick\(&cfg\.ad, adt, base_ok\)/.test(csrc),
-     '交权态不更新基线；PSI/温控正在生效时也不更新（插电不改 delta，照常更新）');
+     /if \(allow_base && a->psi_steps == 0\) \{/.test(adaptC),
+     'PSI 基线更新有闸门（交权态、借出期间都只读）');
+  ok(/if \(stall < 0\) return;/.test(adaptC) &&
+     /if \(!valid\) stall = -1;/.test(adaptC),
+     '无效 PSI 样本用 -1 哨兵跳过学习，不拿 0 去洗基线');
+  ok(/int base_warm;/.test(adaptH) && /a->base_warm < 2/.test(adaptC) &&
+     /a->base = a->base_min/.test(adaptC),
+     '基线预热：前两个有效样本取最小值，开机尖峰不会直接顶高门槛');
+  ok(/g_gmin_log_at\s*=\s*-600|now - g_gmin_log_at >= 600/.test(csrc),
+     'GPU 下限被盖回的日志有节流，且开机头 10 分钟不静默');
+  ok(/\(a\.have_psi && a\.psi_valid\) \? a\.stall : -1/.test(csrc) &&
+     /g\.psi_valid = valid/.test(adaptC),
+     '无效 PSI 样本在 status 里报 stall=-1，不和"真的 0"混在一起');
+  ok(/if \(a->psi_steps == 0\) a->base_frozen = 0/.test(adaptC),
+     'psifrz 是本轮连续冻结秒数，借出结束即归零');
+  ok(/int base_ok = !strcmp\(g_state, "normal"\);/.test(csrc) &&
+     /adapt_tick_ex\(&cfg\.ad, adt, base_ok, adv\)/.test(csrc) &&
+     /int adv = base_ok && !g_screen_off;/.test(csrc),
+     '交权态只采样不推进；常态下偏移生效时基线仍更新（不再被温控冻结）');
 
   // 状态键：守护 fprintf 出去的，api.sh 的 grep 白名单必须也认
   {
     /* 守护那行 fprintf 的格式串里，除第一个键外都跟在 \n 后面，
        所以取键名要按"引号后或 \n 后"来取，只认引号后面那个会漏掉 7 个。 */
-    const pub = [...csrc.matchAll(/(?:\\n|")(dlt|stall|psib|avg10|temp|chg|psi|th)=/g)].map(m => m[1]);
+    const pub = [...csrc.matchAll(/(?:\\n|")(dlt|stall|psib|avg10|temp|chg|psi|psifrz|th)=/g)].map(m => m[1]);
     const grepLine = (apiSrc.match(/grep -E '\^\(state[^\n]*\)='/) || [''])[0];
     /* 白名单里最后一个键后面跟的是 )= 而不是 |，所以判"在不在"要按
        (^|,) 键 (| |)) 三种边界来查 —— 只查 "|th|" 会把真的 th 判成缺。 */
@@ -3139,7 +3328,7 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
     const fb = (apiSrc.match(/printf 'state=unknown[\s\S]*?'/) || [''])[0];
     const fbMiss = pub.filter(k => !fb.includes(k + '='));
     ok(fbMiss.length === 0, '状态文件不存在时的兜底也给全偏移键', fbMiss.join());
-    const used = [...html.matchAll(/s\['(?:dlt|stall|psib|avg10|temp|chg|psi|th)'\]|n\('(dlt|stall|psib|avg10|temp|chg|psi|th)'\)/g)].map(m => m[1]);
+    const used = [...html.matchAll(/s\['(?:dlt|stall|psib|avg10|temp|chg|psi|psifrz|th)'\]|n\('(dlt|stall|psib|avg10|temp|chg|psi|psifrz|th)'\)/g)].map(m => m[1]);
     ok(used.length > 0, '页面确实读了偏移状态键', used.slice(0, 6).join());
   }
 
@@ -3150,8 +3339,31 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
   ok(/d \+= a->psi_steps \* c->psi_step;/.test(adaptC) &&
      /d -= a->th_steps \* c->th_step;/.test(adaptC),
      '合计：PSI 是加（只借不拿），温控是减（收紧归学习判）');
-  ok(/step_psi[\s\S]*?if \(!c->psi\) \{ a->psi_steps = 0;/.test(adaptC),
-     '关掉 PSI 时步数立刻清零（不是留着上一次的借出）');
+  ok(/if \(a->th_steps > 0 && a->temp_m > 0\) \{[\s\S]{0,120}?a->psi_steps = 0;/.test(adaptC),
+     '温控优先：有温度读数且在压档时 PSI 不借；传感器读不到不连带锁死放宽');
+  ok(/if \(!c->psi \|\| c->psi_gain <= 0 \|\| c->psi_step <= 0\)/.test(adaptC) &&
+     /if \(!c->th \|\| c->th_max <= 0 \|\| c->th_step <= 0\)/.test(adaptC),
+     'PSI_GAIN=0 / TH_MAX=0 / GAIN<STEP / MAX<STEP 都按整条环路关处理');
+  ok(/if \(c->down_max > 0\)[\s\S]{0,220}?budget = avail;/.test(adaptC),
+     '借出额度受 down_max 里尚未被电量阶梯占用的余量约束');
+  ok(/if \(!advance\) \{[\s\S]{0,260}?g\.psi_steps = 0;[\s\S]{0,200}?return 0;/.test(adaptC) &&
+     /void adapt_cancel\(void\)/.test(adaptC) &&
+     /adapt_cancel\(\);/.test(csrc),
+     '交权态只采样不推进，游戏/满血/熄屏会清零 PSI 与温控档');
+  {
+    const gt = (csrc.match(/static long gpu_target\(void\) \{[\s\S]*?\n\}/) || [''])[0];
+    ok(/a\.th_steps \* cfg\.ad\.th_step/.test(gt) && !/a\.delta/.test(gt),
+       'GPU 只吃温控/电量收紧，不用 CPU 的 PSI 抬帽');
+  }
+  ok(/g_pol\[i\]\.last_got > 0 && cur == g_pol\[i\]\.last_got/.test(csrc),
+     'force 升帽前核对 last_got：厂商压得更低时不盖掉');
+  ok(/cfg\.ad\.psi_gain > 0 && cfg\.ad\.psi_gain < cfg\.ad\.psi_step/.test(csrc) &&
+     /cfg\.ad\.th_max > 0 && cfg\.ad\.th_max < cfg\.ad\.th_step/.test(csrc),
+     '手改配置的非法组合在守护侧按关处理并写 WARN');
+  ok(/PSI_ORDER/.test(apiSrc) && /TH_ORDER/.test(apiSrc),
+     'api.sh 拒绝 GAIN<STEP / MAX<STEP 的组合');
+  ok(/step_psi[\s\S]*?if \(!c->psi \|\| c->psi_gain <= 0 \|\| c->psi_step <= 0\)/.test(adaptC),
+     '关掉 PSI / GAIN=0 / GAIN<STEP 时步数立刻清零（界面 0 不再实际 +5）');
   ok(/stall > a->base \* 2 \+ 30/.test(adaptC),
      '判"卡"要同时过相对基线和绝对增量两道（只看倍数会被静置噪声点着）');
   ok(/#define PSI_TAU 600/.test(adaptH), '基线时间常数是 10 分钟量级（写死绝对阈值就是上一版的坑）');
@@ -3162,9 +3374,9 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      '守护侧兜底：恢复线不低于触发线时贴着一档留 5 度');
   ok(/die "TH_ORDER"/.test(apiSrc) && (apiSrc.match(/TH_ORDER/g) || []).length >= 2,
      'api 侧双向拦：改 TH_HIGH 或 TH_LOW 都可能把迟滞带填反');
-  ok(/if \(temp_m <= lo\)[\s\S]{0,200}a->th_steps--/.test(adaptC) &&
-     /a->cool_until = 0;/.test(adaptC),
-     '温控是"到线逐档压、回带逐档还"，迟滞带里保持不动');
+  ok(/if \(temp_m > 0 && temp_m > lo\)/.test(adaptC) &&
+     /if \(!a->cool_until\) a->cool_until = a->now \+ c->th_back;[\s\S]{0,160}a->th_steps--/.test(adaptC),
+     '温控是"到线逐档压、回带或读不到温度逐档还"，迟滞带里保持不动');
   ok(/t > 200000\) continue;/.test(adaptC) && /strstr\(low, "cpu"\)/.test(adaptC),
      '只取 type 带 cpu/gpu/soc 的 zone，且排除恒 0 和电压读数');
   /* 单位必须钉住：内核 thermal_zone/temp 是**毫摄氏度**（43600 = 43.6℃）。
@@ -3183,22 +3395,27 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
   }
 
   // 充电态：地板不盖用户给单个应用设的档
-  ok(/if \(!per_app && a\.chg_on && a\.chg_pct > base\)/.test(csrc),
-     '插电抬地板只作用于全局分档（专属档位是用户的明确选择）');
-  ok(/pct = eff_pct\(pct, app_pct > 0\)/.test(csrc),
-     '专属档位也吃实时偏移（热了照样降），但不吃充电地板');
+  ok(/if \(!per_app && !g_screen_off && a\.chg_on && a\.chg_pct > base && d >= 0\)/.test(csrc),
+     '插电抬地板只作用于全局分档、熄屏不抬，且本拍有收紧时不抬');
+  ok(/pct = big_min_hit \? 1 : eff_pct\(pct, explicit\)/.test(csrc) &&
+     /int pct, explicit = 0, big_min_hit = 0;/.test(csrc),
+     '专属档位也吃实时偏移；BIG_MIN 连 PSI 抬帽也不吃');
   /* GPU 原来只按加载配置时算出的 g_gpu.normal 写一次，温控读到的
      偏偏常是 GPU zone —— 压的是 CPU，GPU Boost 继续烧，闭环等于只做一半。 */
   ok(/static long gpu_target_for\(int base_pct, int delta\)/.test(csrc) &&
-     /int d = adapt_delta\(\);/.test(csrc) &&
+     /static long gpu_target\(void\)/.test(csrc) &&
      /return gpu_target_for\(base, d\);/.test(csrc),
-     'GPU 生效值吃 adapt_delta（PSI 借档 + 温控降档）');
+     'GPU 生效值吃 adapt 快照（PSI 借档 + 温控降档 + 充电地板）');
   {
     const body = (csrc.match(/static long gpu_target_for\([\s\S]*?\n\}/) || [''])[0];
     ok(!/chg_pct/.test(body) && !/eff_pct/.test(body),
-       'GPU 不吃充电地板（GPU_PCT 是用户明确设的上限）', body ? '' : '没抠到函数');
+       'gpu_target_for 仍是纯函数（不直接读全局充电态）', body ? '' : '没抠到函数');
     ok(/if \(pct < 1\) pct = 1;/.test(body) && /if \(pct > 100\) pct = 100;/.test(body),
        'GPU 百分比夹到 1~100');
+    const gt = (csrc.match(/static long gpu_target\(void\) \{[\s\S]*?\n\}/) || [''])[0];
+    ok(/g_app_gpu <= 0 && !g_screen_off && a\.chg_on && a\.chg_pct > base/.test(gt) &&
+       /if \(g_app_gpu > 0\) d \+= a\.batt_cut;/.test(gt),
+       'GPU 吃充电地板和电量阶梯（熄屏不吃），应用专属 GPU 档除外');
   }
   ok(/static void gpu_patrol\(void\)/.test(csrc) &&
      /if \(got > t\) write_gpu\(t, 0\)/.test((csrc.match(/static void gpu_patrol\(void\) \{[\s\S]*?\n\}/) || [''])[0])
@@ -3208,9 +3425,11 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      && (csrc.match(/gpu_patrol\(\);/g) || []).length >= 2,
      '分应用档位分支也巡检 GPU（提前 continue 不能漏掉 Boost 回压）');
   ok(/FILE \*sf = fopen\(STATUS_FILE, "r"\)/.test(csrc) &&
-     /gpu_target_for\(agpu > 0 \? agpu : cfg\.gpu_pct, dlt\)/.test(csrc) &&
+     /gpu_target_for\(baseg, gdlt\)/.test(csrc) &&
+     /gdlt = -\(th \* cfg\.ad\.th_step\) - bcut;/.test(csrc) &&
+     /chg == 1 && cfg\.ad\.chg/.test(csrc) &&
      !/printf\("gpu_cap=%ld\\n", g_gpu\.normal\)/.test(csrc),
-     'export 的 gpu_cap 按 status 的 app_gpu/dlt 重算生效值（独立进程里 active 恒为 0）');
+     'export 的 gpu_cap 按 app_gpu/温控/电量/充电重算（不吃 PSI）');
   /* 游戏态被实时偏移打断的 P0：apply_normal 会把 g_state 改回 normal、
      收回节点写权限，而游戏分支同一包名不会重新 unlock_game，
      于是整个游戏期间被封顶且厂商调度接不回去。 */
@@ -3538,16 +3757,28 @@ console.log('\n== restart 不吊住调用者 ==');
   ok(/只影响当前生效值/.test(html) && /不改这里显示的设定值/.test(html),
      '页头说明实时偏移只改当前生效值，不改适配表里的设定值');
 
-  /* 版本：module.prop / 页面模块版本 / README 一起改；
-     守护二进制这轮没重编，SF_VERSION 仍是 2.1，页面 #ver2 也跟着它。 */
+  /* 版本：module.prop / 页面模块版本 / README / 守护二进制一起改；
+     页面 #ver2 在 status 回来后会用守护的 SF_VERSION 覆盖，两边必须一致。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.1 Beta$/m.test(mp) && /^versionCode=20107$/m.test(mp),
-     'module.prop 是 V2.1 Beta / 20101');
-  ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号仍是 2.1（本轮未重编）');
-  ok(/id="ver">V2\.1 Beta</.test(html) && /id="ver2">V2\.1</.test(html),
-     '页面：模块版本 V2.1 Beta，守护版本 2.1');
-  ok(/版本：V2\.1 Beta/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
-     'README 标题行同步到 V2.1 Beta');
+  ok(/^version=V2\.1$/m.test(mp) && /^versionCode=20111$/m.test(mp),
+     'module.prop 是 V2.1 / 20111');
+  ok(/SF_VERSION "2\.1"/.test(csrc), '守护源码里的版本号同步到 2.1');
+  ok(/id="ver">V2\.1</.test(html) && /id="ver2">V2\.1</.test(html),
+     '页面：模块版本与守护版本都是 V2.1');
+  ok(/\.sub\{[^}]*white-space:normal/.test(html),
+     '标题副行允许换行，窄屏不会把版本号省略成 "…"');
+  ok(/<html lang="zh-CN" data-style="glass">/.test(html),
+     '默认界面风格是液态玻璃（首帧就是对的，不闪）');
+  ok(/id="style-seg"/.test(html) &&
+     /onclick="setStyle\('glass'\)"/.test(html) &&
+     /onclick="setStyle\('neumorph'\)"/.test(html),
+     '关于页有「界面风格」切换：液态玻璃 / 新拟物');
+  ok(/function applyStyle[\s\S]{0,500}localStorage\.setItem\(STYLE_KEY/.test(html) &&
+     /\[data-style="glass"\] \.tabbar\{/.test(html) &&
+     !/自适配动态限频|powerd/.test(html),
+     '两套规则并存：玻璃只在 data-style=glass 下生效，注释不点名其它模块');
+  ok(/版本：V2\.1/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
+     'README 标题行同步到 V2.1');
 }
 
 console.log('\n' + (fail === 0 ? `全部通过 (${pass})` : `${fail} 项失败 / ${pass} 项通过`));

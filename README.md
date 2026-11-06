@@ -2,7 +2,7 @@
 
 Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏自动交还系统；附带 WebUI 与深度睡眠。
 
-作者：梦笙Mess1on & Ktwo　　版本：V2.1 Beta　　适用：KernelSU / Magisk / APatch · arm64-v8a
+作者：梦笙Mess1on & Ktwo　　版本：V2.1　　适用：KernelSU / Magisk / APatch · arm64-v8a
 
 ## 核心特性
 
@@ -86,4 +86,4 @@ WebUI：管理器模块页 → 打开 WebUI。首页徽标显示「常态限频�
 
 ## License
 
-本项目采用 [PolyForm Internal Use License 1.0.0](LICENSE)：允许在个人或组织内部使用、修改和分发，但不得用它提供与本软件竞争的产品；再分发时需附带许可证文本。完整条款以 `LICENSE` 为准。
+源码公开：可以查看、复制源码，并为了自己的设备修改、编译和使用（含个人备份）。**不允许再分发**（打包、转载、上架、随成品或链接提供下载），**不允许任何商业用途**（销售、收费、广告变现等）。修改版同样适用；商业或再分发授权需事先取得作者书面同意。完整条款以 [LICENSE](LICENSE) 为准。

@@ -92,7 +92,7 @@ sh src/test_hotinstall.sh # 热安装脚本：停旧/起新、暂停保持、深
 sh src/test_install_merge.sh  # 装机迁移段台架：配置搬家/补键 + 名单三方合并
 sh src/test_action_keys.sh    # action.sh 音量键状态机（假 getevent 喂剧本）
 node src/test_contract.js # 跨文件契约（导出键、协议、接线），要七个参数，见下
-node src/test_ovr_ui.js webroot/index.html   # 芯片适配卡片：同样喂真 api.sh 的 ovr_show/pkg/pkg_import/ovr_clear
+node src/test_ovr_ui.js webroot/index.html   # 芯片适配卡片：同样喂真 api.sh 的 ovr_show/pkg/ovr_clear
 node src/test_func_ui.js webroot/index.html webroot/api.sh  # 功能页档位：档位值要落在后端校验区间内
 node src/test_ds_ui.js webroot/index.html   # 睡眠页：state 解析、状态条、双榜、豁免名单与开关调用
 node src/test_about_ui.js webroot/index.html # 关于页：标记被 shell 吃掉时从 module.prop 行恢复

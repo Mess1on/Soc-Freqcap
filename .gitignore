@@ -1,6 +1,6 @@
-# 打包产物（例外：已发布的安装包要入库，供直接下载）
+# 打包产物（例外：releases/ 下归档的安装包要入库，供版本回溯）
 *.zip
-!Soc智能限频_V1.6.zip
+!releases/*.zip
 build/
 out/
 
@@ -11,6 +11,7 @@ out/
 *.orig
 
 # 系统 / 编辑器噪音
+.impeccable/
 .DS_Store
 Thumbs.db
 desktop.ini

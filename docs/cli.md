@@ -10,6 +10,7 @@ V=/data/adb/soc_freqcap           # 可变状态（配置、名单、日志、jo
 
 $D/socfreqd status      # 当前状态
 $D/socfreqd probe       # 会封到多少（只读，不改任何东西）
+$D/socfreqd probe_min   # 每簇下限能不能压到硬件最低（写一次立刻还原）
 $D/socfreqd restart     # 重启守护
 $D/socfreqd stop        # 停掉并恢复频率
 $D/socfreqd uninstall   # 清理还原（卸载时自动执行）
@@ -19,7 +20,7 @@ tail -f $V/socfreqd.log # 看日志
 
 `restart` 会**立刻返回**，守护由它 fork 出来的子进程（setsid 后脱离调用者的进程组）接着跑：
 守护循环是前台常驻的，如果 restart 在调用者这个进程里 exec 成守护，这条命令就永远不返回，
-WebUI 的「重启守护」、音量键第 6 项、适配包的导入回执全被吊在那儿，管理器那头只看到超时。
+WebUI 的「重启守护」、音量键第 6 项都会被吊在那儿，管理器那头只看到超时。
 `start` 才是前台实现，所以看门狗那条用 `nohup "$DAEMON" start >/dev/null 2>&1 </dev/null &` 拉起。
 
 临时想停：建个 `$V/pause` 文件，看门狗就不再拉起守护；删掉文件自动恢复。

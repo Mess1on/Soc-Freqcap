@@ -187,17 +187,69 @@ void adapt_init(void) {
  * 只靠倍数会在很静的机器上被噪声点着（基线 5、当前 12 就是 2.4 倍）。 */
 static void step_psi(struct adapt *a, const struct adapt_cfg *c, int stall, int dt,
                      int allow_base) {
-  if (!c->psi) { a->psi_steps = 0; return; }
-  if (allow_base) {
-    if (a->base <= 0) a->base = stall;         /* 第一拍只立基线，不判 */
-    else a->base = (a->base * (PSI_TAU - dt) + stall * dt) / PSI_TAU;
+  /* 0 = 整条环路不动；GAIN < STEP 连一档都凑不齐，也不许借。
+     以前这里兜底成"至少 1 档"，把界面上的 0 变成了实际 +5。 */
+  if (!c->psi || c->psi_gain <= 0 || c->psi_step <= 0) {
+    a->psi_steps = 0;
+    return;
+  }
+  /* stall < 0 = 这一拍没有有效差分（读不到 / 长眠回来 / 计数器被清）。
+     不学也不判：把 0 喂进 EMA 会让基线一路往下漂，门槛越来越低。
+     上一拍的档位保持不变，等下一个有效样本。 */
+  if (stall < 0) return;
+
+  /* 基线只在"没在借额度"的时候学：借出期间 stall 高是这一拍正在生效的
+     结果，拿它去抬高基线等于把护栏自己顶盲（持续高载 7 分钟后门槛超过
+     实际 stall，最该放宽的场景反而不再触发）。 */
+  if (a->psi_steps == 0) a->base_frozen = 0;   /* 连续冻结秒数：借出结束就归零 */
+  if (allow_base && a->psi_steps == 0) {
+    if (a->base <= 0) {
+      /* 前两个有效样本取最小值再立基线：开机第二拍来一个 250 ms/s 的尖峰时，
+         不能让基线直接等于它（门槛会被抬到 530，护栏瞎 10 分钟）。 */
+      if (stall <= 0) return;                  /* 0 不是有效样本 */
+      if (a->base_warm == 0 || stall < a->base_min) a->base_min = stall;
+      a->base_warm++;
+      if (a->base_warm < 2) return;            /* 预热期不判 */
+      a->base = a->base_min;
+    } else {
+      /* 四舍五入：整数截断时 (base*(600-5)+stall*5)/600 的增量不足 1，
+         基线会卡在一个"错误但稳定"的值上（stall=129 从 10 出发永远不动）。 */
+      a->base = (a->base * (PSI_TAU - dt) + stall * dt + PSI_TAU / 2) / PSI_TAU;
+    }
     if (a->base < 0) a->base = 0;
+  } else if (allow_base && a->psi_steps > 0) {
+    /* 阈值附近抖动时 psi_steps 可能长期 >0、基线也就长期不学。不是永久冻结，
+       但值得在 status 里看出来（psifrz 是这一轮的连续冻结秒数）。 */
+    a->base_frozen += dt;
   }
   /* 还没有基线（开机就在交权态）就先不判，等回到常态那一拍再立 */
   if (a->base <= 0) return;
 
-  int max_steps = c->psi_gain / (c->psi_step > 0 ? c->psi_step : 1);
-  if (max_steps < 1) max_steps = 1;
+  /* 温控优先：只要这一拍还有降温档在生效，PSI 一档都不借，并把旧额度清零。
+     发热是硬件风险，卡顿是可恢复的体验问题，不能让 CPU 排队信号把
+     发热保护抵消掉（默认参数下前 10 秒 PSI 能完全压过热）。 */
+  /* 只有"确实读到了温度"时才让温控挡 PSI：传感器消失后档位会按降温
+     方向释放（见 step_thermal），不能因为一个读不到的 zone 永久禁止放宽。 */
+  if (a->th_steps > 0 && a->temp_m > 0) {
+    a->psi_steps = 0;
+    a->lend_until = a->now + c->psi_hold;
+    return;
+  }
+
+  /* 借出只能花"没花掉的降温余量"：down_max 是合计收紧上限，
+     电量阶梯已经占掉的部分不能再借出去。 */
+  int budget = c->psi_gain;
+  if (c->down_max > 0) {
+    int down = a->th_steps * c->th_step + a->batt_cut;
+    int avail = c->down_max - down;
+    if (avail < 0) avail = 0;
+    if (budget > avail) budget = avail;
+  }
+  int max_steps = budget / c->psi_step;
+  if (max_steps < 1) {
+    a->psi_steps = 0;
+    return;
+  }
 
   if (stall > a->base * 2 + 30) {
     if (a->psi_steps < max_steps) a->psi_steps++;
@@ -216,27 +268,38 @@ static void step_psi(struct adapt *a, const struct adapt_cfg *c, int stall, int 
 /* 温控：超线逐档压，回到恢复线以下按时间逐档还。
  * 迟滞带（high/low 之间）不动，避免在阈值附近来回抖。 */
 static void step_thermal(struct adapt *a, const struct adapt_cfg *c, int temp_m) {
-  if (!c->th || temp_m <= 0) return;
-  int max_steps = c->th_max / (c->th_step > 0 ? c->th_step : 1);
-  if (max_steps < 1) max_steps = 1;
+  /* 0 = 不主动降；TH_MAX < TH_STEP 连一档都凑不齐，也不许压。
+     以前兜底成"至少 1 档"，界面写 0 实际仍会 -5。 */
+  if (!c->th || c->th_max <= 0 || c->th_step <= 0) {
+    a->th_steps = 0;
+    return;
+  }
+  int max_steps = c->th_max / c->th_step;
+  if (max_steps < 1) {
+    a->th_steps = 0;
+    return;
+  }
   /* 阈值填的是℃，内核给的是毫摄氏度 —— 少乘一个 1000 会让静置 43℃
      就被判成超阈值（真机上第一版就是这么错的，单测喂同一套错单位没拦住） */
   int hi = c->th_high * 1000, lo = c->th_low * 1000;
 
-  if (temp_m >= hi) {
+  if (temp_m > 0 && temp_m >= hi) {
     if (a->th_steps < max_steps) a->th_steps++;
     a->cool_until = 0;
     return;
   }
-  if (temp_m <= lo) {
-    if (!a->cool_until) a->cool_until = a->now + c->th_back;
-    if (a->now >= a->cool_until) {
-      if (a->th_steps > 0) { a->th_steps--; a->cool_until = a->now + c->th_back; }
-      else a->cool_until = 0;
-    }
+  if (temp_m > 0 && temp_m > lo) {
+    a->cool_until = 0;                      /* 迟滞带里：保持不动 */
     return;
   }
-  a->cool_until = 0;                        /* 迟滞带里：保持不动 */
+  /* 低于恢复线，或这一拍读不到温度（thermal zone 热插拔/驱动重建/
+     部分机型熄屏后目录消失）：按 TH_BACK 逐档还，不能把上一次热到的
+     档位永久冻住 —— 那会变成永久 -25 且温控优先永远禁止 PSI 放宽。 */
+  if (!a->cool_until) a->cool_until = a->now + c->th_back;
+  if (a->now >= a->cool_until) {
+    if (a->th_steps > 0) { a->th_steps--; a->cool_until = a->now + c->th_back; }
+    else a->cool_until = 0;
+  }
 }
 
 /* 电量阶梯：只在不充电时生效；容量 -1 表示读不到，不猜。 */
@@ -251,16 +314,18 @@ int batt_cut_pct(int capacity, int charging, const struct adapt_cfg *c) {
 void adapt_apply_cap(struct adapt *a, const struct adapt_cfg *c, int stall, int temp_m,
                      int charging, int capacity, int now, int dt, int allow_base) {
   a->now = now;
-  a->stall = stall;
+  a->stall = stall < 0 ? 0 : stall;   /* 负数是"无有效样本"的内部哨兵 */
   a->temp_m = temp_m;
   a->charging = charging;
   a->capacity = capacity;
-  step_psi(a, c, stall, dt, allow_base);
+  /* 顺序：先算电量收紧、再走温控，最后才让 PSI 决定借不借。
+     step_psi 里要根据本拍温控档位判断"热了就停借"。 */
+  a->batt_cut = batt_cut_pct(capacity, charging, c);
   step_thermal(a, c, temp_m);
+  step_psi(a, c, stall, dt, allow_base);
   a->chg_on = c->chg && charging;
   a->chg_pct = a->chg_on ? c->chg_pct : 0;
 
-  a->batt_cut = batt_cut_pct(capacity, charging, c);
   int d = 0;
   d += a->psi_steps * c->psi_step;
   d -= a->th_steps * c->th_step;
@@ -288,17 +353,18 @@ void adapt_apply(struct adapt *a, const struct adapt_cfg *c, int stall, int temp
 /* 采一轮。返回 1 表示"生效封顶和上一轮不一样了"，调用处据此重算并 force 写。
  * 签名只取 delta 与充电地板两项 —— 偏移没变、步数变了（比如 PSI 从 1 档换到
  * 2 档同时温控补回 1 档）时封顶其实没动，没必要重写一遍节点。 */
-int adapt_tick(const struct adapt_cfg *c, int dt, int allow_base) {
+int adapt_tick_ex(const struct adapt_cfg *c, int dt, int allow_base, int advance) {
   long now = adapt_mono();
   g.now = (int)now;
 
   /* PSI：total 是累计 µs，除以墙钟差得到 ms/s。
      隔太久没采（暂停、长眠）这一拍丢掉：拿一段很长的窗口的平均值去判"卡不卡"
-     只会得到一个钝数。 */
+     只会得到一个钝数。读不到 PSI 时不能拿上一拍的旧值继续判，直接清零。 */
   char line[192];
   int avg10x100 = 0;
   long total = 0;
-  int stall = g.stall;
+  int stall = 0;
+  int valid = 0;
   if (read_str(g_psi_path, line, sizeof line) && parse_psi(line, &avg10x100, &total)) {
     g.avg10x100 = avg10x100;
     g.have_psi = 1;
@@ -307,11 +373,17 @@ int adapt_tick(const struct adapt_cfg *c, int dt, int allow_base) {
       long d = total - g_prev_total;
       if (d < 0) d = 0;                    /* 计数器被清（重启）：这一拍不算 */
       stall = (int)((d / 1000) / (dwall ? dwall : 1));
+      valid = 1;
     }
     g_prev_total = total;
   } else {
     g.have_psi = 0;
+    g.psi_steps = 0;
+    g.lend_until = 0;
   }
+  /* 无效样本用 -1 当哨兵：步进机只冻结、不把 0 喂进基线（0 会让门槛往下漂）。 */
+  if (!valid) stall = -1;
+  g.psi_valid = valid;
   g_prev_mono = now;
 
   g.temp_m = hottest_zone(g_thm_dir);
@@ -323,12 +395,66 @@ int adapt_tick(const struct adapt_cfg *c, int dt, int allow_base) {
     if (v >= 0 && v <= 100) capacity = v;
   }
 
+  /* 交权态（游戏/满血/熄屏）：传感器照采，但步进机不推进、借期不续。
+     以前这里照样每拍借档，游戏 8 拍攒下 +10%，出游戏后白拿 30~60 秒。 */
+  if (!advance) {
+    g.stall = stall < 0 ? 0 : stall;
+    g.psi_steps = 0;
+    g.th_steps = 0;
+    g.lend_until = 0;
+    g.back_until = 0;
+    g.cool_until = 0;
+    g.delta = 0;
+    g.chg_on = 0;
+    g.chg_pct = 0;
+    g.batt_cut = 0;
+    return 0;
+  }
+
   struct adapt prev = g;
   g.stall = stall;
   adapt_apply_cap(&g, c, stall, g.temp_m, g.charging, capacity, (int)now, dt, allow_base);
   /* 地板值本身也要参与比较：CHG_PCT 从 90 调到 100 时 delta 没变，
      但生效封顶变了。 */
   return prev.delta != g.delta || prev.chg_on != g.chg_on || prev.chg_pct != g.chg_pct;
+}
+
+int adapt_tick(const struct adapt_cfg *c, int dt, int allow_base) {
+  return adapt_tick_ex(c, dt, allow_base, 1);
+}
+
+int adapt_screen_off_tick(const struct adapt_cfg *c, int dt) {
+  (void)dt;   /* 熄屏温控按拍步进，冷却节律用 th_back 的秒数，不需要 dt */
+  int temp = hottest_zone(g_thm_dir);
+  struct adapt prev = g;
+  g.now = (int)adapt_mono();
+  g.temp_m = temp;
+  g.stall = 0;
+  g.psi_valid = 0;
+  g.charging = 0;
+  g.capacity = -1;
+  g.psi_steps = 0;
+  g.batt_cut = 0;
+  g.chg_on = 0;
+  g.chg_pct = 0;
+  step_thermal(&g, c, temp);
+  int d = -(g.th_steps * c->th_step);
+  if (d < -c->down_max) d = -c->down_max;
+  g.delta = d;
+  return prev.delta != g.delta;
+}
+
+void adapt_cancel(void) {
+  g.psi_steps = 0;
+  g.base_frozen = 0;
+  g.th_steps = 0;
+  g.lend_until = 0;
+  g.back_until = 0;
+  g.cool_until = 0;
+  g.delta = 0;
+  g.chg_on = 0;
+  g.chg_pct = 0;
+  g.batt_cut = 0;
 }
 
 int  adapt_delta(void)   { return g.delta; }

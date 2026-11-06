@@ -166,6 +166,8 @@ _soc_defaults() {
     case "$_v" in ''|*[!0-9]*) continue ;; esac
     case "$_k" in
       default_cpu_pct_big)    _key=CPU_PCT_BIG;    _lo=1;  _hi=100 ;;
+      default_cpu_pct_mid2)   _key=CPU_PCT_MID2;   _lo=1;  _hi=100 ;;
+      default_cpu_pct_mid)    _key=CPU_PCT_MID;    _lo=1;  _hi=100 ;;
       default_cpu_pct_little) _key=CPU_PCT_LITTLE; _lo=1;  _hi=100 ;;
       default_gpu_pct)        _key=GPU_PCT;        _lo=1;  _hi=100 ;;
       default_th_high)        _key=TH_HIGH;        _lo=35; _hi=110 ;;
@@ -275,6 +277,36 @@ if [ -f "$DATA/socfreq.conf" ] && [ -f "$MODPATH/socfreq.conf" ]; then
   [ "$_added" -gt 0 ] && ui_print "  配置补齐新增项：$_added 条"
   # 删掉模块目录内原件：并存两份配置时改模块目录那份不会有任何效果
   rm -f "$MODPATH/socfreq.conf" 2>/dev/null
+fi
+
+# ── 荣耀 / 华为 / 三星：清掉旧默认写入的 conservative ───────────
+# V2.1 出厂把 CPU_GOVERNOR 写成了 conservative。部分荣耀 / 华为 / 三星
+# 内核切到通用 conservative 后直接 kernel panic：装完约一分钟（开机满血
+# 窗口结束）硬重启，之后管理器把模块判成坏模块、root 看起来"没了"。
+# 新版默认已改成"不干预"；这里把存量机器上由旧默认写进去的那一行
+# 也清掉。只跑一次（标记文件），用户之后自己选的 conservative 不受影响。
+_GOV_MARK="$DATA/.gov_default_fix"
+if [ ! -f "$_GOV_MARK" ]; then
+  _br=$(getprop ro.product.brand 2>/dev/null | tr 'a-z' 'A-Z')
+  _mf=$(getprop ro.product.manufacturer 2>/dev/null | tr 'a-z' 'A-Z')
+  case "$_br $_mf" in
+    *HONOR*|*HUAWEI*|*SAMSUNG*)
+      if [ -f "$DATA/socfreq.conf" ]; then
+        awk -F= '
+          $1 == "CPU_GOVERNOR" {
+            v = $2
+            sub(/[[:space:]]*#.*/, "", v)
+            gsub(/[[:space:]]/, "", v)
+            if (v == "conservative") { print "CPU_GOVERNOR="; next }
+          }
+          { print }' "$DATA/socfreq.conf" > "$DATA/socfreq.conf.gov" 2>/dev/null \
+          && mv -f "$DATA/socfreq.conf.gov" "$DATA/socfreq.conf" 2>/dev/null \
+          && chmod 0644 "$DATA/socfreq.conf" 2>/dev/null \
+          && ui_print "  荣耀/华为机型：调速器改回「不干预」（旧默认会触发内核硬重启）"
+      fi
+      ;;
+  esac
+  : > "$_GOV_MARK" 2>/dev/null
 fi
 
 # ── 名单：升级时把精选名单的新条目合进来 ────────────────────────

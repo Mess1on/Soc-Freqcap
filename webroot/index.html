@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-style="glass">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -31,22 +31,23 @@
   /* 两层阴影：左上受光、右下投影 */
   --lt:#ffffff; --sh:#c4cbd7;
   --line:#d4dbe5;              /* 变量名保留；用作"刻痕"的暗侧，不是描边色 */
-  --fg:#39414f; --mut:#7b8698;
-  --acc:#4a6da6; --acc2:#3d5c8f; --ok:#2d8a68; --warn:#a2701d; --err:#b24a45;
+  /* 文字与功能色按 WCAG AA 压深：这几个值在浅底上都是 ≥4.5:1 */
+  --fg:#39414f; --mut:#5d6879;
+  --acc:#3f5f96; --acc2:#344f7e; --ok:#1f7355; --warn:#8a5c14; --err:#9c3b36;
   --on-acc:#f3f6fa;            /* 压在主色面上的字色 */
   --r:18px;
   /* 状态底色（一层色雾）：跟着主题一起换 */
-  --ok-wash:linear-gradient(90deg,rgba(45,138,104,.16),rgba(45,138,104,0) 62%);
-  --acc-wash:linear-gradient(90deg,rgba(74,109,166,.18),rgba(74,109,166,0) 62%);
-  --err-wash:linear-gradient(90deg,rgba(178,74,69,.16),rgba(178,74,69,0) 62%);
+  --ok-wash:linear-gradient(90deg,rgba(31,115,85,.16),rgba(31,115,85,0) 62%);
+  --acc-wash:linear-gradient(90deg,rgba(63,95,150,.18),rgba(63,95,150,0) 62%);
+  --err-wash:linear-gradient(90deg,rgba(156,59,54,.16),rgba(156,59,54,0) 62%);
   /* 刻痕：上沿一线、下沿一线，中间夹出一条凹槽 */
   --sepa-top:var(--lt);
   --sepa-bot:rgba(196,203,215,.85);
   --sb:#c4cbd7;                /* 滚动条 */
   --tab-shadow:rgba(196,203,215,.8);   /* 底部标签栏压在页面上的投影 */
   --thumb-in:rgba(196,203,215,.6);
-  --acc-ring:rgba(74,109,166,.24);
-  --hov:rgba(74,109,166,.09);
+  --acc-ring:rgba(63,95,150,.24);
+  --hov:rgba(63,95,150,.09);
   --log-fg:#5b6577;
   --bar:#93a9c8;               /* 逐核柱条 */
   --bar2a:#8aa2c6; --bar2b:#6f8fbe;   /* 深睡榜柱条 */
@@ -116,15 +117,16 @@ header{display:flex;align-items:center;gap:12px;padding:22px 4px 18px}
 .htxt{min-width:0}
 h1{font-size:20px;font-weight:700;letter-spacing:.4px;white-space:nowrap;
    overflow:hidden;text-overflow:ellipsis}
-.sub{color:var(--mut);font-size:12.5px;margin-top:3px;white-space:nowrap;
-     overflow:hidden;text-overflow:ellipsis}
+/* 窄屏时作者名 + 版本号放不下一行：允许换行，别把版本号省略成 "…" */
+.sub{color:var(--mut);font-size:12.5px;margin-top:3px;white-space:normal;
+     overflow:visible;text-overflow:clip;line-height:1.6}
 /* 版本号做成一个小凸片，扫一眼就知道是哪个版 */
 .sub #ver{display:inline-block;padding:1px 8px;border-radius:9px;background:var(--card);
   box-shadow:var(--up-sm);font-size:11px;font-weight:650;color:var(--acc);letter-spacing:.3px}
 
 /* 主题开关：一条干净的浅槽，两个图标平铺，不再套两个圆按钮。 */
-.tsw{flex:none;display:flex;align-items:center;gap:6px;padding:3px 7px;border-radius:12px;
-  background:var(--surface-high);border:1px solid var(--line);box-shadow:none}
+.tsw{flex:none;display:flex;align-items:center;gap:6px;padding:0 3px;border-radius:14px;
+  background:var(--card);border:0;box-shadow:var(--in-sm)}
 .tsw button{width:26px;height:28px;padding:0;border-radius:0;display:flex;
   align-items:center;justify-content:center;background:transparent;border:0;color:var(--mut);
   box-shadow:none;position:relative;transition:color .2s ease}
@@ -228,7 +230,7 @@ details.more>summary::before{content:'⚙';opacity:.7;font-size:12px;line-height
    --p 是已走的比例（JS 按 min/max 算），走过的部分染成主色，
    免得凹槽看不出滑到哪儿了。 */
 .slider{flex:1.4;min-width:110px}
-input[type=range]{-webkit-appearance:none;width:100%;height:20px;background:transparent;
+input[type=range]{-webkit-appearance:none;width:100%;height:44px;background:transparent;
   margin:0;touch-action:pan-y;--p:0%}
 input[type=range]::-webkit-slider-runnable-track{height:8px;border-radius:999px;
   background:linear-gradient(90deg,var(--acc) 0 var(--p),var(--card) var(--p) 100%);
@@ -426,7 +428,7 @@ button:disabled{opacity:.45;box-shadow:none;cursor:default}
   border-radius:13px;box-shadow:var(--in-sm);font-size:13px;font-weight:600;color:var(--mut)}
 .ds-st .dot{width:9px;height:9px;border-radius:50%;background:var(--mut);flex:none}
 .ds-st.on{color:var(--ok)}
-.ds-st.on .dot{background:var(--ok);box-shadow:0 0 7px var(--ok)}
+.ds-st.on .dot{background:var(--ok);box-shadow:0 1px 2px var(--sh)}
 .ds-st.wait{color:var(--acc)}
 .ds-st.wait .dot{background:var(--acc)}
 .ds-st .meta{margin-left:auto;font-size:11px;font-weight:400;color:var(--mut);
@@ -495,20 +497,84 @@ button:disabled{opacity:.45;box-shadow:none;cursor:default}
 ::-webkit-scrollbar-thumb:hover{background:var(--mut)}
 
 
-/* ── 液态玻璃（对齐自适配动态限频 v1.2.x 的观感）───────────────
- * 取色与阴影直接照 powerd 的 index-*.css：
+/* ── 新拟物补充组件 ─────────────────────────────────────────────
+ * 分组标题、瓦片、二级页头、两列数值格等新组件；和卡片/按钮/开关
+ * 共用 --up / --in 两套阴影：不描边、不叠玻璃、不用零偏移彩色辉光。
+ * 触摸目标统一 ≥44px；键盘焦点用主色的 2px 外框。
+ */
+.secttl{font-size:13px;font-weight:600;letter-spacing:.6px;text-transform:uppercase;
+        color:var(--mut);margin:22px 4px 10px}
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}
+.tile{display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:15px 14px 14px;
+      border-radius:16px;background:var(--card);box-shadow:var(--up);border:0;text-align:left;
+      transition:box-shadow .18s ease,transform .18s ease}
+.tile:active{box-shadow:var(--in-sm);transform:translateY(1px)}
+.tile .ti{font-size:17px;line-height:1;color:var(--acc);display:flex;align-items:center}
+.tile .ti svg{width:22px;height:22px}
+.tile .tt{font-size:14.5px;font-weight:650;color:var(--fg);line-height:1.25}
+.tile .td{font-size:12px;color:var(--mut);line-height:1.5}
+
+/* 二级页头：不描边、不做玻璃，靠一道刻痕和滚动内容分开 */
+.subhd{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;
+       padding:10px 10px 12px;margin:-6px -6px 10px;
+       background:var(--bg);box-shadow:0 1px 0 var(--sepa-bot)}
+.subhd .back{width:44px;height:44px;border-radius:13px;font-size:20px;line-height:1;padding:0 0 2px;
+       background:var(--card);box-shadow:var(--up-sm);color:var(--fg)}
+.subhd b{font-size:17px;font-weight:650}
+
+/* 首页策略卡 */
+.strat-pick{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.strat-pick button{display:flex;flex-direction:column;gap:4px;padding:14px;border-radius:14px;
+       background:var(--card);box-shadow:var(--up-sm);text-align:left;border:0;
+       transition:box-shadow .18s ease,transform .18s ease}
+.strat-pick button:active{box-shadow:var(--in-sm);transform:translateY(1px)}
+.strat-pick button b{font-size:15px;font-weight:700;color:var(--fg)}
+.strat-pick button span{font-size:12px;color:var(--mut);line-height:1.45;font-weight:500}
+.strat-pick button.on{background:linear-gradient(145deg,var(--acc),var(--acc2));
+       box-shadow:var(--up-sm),inset -2px -2px 5px rgba(255,255,255,.2),
+                  inset 2px 2px 5px rgba(0,0,0,.18)}
+.strat-pick button.on b{color:var(--on-acc)}
+.strat-pick button.on span{color:rgba(243,246,250,.86)}
+#strat-tip{font-size:12px;color:var(--mut);margin-top:10px}
+
+/* 监控页的 2×N 数值格 */
+.kv4{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+#mon-clu .hint{margin:10px 0 0}
+#full-log{white-space:pre-wrap;word-break:break-all}
+#log-src,#log-lines{margin-top:2px}
+
+/* 关于页的模块信息居中 */
+#p-about > .card:first-child h2{justify-content:center;text-align:center}
+#p-about #about{text-align:center}
+#p-about #about .kv .k,#p-about #about .kv .v{text-align:center}
+#p-about #about a.kv .v .go{text-align:center}
+.hero-soc{font-size:12px;color:var(--mut);margin:0 0 10px;text-align:center;letter-spacing:.2px}
+.tier-mhz{display:block;margin-top:2px;font-size:11px;color:var(--acc);letter-spacing:.1px}
+#core-box{padding-top:14px}
+#core-box #hw-table{margin-top:0}
+#core-box .core-h{margin-top:0;padding-top:0;border-top:0;box-shadow:none}
+
+/* 策略徽标：选中态要看得出来（以前 .chip.on 没有规则，只剩裸文字） */
+.chip.on{background:var(--card);color:var(--acc);box-shadow:var(--in-sm)}
+
+/* ── 液态玻璃（默认风格）─────────────────────────────────────
+ * 只在 <html data-style="glass"> 时生效；切换见「关于 → 界面风格」。
+ * 玻璃只在底部浮动栏和二级页返回条两处使用，卡片保持实色。
+ */
+/* ── 液态玻璃（液态玻璃风格（默认））───────────────
+ * 浅色 / 深色两套取值：
  *   浅色 #f5f5f7 底 / 纯白卡片 / 主色 #2563eb；深色 #1e1e2f / #2a2a3a / #3b82f6。
  * 玻璃只在两处：底部浮动栏和二级页的返回条 —— 它们压在滚动内容上，
  * 需要 blur(30px) saturate(180%) 才看得出"下面是内容"。卡片保持实色，
  * 长列表里几十张卡都开 backdrop-filter 会让 WebView 掉帧。
  * 所有类名、id、变量名不动，只换值 + 加新组件（瓦片/分组标题/二级页头）。
  */
-:root{
+:root[data-style="glass"]{
   --bg:#f5f5f7; --card:#ffffff; --card2:#f2f2f5;
   --lt:#ffffff; --sh:#dcdce3;
   --line:#e5e7eb;
-  --fg:#1f2937; --mut:#6b7280;
-  --acc:#2563eb; --acc2:#1d4ed8; --ok:#07c160; --warn:#b45309; --err:#dc2626;
+  --fg:#1f2937; --mut:#5b6472;
+  --acc:#2563eb; --acc2:#1d4ed8; --ok:#0f7b48; --warn:#b45309; --err:#dc2626;
   --on-acc:#ffffff;
   --r:20px;
   --ok-wash:linear-gradient(90deg,rgba(7,193,96,.14),rgba(7,193,96,0) 62%);
@@ -535,7 +601,7 @@ button:disabled{opacity:.45;box-shadow:none;cursor:default}
   --surface-high:rgba(0,0,0,.03);
   --surface-highest:rgba(0,0,0,.06);
 }
-:root[data-theme="dark"]{
+:root[data-style="glass"][data-theme="dark"]{
   --bg:#1e1e2f; --card:#2a2a3a; --card2:#33334a;
   --lt:#3a3a4a; --sh:#0d0d16;
   --line:#3a3a4a;
@@ -566,9 +632,9 @@ button:disabled{opacity:.45;box-shadow:none;cursor:default}
   --surface-highest:rgba(255,255,255,.10);
 }
 /* 主按钮与选中态：实色主色，不用拟物的斜向渐变 */
-button.pri,.seg button.on{background:var(--acc);color:var(--on-acc)}
+[data-style="glass"] button.pri,[data-style="glass"] .seg button.on{background:var(--acc);color:var(--on-acc)}
 /* 底部浮动栏与二级页返回条：唯一两处玻璃 */
-.tabbar{
+[data-style="glass"] .tabbar{
   background:var(--glass-bg);
   -webkit-backdrop-filter:blur(30px) saturate(180%);
   backdrop-filter:blur(30px) saturate(180%);
@@ -576,53 +642,54 @@ button.pri,.seg button.on{background:var(--acc);color:var(--on-acc)}
              inset 0 1px 1px var(--glass-hi), inset 0 -1px 1px rgba(0,0,0,.04);
   border:1px solid var(--glass-line);
 }
-.tabbar button{border-radius:16px;transition:color .18s var(--spring, ease)}
-.tabbar button.on{background:var(--acc);color:var(--on-acc);box-shadow:0 6px 18px var(--acc-ring)}
+[data-style="glass"] .tabbar button{border-radius:16px;transition:color .18s var(--spring, ease)}
+[data-style="glass"] .tabbar button.on{background:var(--acc);color:var(--on-acc);box-shadow:0 6px 18px var(--acc-ring)}
 /* 卡片：实色 + 一层很浅的投影 */
-.card h2 .ico{background:var(--card2);box-shadow:none;color:var(--acc)}
+[data-style="glass"] .card h2 .ico{background:var(--card2);box-shadow:none;color:var(--acc)}
+[data-style="glass"] .tsw{background:var(--glass-bg);border:1px solid var(--glass-line);box-shadow:none}
 
-/* ── 功能页：分组标题 + 双列瓦片（对齐 Kin 的 FeatureGrid）────── */
-.secttl{font-size:12.5px;font-weight:700;color:var(--mut);margin:4px 2px 10px;letter-spacing:.02em}
-.tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}
-.tile{display:flex;flex-direction:column;align-items:flex-start;gap:5px;padding:14px 14px 13px;
+/* ── 功能页：分组标题 + 双列瓦片 ─────────────────────────────── */
+[data-style="glass"] .secttl{font-size:12.5px;font-weight:700;color:var(--mut);margin:4px 2px 10px;letter-spacing:.02em}
+[data-style="glass"] .tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}
+[data-style="glass"] .tile{display:flex;flex-direction:column;align-items:flex-start;gap:5px;padding:14px 14px 13px;
       border-radius:18px;background:var(--card);box-shadow:var(--up);border:0;text-align:left;
       transition:transform .18s var(--spring, ease)}
-.tile:active{transform:scale(.97)}
-.tile .ti{font-size:17px;line-height:1;color:var(--acc)}
-.tile .tt{font-size:14px;font-weight:650;color:var(--fg);line-height:1.2}
-.tile .td{font-size:11.5px;color:var(--mut);line-height:1.45}
+[data-style="glass"] .tile:active{transform:scale(.97)}
+[data-style="glass"] .tile .ti{font-size:17px;line-height:1;color:var(--acc)}
+[data-style="glass"] .tile .tt{font-size:14px;font-weight:650;color:var(--fg);line-height:1.2}
+[data-style="glass"] .tile .td{font-size:11.5px;color:var(--mut);line-height:1.45}
 
 /* ── 二级页头：玻璃返回条 ───────────────────────────────────── */
-.subhd{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;
-       padding:10px 2px 12px;margin:-6px -2px 10px;
+[data-style="glass"] .subhd{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;
+       padding:10px 10px 12px;margin:-6px -6px 10px;
        background:var(--glass-bg);
        -webkit-backdrop-filter:blur(20px) saturate(160%);
        backdrop-filter:blur(20px) saturate(160%);
        border-bottom:1px solid var(--glass-line)}
-.subhd .back{width:34px;height:34px;border-radius:12px;font-size:20px;line-height:1;padding:0 0 2px;
+[data-style="glass"] .subhd .back{width:34px;height:34px;border-radius:12px;font-size:20px;line-height:1;padding:0 0 2px;
        background:var(--card);box-shadow:var(--up-sm);color:var(--fg)}
-.subhd b{font-size:16.5px;font-weight:700}
+[data-style="glass"] .subhd b{font-size:16.5px;font-weight:700}
 
 /* ── 首页策略卡 ─────────────────────────────────────────────── */
-.strat-pick{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
-.strat-pick button{display:flex;flex-direction:column;gap:3px;padding:14px;border-radius:16px;
+[data-style="glass"] .strat-pick{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+[data-style="glass"] .strat-pick button{display:flex;flex-direction:column;gap:3px;padding:14px;border-radius:16px;
        background:var(--card2);box-shadow:var(--in-sm);text-align:left;border:0;transition:transform .18s var(--spring, ease)}
-.strat-pick button:active{transform:scale(.98)}
-.strat-pick button b{font-size:15px;font-weight:700;color:var(--fg)}
-.strat-pick button span{font-size:11.5px;color:var(--mut);line-height:1.4;font-weight:500}
-.strat-pick button.on{background:var(--acc);box-shadow:0 8px 22px var(--acc-ring)}
-.strat-pick button.on b{color:var(--on-acc)}
-.strat-pick button.on span{color:rgba(255,255,255,.84)}
-#strat-tip{font-size:12px;color:var(--mut);margin-top:10px}
+[data-style="glass"] .strat-pick button:active{transform:scale(.98)}
+[data-style="glass"] .strat-pick button b{font-size:15px;font-weight:700;color:var(--fg)}
+[data-style="glass"] .strat-pick button span{font-size:11.5px;color:var(--mut);line-height:1.4;font-weight:500}
+[data-style="glass"] .strat-pick button.on{background:var(--acc);box-shadow:0 8px 22px var(--acc-ring)}
+[data-style="glass"] .strat-pick button.on b{color:var(--on-acc)}
+[data-style="glass"] .strat-pick button.on span{color:rgba(255,255,255,.84)}
+[data-style="glass"] #strat-tip{font-size:12px;color:var(--mut);margin-top:10px}
 
 /* ── 监控页的 2×N 数值格 ────────────────────────────────────── */
-.kv4{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
-#mon-clu .hint{margin:10px 0 0}
-#full-log{white-space:pre-wrap;word-break:break-all}
-#log-src,#log-lines{margin-top:2px}
+[data-style="glass"] .kv4{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+[data-style="glass"] #mon-clu .hint{margin:10px 0 0}
+[data-style="glass"] #full-log{white-space:pre-wrap;word-break:break-all}
+[data-style="glass"] #log-src,[data-style="glass"] #log-lines{margin-top:2px}
 
-/* ── 组件规格：完全照 自适配动态限频 的 index-*.css ─────────────
- * 数值逐条抄自那个文件，不凭感觉调：
+/* ── 组件规格：液态玻璃的组件规格 ─────────────
+ * 数值逐条固定，不凭感觉调：
  *   卡片    padding 20 / radius 20 / 1px 描边 / 0 4px 12px 投影 / margin-bottom 16
  *   标题    17px 600，图标块 26
  *   数值格  14px 圆角 + surface-high 底 + 1px 描边，label 12px 三级色，value 15px 600
@@ -632,56 +699,90 @@ button.pri,.seg button.on{background:var(--acc);color:var(--on-acc)}
  *   开关    52×28 胶囊，圆钮 22
  * 只换外观参数，类名与 DOM 结构不动 —— 管理器桥和页面逻辑都不用改。
  */
-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
+[data-style="glass"] .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
       box-shadow:0 4px 12px rgba(15,23,42,.05);padding:20px;margin-bottom:16px}
-.card h2{font-size:17px;font-weight:600;margin-bottom:12px;color:var(--fg)}
-.card h2 .ico{width:26px;height:26px;padding:6px;border-radius:9px;background:var(--surface-high);color:var(--acc)}
-.hint{font-size:13px;line-height:1.7;color:var(--mut);margin-bottom:12px}
-.secttl{font-size:13px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;
+[data-style="glass"] .card h2{font-size:17px;font-weight:600;margin-bottom:12px;color:var(--fg)}
+[data-style="glass"] .card h2 .ico{width:26px;height:26px;padding:6px;border-radius:9px;background:var(--surface-high);color:var(--acc)}
+[data-style="glass"] .hint{font-size:13px;line-height:1.7;color:var(--mut);margin-bottom:12px}
+[data-style="glass"] .secttl{font-size:13px;font-weight:600;letter-spacing:.8px;text-transform:uppercase;
         color:var(--mut);margin:22px 4px 10px}
-.kv4{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.kv{background:var(--surface-high);border:1px solid var(--line);border-radius:14px;
+[data-style="glass"] .kv4{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+[data-style="glass"] .kv{background:var(--surface-high);border:1px solid var(--line);border-radius:14px;
     padding:12px 14px;box-shadow:none;text-align:left}
-.kv .k{font-size:12px;font-weight:500;color:var(--mut);margin-bottom:4px}
-.kv .v{font-size:15px;font-weight:600;color:var(--fg);line-height:1.4;word-break:break-all}
-button{border-radius:30px;padding:13px 20px;font-size:14px;font-weight:600;
+[data-style="glass"] .kv .k{font-size:12px;font-weight:500;color:var(--mut);margin-bottom:4px}
+[data-style="glass"] .kv .v{font-size:15px;font-weight:600;color:var(--fg);line-height:1.4;word-break:break-all}
+[data-style="glass"] button{border-radius:30px;padding:13px 20px;font-size:14px;font-weight:600;
        background:var(--surface-high);border:1px solid var(--line);box-shadow:none;color:var(--fg)}
-button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:0 4px 12px var(--acc-ring)}
-.btns{display:flex;gap:10px;margin-top:14px}
-.log{background:var(--surface-high);border:1px solid var(--line);border-radius:14px;
+[data-style="glass"] button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:0 4px 12px var(--acc-ring)}
+[data-style="glass"] .btns{display:flex;gap:10px;margin-top:14px}
+[data-style="glass"] .log{background:var(--surface-high);border:1px solid var(--line);border-radius:14px;
      padding:12px 14px;font-size:11.5px;line-height:1.65;box-shadow:none;color:var(--log-fg)}
-.tile{background:var(--card);border:1px solid var(--line);border-radius:16px;
+[data-style="glass"] .tile{background:var(--card);border:1px solid var(--line);border-radius:16px;
       box-shadow:0 4px 12px rgba(15,23,42,.05);padding:16px}
-.tile .ti{color:var(--acc);font-size:16px}
-.tile .tt{font-size:15px;font-weight:600}
-.tile .td{font-size:12px;color:var(--mut);line-height:1.55}
-.sw{width:52px;height:28px}
-.sw i{border-radius:999px;background:var(--surface-highest);box-shadow:none;border:1px solid var(--line)}
-.sw i:before{width:22px;height:22px;border-radius:50%;left:2px;top:2px;background:#fff;
+[data-style="glass"] .tile .ti{color:var(--acc);font-size:16px}
+[data-style="glass"] .tile .tt{font-size:15px;font-weight:600}
+[data-style="glass"] .tile .td{font-size:12px;color:var(--mut);line-height:1.55}
+[data-style="glass"] .sw{width:52px;height:28px}
+[data-style="glass"] .sw i{border-radius:999px;background:var(--surface-highest);box-shadow:none;border:1px solid var(--line)}
+[data-style="glass"] .sw i:before{width:22px;height:22px;border-radius:50%;left:2px;top:2px;background:#fff;
              box-shadow:0 1px 3px rgba(0,0,0,.2)}
-.sw input:checked+i{background:var(--acc);border-color:transparent}
-.sw input:checked+i:before{transform:translateX(24px);background:#fff}
-.seg button{border-radius:30px;padding:8px 14px;font-size:12.5px;background:var(--surface-high);
+[data-style="glass"] .sw input:checked+i{background:var(--acc);border-color:transparent}
+[data-style="glass"] .sw input:checked+i:before{transform:translateX(24px);background:#fff}
+[data-style="glass"] .seg button{border-radius:30px;padding:8px 14px;font-size:12.5px;background:var(--surface-high);
             border:1px solid var(--line);box-shadow:none}
-.seg button.on{background:var(--acc);border-color:transparent;color:#fff;box-shadow:0 4px 12px var(--acc-ring)}
-.tabbar button{padding:7px 4px 6px;font-size:11px;border-radius:16px;background:transparent;border:0;box-shadow:none;display:flex;flex-direction:column;align-items:center;gap:3px}
-.tabbar button .tbico{width:21px;height:21px}
-.tile .ti{display:flex;align-items:center}
-.tile .ti svg{width:22px;height:22px}
-.tabbar button.on{background:var(--acc);color:#fff}
-.subhd b{font-size:17px;font-weight:600}
-.strat-pick button{border-radius:16px;border:1px solid var(--line);background:var(--surface-high);box-shadow:none}
-.strat-pick button.on{background:var(--acc);border-color:transparent;box-shadow:0 4px 12px var(--acc-ring)}
+[data-style="glass"] .seg button.on{background:var(--acc);border-color:transparent;color:#fff;box-shadow:0 4px 12px var(--acc-ring)}
+[data-style="glass"] .tabbar button{padding:7px 4px 6px;font-size:11px;border-radius:16px;background:transparent;border:0;box-shadow:none;display:flex;flex-direction:column;align-items:center;gap:3px}
+[data-style="glass"] .tabbar button .tbico{width:21px;height:21px}
+[data-style="glass"] .tile .ti{display:flex;align-items:center}
+[data-style="glass"] .tile .ti svg{width:22px;height:22px}
+[data-style="glass"] .tabbar button.on{background:var(--acc);color:#fff}
+[data-style="glass"] .subhd b{font-size:17px;font-weight:600}
+[data-style="glass"] .strat-pick button{border-radius:16px;border:1px solid var(--line);background:var(--surface-high);box-shadow:none}
+[data-style="glass"] .strat-pick button.on{background:var(--acc);border-color:transparent;box-shadow:0 4px 12px var(--acc-ring)}
 /* 关于页的模块信息居中：标签和值不再左右分栏，作者入口也居中。 */
-#p-about > .card:first-child h2{justify-content:center;text-align:center}
-#p-about #about{text-align:center}
-#p-about #about .kv .k,#p-about #about .kv .v{text-align:center}
-#p-about #about a.kv .v .go{text-align:center}
-.hero-soc{font-size:11.5px;color:var(--mut);margin:0 0 10px;text-align:center;letter-spacing:.2px}
-.tier-mhz{display:block;margin-top:2px;font-size:10.5px;color:var(--acc);letter-spacing:.1px}
-#core-box{padding-top:14px}
-#core-box #hw-table{margin-top:0}
-#core-box .core-h{margin-top:0;padding-top:0;border-top:0;box-shadow:none}
+[data-style="glass"] #p-about > .card:first-child h2{justify-content:center;text-align:center}
+[data-style="glass"] #p-about #about{text-align:center}
+[data-style="glass"] #p-about #about .kv .k,[data-style="glass"] #p-about #about .kv .v{text-align:center}
+[data-style="glass"] #p-about #about a.kv .v .go{text-align:center}
+[data-style="glass"] .hero-soc{font-size:11.5px;color:var(--mut);margin:0 0 10px;text-align:center;letter-spacing:.2px}
+[data-style="glass"] .tier-mhz{display:block;margin-top:2px;font-size:10.5px;color:var(--acc);letter-spacing:.1px}
+[data-style="glass"] #core-box{padding-top:14px}
+[data-style="glass"] #core-box #hw-table{margin-top:0}
+[data-style="glass"] #core-box .core-h{margin-top:0;padding-top:0;border-top:0;box-shadow:none}
+
+/* 可访问性：键盘焦点必须可见；触摸目标不小于 44px */
+button:focus-visible,summary:focus-visible,a:focus-visible,
+input:focus-visible,select:focus-visible{
+  outline:2px solid var(--acc);outline-offset:2px}
+button{min-height:44px}
+/* 玻璃风格有一条通用 button{ padding:13px 20px }，会把主题图标、
+   删除/添加、下拉按钮挤扁（44px 宽减去 40px 内边距只剩 4px）。
+   这里按具体组件把内边距还回去，两套风格共用。 */
+.tsw button{width:44px;height:44px;padding:0;border-radius:12px}
+.pk .rm,.pk .add{width:44px;height:44px;padding:0;border-radius:12px}
+.dd-btn{padding:8px 11px}
+/* 玻璃的开关容器是 52×28；触摸目标仍要 44，轨道保持 28 高 */
+[data-style="glass"] .sw{width:56px;height:44px}
+[data-style="glass"] .sw i{top:8px;bottom:8px}
+/* 玻璃轨道有 1px 描边：圆钮从 2px 起、滑动 28px，左右与上下各留 2px */
+[data-style="glass"] .sw i:before{left:2px;top:2px}
+[data-style="glass"] .sw input:checked+i:before{transform:translateX(28px)}
+.sw{width:56px;height:44px;display:flex;align-items:center}
+.sw i{top:8px;bottom:8px}
+.sw i:before{width:22px;height:22px;left:3px;top:3px}
+.sw input:checked+i:before{transform:translateX(28px)}
+
+/* 窄屏：标题和副行不许把版本号挤没 */
+@media(max-width:300px){
+  /* 274px 这类窄屏：把主题开关收到右上角，品牌文字独占一行。
+     隐藏图标比让标题被截成「Soc智…」更划算。 */
+  header{position:relative;padding-right:106px;padding-top:18px}
+  .logo{display:none}
+  .brand{gap:0}
+  h1{font-size:18px;letter-spacing:.2px}
+  .tsw{position:absolute;right:0;top:16px;margin:0}
+}
+
 </style>
 </head>
 <body>
@@ -693,7 +794,7 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
     </div>
     <div class="htxt">
       <h1>Soc智能限频</h1>
-      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.1 Beta</span></div>
+      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.1</span></div>
     </div>
   </div>
   <!-- 主题开关：太阳=浅色，月亮=深色。点一下就换，选中哪个存到本地。 -->
@@ -785,12 +886,28 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
       <div class="pct" id="gpu_pct_v">45%</div>
     </div>
     <div class="row">
-      <div class="lbl"><b>下限锁定</b><span>钉在最低档，抵消 Boost 越界</span></div>
+      <div class="lbl"><b>下限锁定</b><span>被抬高就压回最低档（devfreq 一路）</span></div>
       <label class="sw"><input type="checkbox" id="gpu_min_lock" onchange="pv('gpu_min_lock')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>禁止 GPU Boost</b><span>关掉 DCVS / 触摸抬频（高通）或 boost 档位（天玑）；游戏、满血、熄屏交还时自动放开</span></div>
+      <label class="sw"><input type="checkbox" id="gpu_boost_off" onchange="pv('gpu_boost_off')"><i></i></label>
+    </div>
+  </div>
+<div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 3 5 13.5h6l-1 7.5 8-10.5h-6z"/></svg>CPU 省电</h2>
+    <div class="row">
+      <div class="lbl"><b>超大核降到最低频</b><span>不关闭核心；只把最高频簇压到最低可用频点，适合需要省电的场景。游戏/满血/熄屏交还仍会放开</span></div>
+      <label class="sw"><input type="checkbox" id="big_min" onchange="pv('big_min')"><i></i></label>
     </div>
   </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>保存</h2>
+    <div class="row">
+      <div class="lbl"><b>套用本机预设</b><span id="preset-hint">读取中…</span></div>
+      <button type="button" id="preset-apply" onclick="applyChipPreset()">套用</button>
+    </div>
+    <div class="hint" id="preset-diff" style="display:none"></div>
     <div class="hint">保存后守护自动重算封顶值并立即生效，无需重启手机</div>
     <div class="btns">
       <button class="pri" onclick="saveAll()">保存并生效</button>
@@ -945,20 +1062,21 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
     </details>
   </div>
 <div class="card">
-    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg>真的卡的时候</h2>
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg>CPU 排队偏高的时候</h2>
     <div class="hint">看的是系统自己的"任务在等 CPU"计数，和这台机最近 10 分钟平常水平比：
-      明显高出才临时放宽一点，不卡了自动收回去。<b>它只会往上放宽，永远不会比你设的值更狠</b>。</div>
+      明显高出才临时放宽一点，不卡了自动收回去。<b>它只会往上放宽，永远不会比你设的值更狠</b>。
+      它看不到 GPU / 存储 / 掉帧，只是"别把 CPU 帽压太死"的护栏；<b>温度已经在压档时它不会借</b>。</div>
     <div class="row">
       <div class="lbl"><b>要不要借</b><span>拿不准就选「适中」</span></div>
       <div class="pset" id="p-psi"></div>
     </div>
     <details class="more"><summary>自己定具体数值</summary>
       <div class="row">
-        <div class="lbl"><b>PSI 护栏</b><span>关掉后卡的时候也不会放宽</span></div>
+        <div class="lbl"><b>PSI 护栏</b><span>关掉后 CPU 排队再高也不会放宽</span></div>
         <label class="sw"><input type="checkbox" id="psi_adapt" onchange="pv('psi_adapt');syncFunc()"><i></i></label>
       </div>
       <div class="row">
-        <div class="lbl"><b>最多借出</b><span>0-30%：一次放宽的总量上限。
+        <div class="lbl"><b>最多借出</b><span>0-30%：一次放宽的总量上限，填 0 = 关掉这条。
           设 65%、这里填 10，就是临时放宽到 75%</span></div>
         <div class="slider"><input type="range" id="psi_gain" min="0" max="30" step="5" oninput="pv('psi_gain');syncFunc()"></div>
         <div class="pct" id="psi_gain_v">+10%</div>
@@ -1059,12 +1177,18 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
       <div class="pct" id="boot_full_v">60s</div>
     </div>
 <div class="row">
-      <div class="lbl"><b>熄屏交还系统</b><span>开：熄屏后解除封顶并交还系统，只保留 15s 轻巡检；
-        关：旧行为，熄屏照样封着</span></div>
-      <label class="sw"><input type="checkbox" id="screen_uncap" onchange="pv('screen_uncap')"><i></i></label>
+      <div class="lbl"><b>熄屏交还系统</b><span>开：熄屏后解除封顶并交还系统，只保留 15s 轻巡检</span></div>
+      <label class="sw"><input type="checkbox" id="screen_uncap"
+        onchange="pv('screen_uncap');if(this.checked)document.getElementById('screen_cap').checked=false"><i></i></label>
     </div>
 <div class="row">
-      <div class="lbl"><b>日常调速器</b><span>选「不干预」会还原原调速器；hmbird/scx 不改写</span></div>
+      <div class="lbl"><b>熄屏轻巡检</b><span>保持封顶，但只每 15s 压回被顶高的上限、不查前台；
+        关着是旧行为（熄屏也每 5s 全量巡检）</span></div>
+      <label class="sw"><input type="checkbox" id="screen_cap"
+        onchange="pv('screen_cap');if(this.checked)document.getElementById('screen_uncap').checked=false"><i></i></label>
+    </div>
+<div class="row">
+      <div class="lbl"><b>日常调速器</b><span id="gov-hint">选「不干预」会还原原调速器；hmbird/scx 不改写</span></div>
       <div id="governor" style="flex:0 0 154px"></div>
     </div>
 </div>
@@ -1122,6 +1246,13 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
         <div class="lbl"><b>自定义 CPU 百分比</b><span>1 ~ 100，CPU 四簇统一</span></div>
         <input type="number" id="pk-custom" min="1" max="100" value="75"
                style="flex:0 0 90px;text-align:center">
+      </div>
+      <div class="row" id="pk-split-row" style="display:none">
+        <div class="lbl"><b>分核</b><span>大核 / 小核分别设；1~100，两项都要填。中间档跟随全局</span></div>
+        <input type="number" id="pk-split-big" min="1" max="100" placeholder="大核"
+               style="flex:0 0 80px;text-align:center">
+        <input type="number" id="pk-split-little" min="1" max="100" placeholder="小核"
+               style="flex:0 0 80px;text-align:center">
       </div>
       <div class="row" id="pk-gpu-row">
         <div class="lbl"><b>GPU 上限</b><span>跟随全局，或给这个应用单独设一道；满血时不需要</span></div>
@@ -1183,6 +1314,15 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
   </div>
 
   <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18c1.4 0 2-.9 2-1.8 0-1.4-1.1-1.7-1.1-2.7 0-.9.7-1.5 1.7-1.5H17a4 4 0 004-4c0-4.4-4-8-9-8z"/><circle cx="7.5" cy="11.5" r="1"/><circle cx="10" cy="7.5" r="1"/><circle cx="14.5" cy="7.5" r="1"/></svg>界面风格</h2>
+    <div class="hint">两套外观随时切换，默认液态玻璃</div>
+    <div class="seg" id="style-seg">
+      <button type="button" data-style="glass" onclick="setStyle('glass')">液态玻璃</button>
+      <button type="button" data-style="neumorph" onclick="setStyle('neumorph')">新拟物</button>
+    </div>
+  </div>
+
+  <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 21s-8-5-8-11a5 5 0 018-3 5 5 0 018 3c0 6-8 11-8 11z"/></svg>支持作者</h2>
     <div class="hint">一直都是免费更新 无收费 悬赏一下给作者动力更新！</div>
     <div class="reward-grid">
@@ -1228,7 +1368,7 @@ button.pri{background:var(--acc);border-color:transparent;color:#fff;box-shadow:
   <button data-p="about"><svg class="ico tbico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 1 1 18 0Z"/><path d="M12 11v5M12 8h.01"/></svg>关于</button>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 /* ── 主题：浅色 / 深色 ─────────────────────────────────────────────
@@ -1275,6 +1415,28 @@ function setTheme(mode){
   try{ localStorage.setItem(THEME_KEY, m); }catch(e){}
 }
 applyTheme(readTheme());
+
+/* 界面风格：两套视觉系统并存，切换只改 <html data-style>。
+   默认液态玻璃；用户在「关于 → 界面风格」里选过就记住。 */
+const STYLE_KEY = 'socfreq_style';
+function applyStyle(mode){
+  const m = (mode === 'neumorph') ? 'neumorph' : 'glass';
+  document.documentElement.setAttribute('data-style', m);
+  const segs = (typeof document.querySelectorAll === 'function')
+    ? document.querySelectorAll('#style-seg button') : [];
+  segs.forEach(b=>{
+    const on = b.getAttribute('data-style') === m;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  return m;
+}
+function setStyle(mode){
+  const m = applyStyle(mode);
+  try{ localStorage.setItem(STYLE_KEY, m); }catch(e){}
+}
+try{ applyStyle(localStorage.getItem(STYLE_KEY) || 'glass'); }
+catch(e){ applyStyle('glass'); }
 /* 用户没手动选过时，跟着系统的深浅色走 */
 try{
   const mq = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1538,6 +1700,21 @@ const PCT_KEYS = [
  * 保存时跳过：写入无意义，且页面会留下一个用户并没有的档位。 */
 const TIER_ABSENT = {};
 
+/* 滑杆的读屏标签：标题是 <b>，和 input 没有 for/id 关联。
+ * 这里从同一行的标题补 aria-label，并把当前值写成带单位的 aria-valuetext。 */
+function labelRanges(){
+  document.querySelectorAll('input[type=range]').forEach(el=>{
+    if(el.getAttribute('aria-label')) return;
+    const row = el.closest('.row');
+    const b = row && row.querySelector('.lbl b');
+    el.setAttribute('aria-label', (b ? b.textContent : el.id).trim());
+    const unit = /^th_(high|low)$/.test(el.id) ? '℃' : '%';
+    const upd = () => el.setAttribute('aria-valuetext', el.value + unit);
+    upd();
+    el.addEventListener('input', upd);
+  });
+}
+
 function buildPctRows(){
   const box = document.getElementById('conf-pct');
   box.innerHTML = '';
@@ -1705,8 +1882,11 @@ document.addEventListener('click', ()=>{
 
 const GOVERNOR_OPTS = [['','不干预'],['walt','walt'],['schedutil','schedutil'],
   ['powersave','powersave'],['conservative','conservative'],['performance','performance']];
+/* 荣耀 / 华为内核切通用调速器会硬重启，守护不写；页面固定显示"不干预"。 */
+let GOV_LOCKED = false;
 const PK_MODE_OPTS = [['full','满血'],['keep','熄屏也封顶'],['90','90%'],['80','80%'],
-  ['70','70%'],['60','60%'],['custom','自定义…']];
+  ['70','70%'],['60','60%'],['50','50%'],['40','40%'],['30','30%'],
+  ['split','分核…'],['custom','自定义…']];
 const PK_GPU_OPTS = [['','跟随全局'],['90','90%'],['80','80%'],['70','70%'],
   ['60','60%'],['50','50%'],['40','40%'],['30','30%'],['custom','自定义…']];
 
@@ -1718,7 +1898,7 @@ function buildStaticDD(){
     const w = ddEl(GOVERNOR_OPTS, g.value || '', '');
     w.id = 'governor';
     w.style.flex = '0 0 154px';
-    w.onchange = ()=>pv('governor');
+    w.onchange = ()=>{ if(GOV_LOCKED){ w.value = ''; return; } pv('governor'); };
     g.parentNode.replaceChild(w, g);
   }
   const m = document.getElementById('pk-mode');
@@ -1784,7 +1964,8 @@ const GRAB_PX = 26;
 function rangeThumbX(el){
   const r = el.getBoundingClientRect();
   const min = +el.min || 0, max = +el.max || 100, v = +el.value;
-  const pad = Math.min(r.height / 2, r.width / 2);   /* 滑块半径，两端留白 */
+  /* 触摸区抬到 44px 后，两条轨道的端内缩仍是滑块半径 9px，不是高度的一半 */
+  const pad = Math.min(9, r.width / 2);
   const w = Math.max(1, r.width - pad * 2);
   return r.left + pad + w * (v - min) / Math.max(1, max - min);
 }
@@ -2057,16 +2238,14 @@ function renderCores(s, rows, gridOnly){
   document.getElementById('hw-table').appendChild(wrap);
 }
 
-/* 每秒只拉逐核数据（api.sh cores → socfreqd cores），
-   只在配置页可见时跑；DEAD 后由 timers 统一停掉。 */
+/* 每秒只拉逐核数据（api.sh cores → socfreqd cores）。
+   柱形图画在功能页的 #core-box 里；停在别的页时就算请求回来也看不见，
+   发了只是白占一次同步 root 往返。 */
 let coresBusy = false;
 async function loadCores(){
   if(coresBusy || DEAD) return;
-  const capPg = document.getElementById('p-cap');
   const funcPg = document.getElementById('p-func');
-  const capOn = capPg && capPg.classList.contains('on');
-  const funcOn = funcPg && funcPg.classList.contains('on');
-  if(!capOn && !funcOn) return;
+  if(!funcPg || !funcPg.classList.contains('on')) return;
   coresBusy = true;
   try{
     const s = Object.assign({}, lastSt || {}, parse(await api('cores')));
@@ -2121,7 +2300,7 @@ function paintAdapt(s){
   if(!el) return;
   const n = k => { const v = parseInt(s[k], 10); return Number.isFinite(v) ? v : null; };
   const dlt = n('dlt'), temp = n('temp'), stall = n('stall'), base = n('psib');
-  const psi = n('psi'), th = n('th'), chg = n('chg');
+  const psi = n('psi'), th = n('th'), chg = n('chg'), frz = n('psifrz');
   if(dlt === null || dlt < 0) { el.style.display = 'none'; return; }
   el.innerHTML = '';
   const main = document.createElement('span');
@@ -2142,6 +2321,7 @@ function paintAdapt(s){
     bits.push('stall ' + stall + '/' + base + 'ms/s');
   if(psi) bits.push('PSI ' + psi + '档');
   if(th) bits.push('温控 ' + th + '档');
+  if(frz > 0) bits.push('基线连续冻结 ' + frz + 's');
   if(bits.length){ raw.textContent = '· ' + bits.join(' · '); el.appendChild(raw); }
   el.style.display = '';
 }
@@ -2274,9 +2454,89 @@ async function loadLog(quiet){
 }
 
 /* ── 配置 ── */
+/* 推荐预设：覆盖安装不会自动套芯片预设，这里给一个手动入口。
+   没有匹配的 adapt/*.conf 时显示"无"，按钮置灰。 */
+let PRESET = null;
+function presetLabel(p){
+  if(!p || p.none === '1') return '';
+  const parts = [];
+  if(p.big) parts.push('BIG ' + p.big + '%');
+  if(p.mid) parts.push('MID ' + p.mid + '%');
+  if(p.mid2) parts.push('MID2 ' + p.mid2 + '%');
+  if(p.little) parts.push('LITTLE ' + p.little + '%');
+  if(p.gpu) parts.push('GPU ' + p.gpu + '%');
+  return parts.join(' / ');
+}
+async function loadPreset(){
+  const hint = document.getElementById('preset-hint');
+  const btn = document.getElementById('preset-apply');
+  if(!hint || !btn) return;
+  try{
+    const p = parse(await api('preset_get'));
+    PRESET = p;
+    if(p.none === '1'){
+      hint.textContent = '无（' + (p.soc || '未知芯片') + ' 没有对应预设）';
+      btn.disabled = true;
+      return;
+    }
+    const vals = presetLabel(p);
+    hint.textContent = (p.title || p.soc || '推荐预设') + (vals ? '：' + vals : '');
+    btn.disabled = false;
+  }catch(e){
+    /* 读失败不锁按钮：点一下会重试，至少能弹出原因 */
+    hint.textContent = '读取失败：' + e.message;
+    btn.disabled = false;
+  }
+}
+/* 名字不能叫 applyPreset：功能页那三组档位已经有一个同名函数，
+ * 后声明的会覆盖前面的，点按钮会走进旧函数并抛错（"点了没反应"）。
+ *
+ * 预设只填控件、不直接写盘：和滑杆一样要按「保存并生效」。
+ * 以前直接调 preset_apply 写 8 个键，用户点「放弃修改」也撤不回来。 */
+async function applyChipPreset(){
+  if(!PRESET) await loadPreset();
+  if(!PRESET || PRESET.none === '1'){
+    toast(PRESET && PRESET.none === '1' ? '这台芯片没有推荐预设'
+                                        : '还没读到预设，稍后再点一次', true);
+    return;
+  }
+  const changes = [];
+  const set = (id, val, label, unit) => {
+    const el = document.getElementById(id);
+    if(!el || val === undefined || val === '') return;
+    if(String(el.value) === String(val)) return;
+    changes.push(label + ' ' + el.value + '→' + val + (unit || ''));
+    el.value = val;
+    if(typeof pv === 'function') pv(id);
+  };
+  set('CPU_PCT_BIG',    PRESET.big,    '超大核', '%');
+  set('CPU_PCT_MID2',   PRESET.mid2,   '次大核', '%');
+  set('CPU_PCT_MID',    PRESET.mid,    '中核',   '%');
+  set('CPU_PCT_LITTLE', PRESET.little, '小核',   '%');
+  set('gpu_pct',        PRESET.gpu,    'GPU',    '%');
+  set('th_high',        PRESET.th_high,'发热线', '℃');
+  set('th_low',         PRESET.th_low, '恢复线', '℃');
+  set('psi_gain',       PRESET.psi_gain,'PSI 借出','%');
+  const diff = document.getElementById('preset-diff');
+  if(!changes.length){
+    if(diff){ diff.style.display = ''; diff.textContent = '当前已经是这套预设，不需要再改。'; }
+    toast('当前已经是这套预设');
+    return;
+  }
+  if(diff){
+    diff.style.display = '';
+    diff.textContent = '已填入，尚未保存：' + changes.join(' · ') +
+                       '。点「保存并生效」才会写入。';
+  }
+  /* 功能页那几组下拉也要跟着变：值已经不是预设档了，不能继续显示"适中" */
+  if(typeof syncFunc === 'function') syncFunc();
+  toast('已填入预设，记得保存');
+}
+
 async function loadConf(){
   try{
     const c = parse(await api('conf_get'));
+    loadPreset();   /* 异步补上"推荐预设"那一行，不挡滑块先画出来 */
     PCT_KEYS.forEach(o=>{
       const el = document.getElementById(o.k);
       if(el){ el.value = c[o.k] || o.d; pv(o.k); }
@@ -2285,6 +2545,10 @@ async function loadConf(){
     g.value = c.GPU_PCT || 45; pv('gpu_pct');
     const m = document.getElementById('gpu_min_lock');
     m.checked = c.GPU_MIN_LOCK !== '0'; pv('gpu_min_lock');
+    const gbo = document.getElementById('gpu_boost_off');
+    gbo.checked = c.GPU_BOOST_OFF !== '0'; pv('gpu_boost_off');
+    const bm = document.getElementById('big_min');
+    bm.checked = c.BIG_MIN === '1'; pv('big_min');
     const iv = document.getElementById('interval');
     iv.value = c.INTERVAL || 5; pv('interval');
     const gr = document.getElementById('grace');
@@ -2300,7 +2564,9 @@ async function loadConf(){
     su.checked = c.SCREEN_POLICY === 'uncap'
               || (c.SCREEN_POLICY === undefined &&
                   (c.SCREEN_UNCAP === undefined || c.SCREEN_UNCAP === '1'));
-    pv('screen_uncap');
+    const sc = document.getElementById('screen_cap');
+    sc.checked = c.SCREEN_POLICY === 'cap' || c.SCREEN_POLICY === 'cap_off';
+    pv('screen_uncap'); pv('screen_cap');
     /* 实时偏移三条：老配置里没有这些行，守护那边缺省全是"开"，
        页面也必须按开显示，否则会出现"显示关、实际在动"。
        数值同理用 !== '0' / undefined 判断：0 对 TH_MAX、PSI_GAIN 是合法值（= 关掉那一条）。 */
@@ -2336,8 +2602,13 @@ async function loadConf(){
        而默认生效值就是不干预，两边口径要一致。 */
     const gv = (c.CPU_GOVERNOR || '').trim();
     const gs = document.getElementById('governor');
+    GOV_LOCKED = String(c.gov_locked || '0') === '1';
     // 认不出来的值一律回落"不干预"（守护那边空 = 还原原调速器）
-    gs.value = GOVERNOR_OPTS.some(o => o[0] === gv) ? gv : '';
+    gs.value = (!GOV_LOCKED && GOVERNOR_OPTS.some(o => o[0] === gv)) ? gv : '';
+    const gh = document.getElementById('gov-hint');
+    if(gh) gh.textContent = GOV_LOCKED
+      ? '荣耀 / 华为内核不切换调速器，此项固定为「不干预」'
+      : '选「不干预」会还原原调速器；hmbird/scx 不改写';
     pv('governor');
     /* 功能页的下拉档和"现在会怎么做"那几句，都按刚填好的控件重算 */
     syncFunc();
@@ -2471,7 +2742,7 @@ function paintFuncSum(){
 
   if(fv('psi_adapt') === 1)
     line('偶尔卡住时最多临时放宽 ' + fv('psi_gain') + '%，不卡了自动收回；这一条只会往上放宽', '卡顿');
-  else line('卡的时候也不会放宽，一直按设定值', '卡顿');
+  else line('CPU 排队再高也不会放宽，一直按设定值', '卡顿');
 }
 
 let saveBusy = false;
@@ -2500,13 +2771,16 @@ async function saveAll(){
                           .map(o=>[o.k, document.getElementById(o.k).value]);
     pairs.push(['GPU_PCT', document.getElementById('gpu_pct').value]);
     pairs.push(['GPU_MIN_LOCK', document.getElementById('gpu_min_lock').checked ? '1' : '0']);
+    pairs.push(['GPU_BOOST_OFF', document.getElementById('gpu_boost_off').checked ? '1' : '0']);
+    pairs.push(['BIG_MIN', document.getElementById('big_min').checked ? '1' : '0']);
     pairs.push(['INTERVAL', document.getElementById('interval').value]);
     pairs.push(['GAME_GRACE_SEC', document.getElementById('grace').value]);
     pairs.push(['BOOT_FULL_S', document.getElementById('boot_full').value]);
     const suOn = document.getElementById('screen_uncap').checked;
-    pairs.push(['SCREEN_POLICY', suOn ? 'uncap' : 'keep']);
+    const scOn = document.getElementById('screen_cap').checked;
+    pairs.push(['SCREEN_POLICY', suOn ? 'uncap' : (scOn ? 'cap' : 'keep')]);
     pairs.push(['SCREEN_UNCAP', suOn ? '1' : '0']);
-    pairs.push(['CPU_GOVERNOR', document.getElementById('governor').value]);
+    pairs.push(['CPU_GOVERNOR', GOV_LOCKED ? '' : document.getElementById('governor').value]);
     pairs.push(['BATT_STEP', document.getElementById('batt_step').checked ? '1' : '0']);
     pairs.push(['BATT_LOW', document.getElementById('batt_low').value]);
     pairs.push(['BATT_LOW_CUT', document.getElementById('batt_low_cut').value]);
@@ -2616,7 +2890,27 @@ function makeNameEl(p){
 }
 
 /* 图标 + 名字共用一个观察器：图标是"滚进可视区才去 APK 里取"的。
- * 分两个观察器会让同一条滚动手势触发两遍回调，且两处 unobserve 容易漏摘一个。 */
+ * 分两个观察器会让同一条滚动手势触发两遍回调，且两处 unobserve 容易漏摘一个。
+ *
+ * 所有行共用同一个实例：列表每次重画（搜索、加载更多）都会造新行，
+ * 一行一个观察器且从不 disconnect，一次会话就能攒下几百个闭包。 */
+let rowIO = null;
+function rowObserver(){
+  if(rowIO) return rowIO;
+  if(typeof IntersectionObserver === 'undefined') return null;
+  try{
+    rowIO = new IntersectionObserver(es=>{
+      es.forEach(e=>{
+        if(!e.isIntersecting) return;
+        const el = e.target;
+        rowIO.unobserve(el);
+        const ph = el.firstElementChild;
+        if(ph && el.dataset.pkg) loadIcon(el.dataset.pkg, ph);
+      });
+    }, {rootMargin: '160px'});
+  }catch(_){ rowIO = null; }
+  return rowIO;
+}
 function pkgRow(p){
   const el = document.createElement('div');
   el.className = 'pk';
@@ -2632,18 +2926,8 @@ function pkgRow(p){
     applyIcon(p, ph, ICONS[p], true);
     return { el, ph, t: name.t, s: name.s };
   }
-  try{
-    const io = new IntersectionObserver(es=>{
-      es.forEach(e=>{
-        if(!e.isIntersecting) return;
-        io.unobserve(e.target);
-        loadIcon(p, ph);
-      });
-    }, {rootMargin: '160px'});
-    io.observe(el);
-  }catch(_){
-    loadIcon(p, ph);   // 没有 IntersectionObserver 就退回立刻取
-  }
+  const io = rowObserver();
+  if(io) io.observe(el); else loadIcon(p, ph);   // 没有 IntersectionObserver 就退回立刻取
   return { el, ph, t: name.t, s: name.s };
 }
 
@@ -2678,7 +2962,9 @@ async function ensureLabels(pkgs){
   labelBusy = true;
   try{
     while (LABEL_Q.length) {
-      const list = LABEL_Q.splice(0, 120);
+      // 管理器的桥是同步的，一次调用里塞太多包会把 JS 线程按住不放；
+      // 小批 + 批间让出一帧，滚动和输入才不会被"解几百个 manifest"堵住。
+      const list = LABEL_Q.splice(0, 40);
       let out;
       try{
         out = await api.apply(null, ['labels'].concat(list));
@@ -2693,6 +2979,7 @@ async function ensureLabels(pkgs){
         if (i > 0) { const v = l.slice(i + 1).trim(); if (v) LABELS[l.slice(0, i)] = v; }
       });
       paintLabels();
+      await new Promise(r=>setTimeout(r, 0));
     }
   }finally{ labelBusy = false; }
 }
@@ -2999,7 +3286,12 @@ function modeText(v){
   if(p.full) return '满血';
   if(p.keep) return '熄屏也封顶';
   const out = [];
-  if(p.cpu) out.push('CPU ' + p.cpu + '%');
+  if(p.cpu){
+    if(p.cpu.indexOf('/') >= 0){
+      const a = p.cpu.split('/');
+      out.push('大核 ' + a[0] + '%', '小核 ' + a[1] + '%');
+    } else out.push('CPU ' + p.cpu + '%');
+  }
   if(p.gpu) out.push('GPU ' + p.gpu + '%');
   return out.join(' · ') || v;
 }
@@ -3014,10 +3306,13 @@ function modeSelect(pkg, cur){
   const opts = MODE_OPTS.some(o => o[0] === cv)
     ? MODE_OPTS : [[cv, cv === 'full' ? '满血'
                         : cv === 'keep' ? '熄屏也封顶'
-                        // 下面的 map 会统一加 "CPU " 前缀，这里只写纯值
+                        // 下面的 map 会统一加前缀，这里只写纯值
                         : cv ? cv + '%' : '跟随全局']].concat(MODE_OPTS);
-  const sel = ddEl(opts.map(([v,t]) =>
-    [v, (v === 'full' || v === 'keep' || v === 'custom') ? t : 'CPU ' + t]), cv, 'md-sel');
+  const labelOf = t => {
+    if (t === 'full' || t === 'keep' || t === 'custom') return t;
+    return String(t).indexOf('/') >= 0 ? '分核 ' + String(t).replace('%', '') : 'CPU ' + t;
+  };
+  const sel = ddEl(opts.map(([v,t]) => [v, labelOf(t)]), cv, 'md-sel');
   sel.dataset.pkg = pkg;
   return sel;
 }
@@ -3119,7 +3414,10 @@ function setAppsAll(on){
   loadApps(SHOW_ALL_APPS);
 }
 
+let appsSeq = 0;
 async function loadApps(forceAll){
+  // 连续勾/取消"显示系统应用"时，先发的那份可能后回来。只认最后一次。
+  const my = ++appsSeq;
   const all = (forceAll === undefined) ? SHOW_ALL_APPS : !!forceAll;
   SHOW_ALL_APPS = all;
   const a = document.getElementById('pk-all'), b = document.getElementById('ds-all');
@@ -3129,6 +3427,7 @@ async function loadApps(forceAll){
   list.innerHTML = '<div class="empty">正在读取已安装应用…</div>';
   try{
     await loadBuiltinLabels();
+    if(my !== appsSeq) return;
     /* 默认只列第三方 + 有桌面入口的系统应用；勾选后连服务/组件一起列，
        给"要选某个系统包但列表里没有"的机器兜底。后端在 query-activities
        被裁掉时也会自动回退到全部系统包。 */
@@ -3136,6 +3435,7 @@ async function loadApps(forceAll){
       all ? api('apps_list', 'all') : api('apps_list'),
       all ? api('mode_apps', 'all') : api('mode_apps')
     ]);
+    if(my !== appsSeq) return;
     const parse = out => out.split('\n').map(s=>s.trim()).filter(Boolean);
     APPS = parse(third);
     APPS_MODE = parse(mode);
@@ -3144,6 +3444,7 @@ async function loadApps(forceAll){
     renderPicker();
     renderDsPicker();
   }catch(e){
+    if(my !== appsSeq) return;
     /* 已经读到列表却在渲染阶段抛错时，别说成"读不到应用"——两种问题的排查方向完全不同。 */
     const had = (APPS && APPS.length) || (APPS_MODE && APPS_MODE.length);
     APPS = []; APPS_MODE = [];
@@ -3163,6 +3464,11 @@ function pkVal(){
     const v = parseInt(document.getElementById('pk-custom').value, 10);
     if(!(v >= 1 && v <= 100)) return null;
     cv = String(v);
+  } else if(m === 'split'){
+    const b = parseInt(document.getElementById('pk-split-big').value, 10);
+    const l = parseInt(document.getElementById('pk-split-little').value, 10);
+    if(!(b >= 1 && b <= 100) || !(l >= 1 && l <= 100)) return null;
+    cv = b + '/' + l;
   }
   let gv = document.getElementById('pk-gpu').value;
   if(gv === 'custom'){
@@ -3178,6 +3484,8 @@ function pkModeChange(){
   const noGpu = m === 'full' || m === 'keep';
   document.getElementById('pk-custom-row').style.display =
     (!noGpu && m === 'custom') ? '' : 'none';
+  document.getElementById('pk-split-row').style.display =
+    (!noGpu && m === 'split') ? '' : 'none';
   document.getElementById('pk-gpu-row').style.display = noGpu ? 'none' : '';
   document.getElementById('pk-gpu-custom-row').style.display =
     (!noGpu && document.getElementById('pk-gpu').value === 'custom') ? '' : 'none';
@@ -3762,8 +4070,10 @@ async function loadCaps(){
 }
 
 /* ── 智能监控：每 2 秒读一次 status，不额外起进程 ─────────────── */
-let monTimer = 0;
-function monKV(k, v, cls){ return '<div class="kv' + (cls ? ' ' + cls : '') + '"><div class="k">' + k + '</div><div class="v">' + (v == null || v === '' ? '—' : v) + '</div></div>'; }
+let monTimer = 0, monGen = 0;
+const MON_ESC = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+function escHtml(v){ return String(v).replace(/[&<>"']/g, c=>MON_ESC[c]); }
+function monKV(k, v, cls){ return '<div class="kv' + (cls ? ' ' + cls : '') + '"><div class="k">' + escHtml(k) + '</div><div class="v">' + (v == null || v === '' ? '—' : escHtml(v)) + '</div></div>'; }
 function renderMonitor(s){
   const grid = document.getElementById('mon-grid');
   if(!grid) return;
@@ -3796,17 +4106,25 @@ function renderMonitor(s){
   }
 }
 async function loadMonitor(){
+  const gen = ++monGen;                 // 快速重复进页时，只让最后一次拿定时器
   if(monTimer){ clearInterval(monTimer); monTimer = 0; }
+  if(DEAD) return;
   const tick = async ()=>{
-    if(!pageVisible('mon')) return;
+    // 桥坏了之后每拍都会重跑一遍探根（几次注定失败的同步调用），必须停；
+    // 页面进后台也不发，管理器的 WebView 常常被压在后台很久。
+    if(DEAD || document.hidden || !pageVisible('mon')) return;
     try{
       const s = parse(await api('status'));
       renderMonitor(s);
       const lg = document.getElementById('mon-log');
       if(lg) lg.textContent = (await api('log', 12)).trim() || '暂无日志';
     }catch(_){}
+    if(DEAD && gen === monGen && monTimer){
+      clearInterval(monTimer); monTimer = 0;
+    }
   };
   await tick();
+  if(gen !== monGen || DEAD) return;
   monTimer = setInterval(tick, 2000);
 }
 
@@ -3840,15 +4158,13 @@ async function loadFullLog(){
   }catch(e){ box.textContent = '读取失败：' + e.message; }
 }
 async function exportLog(){
+  // 由后端写到 Download 并回传真实路径：WebView 里 a.click() 多半没有下载监听，
+  // 继续弹"已导出"会让用户按提示去找一个根本不存在的文件。
   try{
-    const t = await api('logs', 'export', '0');
-    const blob = new Blob([t], {type:'text/plain'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'soc-log-' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'') + '.txt';
-    a.click();
-    setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
-    toast('已导出');
+    const out = String(await api('log_export')).trim();
+    const m = /^OK\s+(.+)$/.exec(out.split('\n')[0] || '');
+    if(!m) throw new Error('后端没有给出导出路径');
+    toast('已导出到 ' + m[1]);
   }catch(e){ toast(e.message, true); }
 }
 
@@ -3915,6 +4231,7 @@ buildStaticDD();
    桥接慢或失败时这一页也不能是空的三行。 */
 syncFunc();
 buildPctRows();
+labelRanges();
 syncSliders();
 /* 先把上次的徽标画出来（首次打开没有缓存时仍是"连接中"）：
  * 首条 exec 的往返时间不短，别让首页每次都先黑着等它。 */
@@ -3969,7 +4286,7 @@ function formBusy(){
    句柄存进 timers：桥接判定不可用时 setDead 要把它们全停掉。
    建议不进这个定时器：样本每 5 分钟才落一次盘，每 5 秒重算一遍只是白起 root shell。 */
 timers.push(setInterval(()=>{
-  if(homeVisible()) loadLog(true);
+  if(!document.hidden && homeVisible()) loadLog(true);
 }, 5000));
 timers.push(setInterval(()=>{
   if(!document.hidden && !formBusy()) loadStatus();

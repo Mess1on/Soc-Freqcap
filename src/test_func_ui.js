@@ -292,5 +292,47 @@ ok(/\.seg\.fill button\{[^}]*flex:1 1 0/.test(html),
   }
 }
 
+/* ── 推荐预设按钮：必须"点得动" ─────────────────────────────────
+   预设只填控件、不写盘：和滑杆一样必须按「保存并生效」。这里验证
+   点一下之后控件被填上、diff 写出来，而且没有调用任何写接口。 */
+{
+  const block = html.match(/let PRESET = null;[\s\S]*?(?=async function loadConf)/);
+  const src = block ? block[0] : '';
+  const calls = [], toasts = [];
+  const mk = (v) => ({ value: v, setAttribute() {}, getAttribute() { return null; } });
+  const ctl = {
+    'CPU_PCT_BIG': mk('46'), 'CPU_PCT_MID2': mk('64'),
+    'CPU_PCT_MID': mk('66'), 'CPU_PCT_LITTLE': mk('46'),
+    'gpu_pct': mk('45'), 'th_high': mk('70'), 'th_low': mk('64'),
+    'psi_gain': mk('10'),
+    'preset-diff': { style: { display: 'none' }, textContent: '' },
+  };
+  const ctx = {
+    api: async (cmd) => { calls.push(cmd); return ''; },
+    toast: (m) => toasts.push(m),
+    loadConf: async () => { calls.push('loadConf'); },
+    pv: () => {},
+    document: { getElementById: (id) => ctl[id] || null },
+    console,
+  };
+  vm.createContext(ctx);
+  if (src) vm.runInContext(src, ctx);
+  vm.runInContext("PRESET = {none:'0', title:'测试', big:'80', mid:'67', little:'75', gpu:'35', th_high:'75', th_low:'68', psi_gain:'10'};", ctx);
+  if (src && typeof ctx.applyChipPreset === 'function') {
+    ctx.applyChipPreset();
+    ok(ctl['CPU_PCT_BIG'].value === '80' && ctl['gpu_pct'].value === '35' &&
+       ctl['th_high'].value === '75' && ctl['th_low'].value === '68',
+       '套用后只改控件，不直接写配置', 'big=' + ctl['CPU_PCT_BIG'].value);
+    ok(calls.length === 0, '没有任何后端写入调用（必须按保存才落盘）',
+       calls.join(','));
+    ok(ctl['preset-diff'].style.display === '' &&
+       /尚未保存/.test(ctl['preset-diff'].textContent) &&
+       /超大核 46→80%/.test(ctl['preset-diff'].textContent),
+       'diff 写明改了哪些值和"尚未保存"', ctl['preset-diff'].textContent);
+  } else {
+    ok(false, 'applyChipPreset 能从页面里抠出来执行');
+  }
+}
+
 console.log('\n' + (fail === 0 ? '全部通过 (' + pass + ')' : fail + ' 项失败 / ' + pass + ' 项通过'));
 process.exit(fail ? 1 : 0);

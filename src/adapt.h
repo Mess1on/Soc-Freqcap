@@ -39,8 +39,12 @@ struct adapt {
   int now;          /* 本轮的单调秒 */
   int stall;        /* 本轮 stall 率，ms/s */
   int base;         /* 自身基线，ms/s */
+  int base_warm;    /* 预热采样数（前 2 拍取最小值，避免被开机尖峰顶高） */
+  int base_min;
+  int base_frozen;  /* 基线因正在借额度而停学的连续秒数（status 里给排查看） */
   int avg10x100;    /* PSI some avg10 ×100 */
   int have_psi;     /* 这台机读得到 /proc/pressure/cpu */
+  int psi_valid;    /* 本拍差分有效；0 = 文件读不到/长眠回来，stall 不可信 */
   int temp_m;       /* 最热 cpu/gpu 传感器，毫摄氏度（内核原样）；0 = 没有 */
   int charging;     /* 电池在充/已充满 */
   int psi_steps;
@@ -59,6 +63,11 @@ void adapt_init(void);
 /* 采一轮传感器并推进步进机。返回 1 = 生效封顶和上一轮不一样，调用处要重算。
    allow_base=0 时 PSI 基线只读不写（游戏/满血/熄屏这类没有帽的时段）。 */
 int  adapt_tick(const struct adapt_cfg *c, int dt, int allow_base);
+/* advance=0：只采传感器，不推进档位、不续借期（游戏/满血/熄屏交权用）。 */
+int  adapt_tick_ex(const struct adapt_cfg *c, int dt, int allow_base, int advance);
+/* 交权态清零：PSI/温控步数、借期、冷却、delta 全部归零。
+   PSI 基线与预热状态保留（和 adapt_reset 不同），回常态不用重新预热。 */
+void adapt_cancel(void);
 void adapt_reset(void);
 /* 纯步进：喂数就能验，不碰文件。自检版直接调它。
    temp_m 是毫摄氏度（内核 thermal_zone 的原样读数）。 */
@@ -72,6 +81,9 @@ void adapt_apply_cap(struct adapt *a, const struct adapt_cfg *c, int stall, int 
                      int charging, int capacity, int now, int dt, int allow_base);
 /* 纯函数：容量 + 充电态 → 电量阶梯收紧量（0 表示不收紧）。 */
 int  batt_cut_pct(int capacity, int charging, const struct adapt_cfg *c);
+/* 熄屏轻巡检的纯温控步进：只读最热 zone、只走温控档，
+   不碰 PSI/基线/充电/电量（熄屏态那几项没有意义）。返回 1 = delta 变了。 */
+int  adapt_screen_off_tick(const struct adapt_cfg *c, int dt);
 int  adapt_batt_cut(void);
 int  adapt_delta(void);
 int  adapt_active(void);

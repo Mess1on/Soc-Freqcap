@@ -30,7 +30,7 @@ pkgs() { grep -Ec '^[^#[:space:]]' "$1" 2>/dev/null || echo 0; }
 
 # ── 抠出迁移段 ──────────────────────────────────────────────────
 awk '/^DATA=\/data\/adb\/soc_freqcap$/{f=1} f{print}
-     f && /chmod 0644 "\$DATA\/socfreq\.conf"/{exit}' "$MOD/customize.sh" > "$T/block.sh"
+     f && /chmod 0644 "\$DATA\/socfreq\.conf" "\$DATA\/games\.txt"/{exit}' "$MOD/customize.sh" > "$T/block.sh"
 if [ ! -s "$T/block.sh" ]; then
   echo "  FAIL 没能从 customize.sh 里抠出迁移段（起止的那两句被改过了？）"
   exit 1
@@ -175,11 +175,15 @@ chk "$(sort "$T/data/games.txt" | grep -Ev '^\s*(#|$)' | uniq -d | wc -l | tr -d
     "名单里没有重复条目"
 
 echo "== 场景 7：按芯片套默认（单一来源 adapt/*.conf）=="
-# SM8750（8 Elite）→ 46 / 65，TH 75/68，PSI_GAIN 10
-# SM8850（8E5）→ 64 / 69
+# SM8750（8 Elite）→ BIG 46 / LITTLE 51 / GPU 45
+# SM8850（8E5）→ 46 / 52 / 42；SM8845（8 Gen 5）→ 51 / 53 / 41
+# SM8975（8E Extreme Gen 6）→ BIG 40 / MID 47 / LITTLE 51 / GPU 41
+# MT6991（天玑 9400/9400+）→ 80 / 67 / 75 / GPU 35
+# MT6993（天玑 9500）→ 72 / 63 / 71 / GPU 35
+# MT6995（天玑 9600 Pro）→ 73 / 56 / 65 / GPU 37
 # 只对全新安装生效；升级配置一个字节都不改（哪怕值刚好等于旧默认）。
 _g() { sed -n "s/^$2=//p" "$1" | head -n 1; }
-preset_case() {   # $1=芯片代号 $2=期望BIG $3=期望LITTLE $4=no|yes|yes-defaults
+preset_case() {   # $1=芯片代号 $2=期望BIG $3=期望LITTLE $4=no|yes|yes-defaults [$5=期望GPU]
   rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
   cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
   cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
@@ -193,18 +197,75 @@ preset_case() {   # $1=芯片代号 $2=期望BIG $3=期望LITTLE $4=no|yes|yes-d
   # 芯片代号是从 getprop 读的，这里换掉它就行（真机上没有 getprop）
   eval "getprop() { case \"\$1\" in ro.soc.model) echo '$1';; ro.board.platform) echo 'PLATFORM';; esac; }"
   mk_case; runcase
-  local b l
+  local b l g
   b=$(_g "$T/data/socfreq.conf" CPU_PCT_BIG)
   l=$(_g "$T/data/socfreq.conf" CPU_PCT_LITTLE)
   chk "$b" "$2" "芯片 $1（$4）→ CPU_PCT_BIG=$b 期望 $2"
   chk "$l" "$3" "芯片 $1（$4）→ CPU_PCT_LITTLE=$l 期望 $3"
+  if [ -n "${5:-}" ]; then
+    g=$(_g "$T/data/socfreq.conf" GPU_PCT)
+    chk "$g" "$5" "芯片 $1（$4）→ GPU_PCT=$g 期望 $5"
+  fi
 }
-preset_case SM8750 46 65 no
-preset_case SM8850 64 69 no
-preset_case MT6991 65 65 no          # 其它芯片保持通用默认
+preset_case SM8750 46 51 no 45
+preset_case SM8850 46 52 no 42
+preset_case SM8845 51 53 no 41
+preset_case SM8975 40 51 no 41
+preset_case SM8650 74 68 no 56
+preset_case SM8550 70 73 no 59
+preset_case SM8475 69 73 no 47
+preset_case MT6991 80 75 no 35
+preset_case MT6993 72 71 no 35
+preset_case MT6995 73 65 no 37
+preset_case MT6991Z 80 75 no 35      # 带后缀的芯片串也按包含命中
+preset_case MT0000 65 65 no          # 其它芯片保持通用默认
 preset_case SM8750 40 65 yes         # 升级 + 用户改过：40 必须活着
 # 升级但值刚好等于旧默认，也不许套——没有"值等于默认就视为没改过"的启发式。
 preset_case SM8750 65 65 yes-defaults
+
+# SM8975 是三簇：中间簇吃 CPU_PCT_MID（不是 MID2）
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
+eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8975;; ro.board.platform) echo X;; esac; }"
+mk_case; runcase
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "47" "SM8975 三簇的中核套到 CPU_PCT_MID"
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID2)" "64" "SM8975 不碰 MID2"
+
+# 天玑三套同样是三簇：中核吃 CPU_PCT_MID
+for _soc in MT6991:67 MT6993:63 MT6995:56; do
+  rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
+  cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
+  eval "getprop() { case \"\$1\" in ro.soc.model) echo '${_soc%%:*} ';; ro.board.platform) echo X;; esac; }"
+  mk_case; runcase
+  chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "${_soc##*:}" "${_soc%%:*} 中核套到 CPU_PCT_MID"
+  chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID2)" "64" "${_soc%%:*} 不碰 MID2"
+done
+
+# SM8650 有四个频率域（两个 A720 簇同频）：MID / MID2 都应套到 66
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
+eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8650;; ro.board.platform) echo X;; esac; }"
+mk_case; runcase
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "66" "SM8650 中簇套到 CPU_PCT_MID"
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID2)" "66" "SM8650 另一中簇套到 CPU_PCT_MID2"
+
+echo "== 荣耀/华为：旧默认的 conservative 被清掉 =="
+# V2.1 出厂写 conservative；部分荣耀/华为内核切过去会硬重启。
+# 迁移只跑一次：之后用户自己再选 conservative 要保留。
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+sed 's/^CPU_GOVERNOR=.*/CPU_GOVERNOR=conservative/' "$MOD/socfreq.conf" > "$T/data/socfreq.conf"
+eval "getprop() { case \"\$1\" in ro.product.brand) echo HONOR;; ro.product.manufacturer) echo HONOR;; ro.soc.model) echo SM8750;; esac; }"
+mk_case; runcase
+chk "$(sed -n 's/^CPU_GOVERNOR=//p' "$T/data/socfreq.conf")" "" \
+    "荣耀机型：旧默认 conservative 被清成空"
+chk "$([ -f "$T/data/.gov_default_fix" ] && echo y)" "y" "迁移标记写下了"
+sed 's/^CPU_GOVERNOR=.*/CPU_GOVERNOR=conservative/' "$T/data/socfreq.conf" > "$T/g3"
+mv -f "$T/g3" "$T/data/socfreq.conf"
+runcase
+chk "$(sed -n 's/^CPU_GOVERNOR=//p' "$T/data/socfreq.conf")" "conservative" \
+    "标记存在后不再清（用户后来自己选的 conservative 要保留）"
 # 全新安装同时套芯片的温控/PSI 默认；百分比外的项不能顺手乱改
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
@@ -212,7 +273,7 @@ eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8750;; ro.board.platform)
 mk_case; runcase
 chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID2)" "64" "芯片默认不动 MID2"
 chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "66" "芯片默认不动 MID"
-chk "$(_g "$T/data/socfreq.conf" GPU_PCT)" "50" "芯片默认的 GPU_PCT 是 50"
+chk "$(_g "$T/data/socfreq.conf" GPU_PCT)" "45" "8E 芯片默认的 GPU_PCT 是 45"
 chk "$(_g "$T/data/socfreq.conf" TH_HIGH)" "75" "8E 芯片默认 TH_HIGH=75"
 chk "$(_g "$T/data/socfreq.conf" TH_LOW)" "68" "8E 芯片默认 TH_LOW=68"
 chk "$(_g "$T/data/socfreq.conf" PSI_GAIN)" "10" "8E 芯片默认 PSI_GAIN=10"
@@ -223,7 +284,7 @@ rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
 eval "getprop() { case \"\$1\" in ro.soc.model) echo '';; ro.board.platform) echo sm8750;; esac; }"
 mk_case; runcase
-chk "$(_g "$T/data/socfreq.conf" CPU_PCT_LITTLE)" "65" "属性为空时退到 board.platform，且大小写不敏感"
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_LITTLE)" "51" "属性为空时退到 board.platform，且大小写不敏感"
 # 升级时整个配置文件逐字节不变（连注释/空白都不许动）
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"

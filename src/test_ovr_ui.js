@@ -48,7 +48,7 @@ const fakeB = path.join(dir, 'fake', 'cpu4').replace(/\\/g, '/');
 fs.mkdirSync(path.join(dir, 'fake', 'cpu0'), { recursive: true });
 fs.mkdirSync(path.join(dir, 'fake', 'cpu4'), { recursive: true });
 
-let show0 = '', show1 = '', exported = '', bad = '';
+let show0 = '', show1 = '', exported = '';
 try {
   show0 = A('ovr_show');
   fs.writeFileSync(path.join(dir, 'override.conf'),
@@ -57,12 +57,6 @@ try {
     'gpu-freqs 1100000000 967000000 443000000\n');
   show1 = A('ovr_show');
   exported = A('pkg');
-  try {
-    execFileSync('sh', [path.join(modRoot, 'webroot', 'api.sh'), 'pkg_import',
-                        path.join(dir, '不存在.txt')],
-                 { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-                   env: Object.assign({}, process.env, { SOCFREQ_DATA_DIR: dir, SOCFREQ_PKG_DIR: dl }) });
-  } catch (e) { bad = String(e.stderr || e.message); }
   fs.unlinkSync(path.join(dir, 'override.conf'));
 } catch (e) {
   skipped = '跑不了 api.sh（这台机没 sh，或 sh 不支持这些用法）：' + e.message;
@@ -186,11 +180,9 @@ async function main() {
   ok(!/importPkg|pkg_import|ovr_clear|clearOvr|ovr-clear/.test(html),
      '整个页面里没有导入/清除覆盖的调用与控件',
      (html.match(/.{0,40}(pkg_import|ovr_clear).{0,40}/g) || ['没命中'])[0]);
-  // 后端那两个子命令还在（作者自己验一份改好的表要用），别把它当成前端入口删掉
-  ok(/cmd_pkg_import\(\) \{/.test(fs.readFileSync(path.join(modRoot, 'webroot', 'api.sh'), 'utf8')),
-     'api.sh 仍保留 pkg_import 子命令（作者侧命令行用）');
-  ok(/E\/PKG_NOFILE|E\/PKG_NOOVR|E\/PKG_FMT|E\/PKG_OVR/.test(bad),
-     '导一份不存在的包会被后端拒（命令行那条路自己也是验过的）', bad.slice(0, 80));
+  // 后端也不再提供导入：用户只导出，适配表由作者随版本发。
+  ok(!/cmd_pkg_import/.test(fs.readFileSync(path.join(modRoot, 'webroot', 'api.sh'), 'utf8')),
+     'api.sh 不再提供 pkg_import 子命令');
 
   finish();
 }

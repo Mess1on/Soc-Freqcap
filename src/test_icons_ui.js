@@ -65,6 +65,9 @@ function labelSandbox(respond) {
     },
     document: { querySelectorAll: () => [] },
     paintLabels: () => painted.push(1),
+    // ensureLabels 每批之间要让出一帧；沙箱里直接执行回调，等价于"下一拍立刻到"。
+    setTimeout: (fn) => { try{ fn(); }catch(_){} return 0; },
+    clearTimeout: () => {},
     console, Promise, Object, Array, String, JSON, Math, Number, RegExp,
   };
   vm.createContext(ctx);

@@ -88,9 +88,10 @@ su -c 'sh /data/adb/modules/soc_freqcap/tools/safemode.sh off' && reboot  # 退�
 如果重启后频率仍然偏低，先确认模块真的不在了：
 
 ```sh
-ls /data/adb/modules /data/adb/modules_update 2>/dev/null | grep soc_freqcap
+ls -d /data/adb/modules/soc_freqcap /data/adb/ap/modules/soc_freqcap \
+      /data/adb/modules_update/soc_freqcap /data/adb/ap/modules_update/soc_freqcap 2>/dev/null
 pidof socfreqd
-ps -A | grep deep_sleep
+ps -A | grep -E 'deep_sleep|service.sh'
 ```
 
 再看当前上限和硬件最高：
@@ -101,10 +102,20 @@ for p in /sys/devices/system/cpu/cpufreq/policy*; do
 done
 ```
 
-- 两个目录都没有 `soc_freqcap`、也没有进程 → 本模块已经清干净；此时上限仍低，是**别的性能工具 /
-  厂商省电 / 游戏助手**在写节点或禁用了性能组件，不是本模块的残留。
-- **`/data/adb/modules_update/soc_freqcap` 还在**：这是一次没应用完的更新，重启后会被装回去。
-  在管理器里再卸载一次，或删掉这个待更新目录后再重启。这就是"卸载了又自己回来"的常见原因。
+- 两个根（KernelSU/Magisk 的 `/data/adb/modules` 与 APatch 的 `/data/adb/ap/modules`）
+  以及各自的 `modules_update` 都没有 `soc_freqcap`、也没有进程 → 本模块已经清干净；
+  此时上限仍低，是**别的性能工具 / 厂商省电 / 游戏助手**在写节点或禁用了性能组件，
+  不是本模块的残留。
+- **看的是 `scaling_max_freq`，不是 `scaling_cur_freq`**：后者是调度器当前跑多快，
+  空闲时低于上限是正常的。只有 `scaling_max_freq` 低于 `cpuinfo_max_freq` 才叫"被压着"。
+- **另一个管理器根下还有一份**（从 KernelSU 换到 APatch 后只卸了一边很常见）：
+  那份的 `service.sh` 会照常开机启动并继续限频。要在**对应管理器**里再卸载一次。
+- **`modules_update/soc_freqcap` 还在**（KernelSU 和 APatch 各有一处）：这是一次
+  没应用完的更新，重启后会被装回去。在管理器里再卸载一次，或删掉这个待更新目录后再重启。
+  这就是"卸载了又自己回来"的常见原因。
+- 新版卸载脚本会先停看门狗（`service.sh` 子 shell）、守护和深睡，再还原三本账，
+  还原完再杀一遍防复活；两处 `modules_update` 都会清。若仍有节点写不进去，
+  账本会备份到 `/data/local/tmp/soc_freqcap_restore`，不会随数据目录一起删掉。
 - **Scene 的弹窗**（“检测到系统中可能限制性能的组件”）是 Scene 看到有人在改 CPU/性能节点；
   Scene 自己也有 CPU 频率 / 开机情景模式。检查 Scene 的「开机应用 / 情景模式 / 性能模式」
   是否设了上限，并看它弹窗里要禁用的那个“组件”到底是系统组件还是 `soc_freqcap`。
@@ -122,6 +133,36 @@ done
   把那个 App 的名字/版本发过来才能继续定位。
 - 本模块的卸载流程：停守护 → 按 journal 还原 → 没有 journal 时把 CPU 上限放回硬件最高 →
   停深睡并解冻、撤临时白名单、退出强制空闲 → 删数据目录。卸载脚本在 `uninstall.sh`，可直接读。
+
+### 荣耀 / 华为 / 三星：装完约一分钟、或打开 WebUI 时硬重启，之后 root 消失
+
+V2.1 的出厂配置把 `CPU_GOVERNOR` 写成了 `conservative`。部分荣耀 / 华为 / 三星内核
+不支持切换通用调速器，切过去会直接 kernel panic：装完约一分钟（开机满血窗口
+60 秒结束、守护第一次写调速器）硬重启；反复几次后管理器会把模块判成坏模块，
+看起来就像"root 没了"。
+
+新版已经改了三处：
+
+1. 出厂默认改成**不干预**（`CPU_GOVERNOR=` 留空），不再写调速器；
+2. 升级安装时会把存量配置里由旧默认写入的 `CPU_GOVERNOR=conservative` 清成空；
+3. 守护识别到荣耀 / 华为 / 三星机型时**一律不改写调速器**，即使配置里还留着这一行。
+
+如果现在还在重启循环里，按顺序试：
+
+```sh
+# 1) 先让守护别再启动（能进系统/能 adb 时）
+su -c 'touch /data/adb/soc_freqcap/safemode' && reboot
+
+# 2) 装上新版后删掉安全模式标记，再重启
+su -c 'rm -f /data/adb/soc_freqcap/safemode' && reboot
+```
+
+进不了系统时用管理器的安全模式（开机时禁用所有模块），进系统后
+`/data/adb/soc_freqcap/safemode` 一样有效。也可以手工清掉那一行：
+
+```sh
+su -c 'c=/data/adb/soc_freqcap/socfreq.conf; sed "s/^CPU_GOVERNOR=.*/CPU_GOVERNOR=/" $c > $c.new && mv -f $c.new $c'
+```
 
 ## 关于管理器里看到的输出
 

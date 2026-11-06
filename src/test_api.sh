@@ -36,6 +36,7 @@ reject(){ # 期望拒绝
 
 echo "== 正常读取 =="
 ok "$(A conf_get | grep -c '^INTERVAL=')" "1" "conf_get 返回键值行"
+ok "$(A conf_get | grep -c '^gov_locked=')" "1" "conf_get 带 gov_locked（页面据此固定调速器）"
 ok "$(A games_list all | head -1 | grep -c '^[a-z]')" "1" "games_list 首行是包名"
 # ping 的回执是 PONG 不是 OK：别让前端把两种回执搞混
 ok "$(A ping)" "PONG" "ping 回 PONG"
@@ -113,6 +114,20 @@ reject conf_set BATT_CRIT 0
 reject conf_set BATT_CRIT 96
 reject conf_set BATT_CRIT_CUT 31
 reject conf_set GPU_MIN_LOCK 2
+ok "$(A conf_set BIG_MIN 1 | head -1)" "OK BIG_MIN=1" "超大核最低频开关能写"
+reject conf_set BIG_MIN 2
+ok "$(A conf_set BIG_MIN 0 >/dev/null; grep '^BIG_MIN=' socfreq.conf)" "BIG_MIN=0" \
+   "超大核最低频恢复默认"
+# 非 0 时必须至少凑出一整档；否则界面填的数和实际动作对不上
+reject conf_set PSI_GAIN 3
+A conf_set PSI_GAIN 5 >/dev/null
+reject conf_set PSI_STEP 10
+A conf_set PSI_GAIN 10 >/dev/null
+reject conf_set TH_MAX 3
+A conf_set TH_MAX 5 >/dev/null
+reject conf_set TH_STEP 10
+A conf_set TH_MAX 25 >/dev/null
+A conf_set TH_STEP 5 >/dev/null
 reject conf_set CPU_GOVERNOR 'scx'
 reject conf_set CPU_GOVERNOR 'walt;rm -rf /'
 reject conf_set EVIL_KEY 1
@@ -174,6 +189,8 @@ ok "$(A conf_set SCREEN_POLICY uncap >/dev/null; grep '^SCREEN_POLICY=' socfreq.
    "SCREEN_POLICY=uncap" "熄屏策略可设 uncap"
 ok "$(A conf_set SCREEN_POLICY keep >/dev/null; grep '^SCREEN_POLICY=' socfreq.conf)" \
    "SCREEN_POLICY=keep" "熄屏策略可设 keep"
+ok "$(A conf_set SCREEN_POLICY cap >/dev/null; grep '^SCREEN_POLICY=' socfreq.conf)" \
+   "SCREEN_POLICY=cap" "熄屏策略可设 cap（保持封顶+轻巡检）"
 reject conf_set SCREEN_POLICY auto
 reject conf_set SCREEN_POLICY Uncap
 ok "$(A conf_set SOFF_INTERVAL 5 >/dev/null; grep '^SOFF_INTERVAL=' socfreq.conf)" \
@@ -742,6 +759,13 @@ reject modes_set com.x.y 70:101
 reject modes_set com.x.y 0:40
 reject modes_set com.x.y 70:abc
 reject modes_set com.x.y 70:40:50
+ok "$(A modes_set com.split.both 70/50 | tr -d '\r')" "OK com.split.both=70/50" \
+   "分核 big/little 能写"
+ok "$(A modes_set com.split.gpu 70/50:40 | cut -d' ' -f1)" "OK" "分核 + GPU 能写"
+reject modes_set com.x.y 70/
+reject modes_set com.x.y /50
+reject modes_set com.x.y 0/50
+reject modes_set com.x.y 70/50/60
 reject modes_set com.x.y full:40
 A modes_set com.dual.cpu 80: >/dev/null
 ok "$(A modes_list | tr -d '\r' | grep -c -x 'com.dual.cpu=80:')" "1" \
@@ -1029,6 +1053,16 @@ sed -i 's/^CPU_GOVERNOR=.*/CPU_GOVERNOR="walt/' "$GQ/socfreq.conf"
 ok "$(AGQ conf_get | sed -n 's/^CPU_GOVERNOR=//p')" '"walt' "落单的一个引号原样留着"
 sed -i 's/^GPU_PCT=.*/GPU_PCT="45"/' "$GQ/socfreq.conf"
 ok "$(AGQ conf_get | sed -n 's/^GPU_PCT=//p')" "45" "数字键也一律剥（不只处理调速器）"
+# 荣耀/华为：页面要据此把调速器锁成"不干预"（守护侧同样会跳过写入）
+GS="$TMP/gp"; mkdir -p "$GS"
+cat > "$GS/getprop" <<'EOF'
+#!/bin/sh
+case "$1" in ro.product.brand|ro.product.manufacturer) echo HONOR;; esac
+EOF
+chmod +x "$GS/getprop"
+AH() { ( cd "$GQ" && PATH="$GS:$ORIG_PATH" SOCFREQ_DATA_DIR="$GQ" sh webroot/api.sh "$@" ); }
+ok "$(AH conf_get | sed -n 's/^gov_locked=//p')" "1" "荣耀/华为品牌：conf_get 报 gov_locked=1"
+ok "$(AGQ conf_get | sed -n 's/^gov_locked=//p')" "0" "其它品牌：gov_locked=0"
 
 echo "== labels（应用名批量 + 缓存）=="
 # 名字只能从 APK 里读：守护一次读要解 manifest + arsc，
@@ -1155,12 +1189,11 @@ wait "$_PA" "$_PB" 2>/dev/null
 ok "$(L < "$LB/o1")" "com.a.b=名字-com.a.b" "并发两批 labels：第一批拿到自己的名字"
 ok "$(L < "$LB/o2")" "com.c.d=名字-com.c.d" "并发两批 labels：第二批没被覆盖"
 
-echo "== 机型适配包（导出 / 导入 / 覆盖）=="
-# 探测不到节点的机器只能人工适配。这一段验的是闭环：
-# 导出的包有版本标记 → 导入校验后写出 override.conf → 回执说清每条路径
-# 在**这台机**上存不存在（导入成功但路径全是别人机器上的，等于没适配）。
+echo "== 机型适配包（导出 / 覆盖）=="
+# 探测不到节点的机器只能人工适配。用户侧只有导出：包里有版本标记、
+# 节点行和现场说明，发回来由作者改好随下一个版本发；模块不再提供导入。
 PK="$TMP/pkg"
-mkdir -p "$PK/webroot" "$PK/data" "$PK/dl/fake/policy0" "$PK/dl/fake/policy6"
+mkdir -p "$PK/webroot" "$PK/data" "$PK/dl"
 cp "$MOD/webroot/api.sh" "$PK/webroot/"
 cp "$MOD/socfreq.conf" "$PK/socfreq.conf"
 APKG() { ( cd "$PK" && SOCFREQ_DATA_DIR="$PK/data" SOCFREQ_PKG_DIR="$PK/dl" \
@@ -1175,52 +1208,26 @@ ok "$(head -n 1 "$(ls -1 "$PK/dl"/socpkg-*.txt | head -n 1)")" "#SOCPKG 1" \
 ok "$(grep -c '^=====' "$(ls -1 "$PK/dl"/socpkg-*.txt | head -n 1)")" "10" \
    "十段人读现场全打出来了（含深睡/待机现场；缺一段就说明哪段写挂了）"
 
-cat > "$PK/dl/socpkg-good.txt" <<EOF
-#SOCPKG 1
-#soc=TESTCHIP
-#model=FAKE1
-#ovr cpu-dir $PK/dl/fake/policy0 3532800
-#ovr cpu-dir $PK/dl/fake/policy6 4320000
-#ovr gpu-max $PK/dl/fake/nope/max_freq
-#ovr gpu-freqs 1100000000 1050000000
-EOF
-IMP=$(APKG pkg_import dl/socpkg-good.txt 2>&1)
-ok "$(printf '%s\n' "$IMP" | head -n 1)" "OK import TESTCHIP" "导入回执带芯片名"
-ok "$(wc -l < "$PK/data/override.conf")" "4" "override.conf 收了四条覆盖"
-ok "$(printf '%s\n' "$IMP" | grep -c '在   ')" "2" "两条目录在这台机上确实存在"
-ok "$(printf '%s\n' "$IMP" | grep -c '本机没有')" "1" "不存在的那条被点名，不是默默收下"
-ok "$(printf '%s\n' "$IMP" | grep -c '频率表 2 个频点')" "1" "频率表按频点个数回执"
-ok "$(APKG ovr_show | head -n 1)" "ovr=1" "ovr_show 报出正在使用覆盖"
-# 重复导入不能攒成八条：覆盖是整份替换，攒了就读不清楚哪条生效
-APKG pkg_import dl/socpkg-good.txt >/dev/null 2>&1
-ok "$(wc -l < "$PK/data/override.conf")" "4" "同一份包导入两次不会把覆盖叠两份"
-
-# 坏包一律拒，而且不许留下半截覆盖
-printf '#ovr cpu-dir 相对路径 123\n' > "$PK/dl/bad-nohead.txt"
-ok "$(APKG pkg_import dl/bad-nohead.txt 2>&1 | head -n 1)" "E/PKG_FMT" "没有版本标记的文件不当包收"
-printf '#SOCPKG 2\n#soc=X\n' > "$PK/dl/bad-ver.txt"
-ok "$(APKG pkg_import dl/bad-ver.txt 2>&1 | head -n 1)" "E/PKG_FMT" "不认的版本号直接拒"
-printf '#SOCPKG 1\n#soc=X\n' > "$PK/dl/bad-noovr.txt"
-ok "$(APKG pkg_import dl/bad-noovr.txt 2>&1 | head -n 1)" "E/PKG_NOOVR" "一条覆盖都没有的包不写文件"
-printf '#SOCPKG 1\n#soc=X\n#ovr cpu-dir 相对路径 123\n' > "$PK/dl/bad-rel.txt"
-ok "$(APKG pkg_import dl/bad-rel.txt 2>&1 | head -n 1)" "E/PKG_OVR" "路径不以 / 开头判为非法"
-printf '#SOCPKG 1\n#soc=X\n#ovr gpu-max /ok/path\n#ovr 乱键 1\n' > "$PK/dl/bad-key.txt"
-ok "$(APKG pkg_import dl/bad-key.txt 2>&1 | head -n 1)" "E/PKG_OVR" "未知键整包拒（不静默收下看不懂的行）"
-printf '#SOCPKG 1\n#soc=X\n#ovr cpu-dir /tmp/a abc\n' > "$PK/dl/bad-hw.txt"
-ok "$(APKG pkg_import dl/bad-hw.txt 2>&1 | head -n 1)" "E/PKG_OVR" "硬件上限不是数字就拒"
-ok "$(APKG ovr_show | head -n 1)" "ovr=1" "坏包被拒之后原来那份覆盖还在"
-
-# 无参导入取 Download 里最新的那个包
-rm -f "$PK/dl"/socpkg-*.txt
-printf '#SOCPKG 1\n#soc=OLD\n#ovr cpu-dir %s 100\n' "$PK/dl/fake/policy0" > "$PK/dl/socpkg-old.txt"
-touch -t 202001010000 "$PK/dl/socpkg-old.txt"
-printf '#SOCPKG 1\n#soc=NEW\n#ovr cpu-dir %s 200\n' "$PK/dl/fake/policy6" > "$PK/dl/socpkg-new.txt"
-touch -t 209901010000 "$PK/dl/socpkg-new.txt"
-ok "$(APKG pkg_import 2>&1 | head -n 1)" "OK import NEW" "不点名时取最新的那个包"
+# 导入已下线：用户只导出，适配表由作者改好随版本发
+ok "$(APKG pkg_import anything.txt 2>&1 | head -n 1)" "E/UNKNOWN" \
+   "pkg_import 不再是可用子命令"
+printf 'cpu-dir /tmp/x 100\n' > "$PK/data/override.conf"
+ok "$(APKG ovr_show | head -n 1)" "ovr=1" "随版本落地的适配表能被 ovr_show 看到"
 
 ok "$(APKG ovr_clear)" "OK ovr_clear" "清除覆盖给回执"
 ok "$([ -f "$PK/data/override.conf" ] && echo yes || echo no)" "no" "覆盖文件真的删掉了"
 ok "$(APKG ovr_show | head -n 1)" "ovr=0" "清除后 ovr_show 报没在用"
+
+echo "== 日志导出 =="
+# 导出必须由后端真落盘：WebView 里的 a.click() 没有下载监听，点了没反应。
+printf 'daemon-line\n' > "$PK/data/socfreqd.log"
+printf 'sleep-line\n' > "$PK/data/dsleep.log"
+LE=$(APKG log_export 2>&1)
+LEF=$(printf '%s\n' "$LE" | sed -n 's/^OK //p' | head -n 1)
+ok "$(printf '%s\n' "$LE" | head -n 1 | cut -c1-2)" "OK" "日志导出返回落盘路径"
+ok "$([ -f "$LEF" ] && echo yes || echo no)" "yes" "导出的文件真的在"
+ok "$(grep -c 'daemon-line' "$LEF")" "1" "导出内容含守护日志"
+ok "$(grep -c 'sleep-line' "$LEF")" "1" "导出内容含深睡日志"
 
 echo "== 全部恢复默认 =="
 mkdir -p "$PK/scripts"
@@ -1317,6 +1324,36 @@ rm -f ds_state
 ok "$(DSA ds_white_del com.example.sleep | head -n 1)" "OK com.example.sleep" "移除豁免"
 ok "$(DSA ds_white_del com.example.sleep | head -n 1)" "MISS com.example.sleep" "重复移除报 MISS"
 ok "$(DSA ds_get | grep -c '^white=')" "0" "移除后名单为空"
+
+echo "== 芯片推荐预设 =="
+# 没有 adapt 目录时页面要显示"无"，apply 必须拒绝而不是写一堆空值。
+ok "$(A preset_get | sed -n 's/^none=//p')" "1" "无预设时 preset_get 返回 none=1"
+reject preset_apply
+# 造一份假预设 + 假 getprop，验证匹配、读取、应用都走同一条路。
+mkdir -p "$TMP/adapt" "$TMP/stub2"
+printf '#!/bin/sh\n[ "$1" = ro.soc.model ] && echo MT6991\n' > "$TMP/stub2/getprop"
+chmod +x "$TMP/stub2/getprop"
+cat > "$TMP/adapt/mt6991.conf" <<'EOF'
+# 天玑 9400 测试预设
+#match soc=MT6991
+default_cpu_pct_big=80
+default_cpu_pct_mid=67
+default_cpu_pct_little=75
+default_gpu_pct=35
+default_th_high=75
+default_th_low=68
+default_psi_gain=10
+EOF
+P() { PATH="$TMP/stub2:$ORIG_PATH" sh webroot/api.sh "$@"; }
+ok "$(P preset_get | sed -n 's/^none=//p')" "0" "命中 SoC 时 none=0"
+ok "$(P preset_get | sed -n 's/^big=//p')" "80" "preset_get 带出 BIG"
+ok "$(P preset_get | grep -c '^mid=67$')" "1" "preset_get 带出 MID"
+ok "$(P preset_get | sed -n 's/^title=//p')" "天玑 9400 测试预设" "preset_get 带出标题"
+ok "$(P preset_apply | head -1)" "OK 7" "preset_apply 写入 7 个键（没有 MID2 就不传）"
+ok "$(grep '^CPU_PCT_BIG=' socfreq.conf)" "CPU_PCT_BIG=80" "预设 BIG 已落盘"
+ok "$(grep '^CPU_PCT_MID=' socfreq.conf)" "CPU_PCT_MID=67" "预设 MID 已落盘"
+ok "$(grep '^GPU_PCT=' socfreq.conf)" "GPU_PCT=35" "预设 GPU 已落盘"
+rm -rf "$TMP/adapt" "$TMP/stub2"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "全部通过 ($pass)"; else echo "$fail 项失败 / $pass 项通过"; fi

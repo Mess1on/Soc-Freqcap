@@ -21,7 +21,7 @@ static int sf_fails, sf_passes;
 
 /* 只关心 CPU 段的旧用例走这个窄口，双值用例直接调 mode_lookup。 */
 static int mode_lookup_cpu(const char *pkg, int *out) {
-  return mode_lookup(pkg, out, NULL);
+  return mode_lookup(pkg, out, NULL, NULL, NULL);
 }
 
 /* detail 传 NULL 表示没有额外上下文，失败时只报断言名 */
@@ -214,6 +214,24 @@ int sf_test_main(void) {
   sf_expect_pkg("下划线与数字包名",
                 "  mCurrentFocus=Window{a1b2c3 u0 com.garena.game_2024/com.garena.game_2024.A}",
                 "com.garena.game_2024");
+
+  /* 有些 ROM 的窗口行带 app id：u0a123，不认这段会让游戏态永远不触发 */
+  sf_expect_pkg("用户号带 app id（u0a123）",
+                "  mCurrentFocus=Window{a1b2c3 u0a123 com.tencent.tmgp.sgamece/"
+                "com.tencent.tmgp.sgamece.Main}",
+                "com.tencent.tmgp.sgamece");
+
+  sf_expect_pkg("focus/focusedApp 都缺时退回 mResumedActivity",
+                "  mCurrentFocus=null\n"
+                "  mFocusedApp=null\n"
+                "  mResumedActivity: ActivityRecord{abc u0 com.resumed.game/"
+                "com.resumed.game.Main t123}",
+                "com.resumed.game");
+
+  sf_expect_pkg("topResumedActivity 也能兜底",
+                "  topResumedActivity=ActivityRecord{def u0a7 com.top.resumed/"
+                "com.top.resumed.Main t9}",
+                "com.top.resumed");
 
   printf("\n== 优先级与兜底 ==\n");
 
@@ -474,16 +492,23 @@ int sf_test_main(void) {
             "com.dual.bad2=70:101\n"
             "com.dual.bad3=:\n"
             "com.dual.bad4=70:40:50\n"
-            "com.dual.bad5=keep:40\n", w);
+            "com.dual.bad5=keep:40\n"
+            "com.split.both=70/50\n"
+            "com.split.gpu=70/50:40\n"
+            "com.split.bad1=70/\n"
+            "com.split.bad2=/50\n"
+            "com.split.bad3=0/50\n"
+            "com.split.bad4=70/50/60\n", w);
       fclose(w);
       g_mode_mtime = -1;
       n = load_app_modes_from(fp);
       char nb[16];
       snprintf(nb, sizeof nb, "实到 %d 条", n);
-      /* 合法条目恰好 13 条：camera / minimap / Nap / dup.one(合并成一条) /
+      /* 合法条目恰好 15 条：camera / minimap / Nap / dup.one(合并成一条) /
        * trailing / learn.one / learn.two / crlf.one / dual.both /
-       * dual.gpufollow / dual.cpufollow / keep.one / keep.upper */
-      sf_check(n == 13, "只收合法条目（注释/空行/越界/坏值/无点/带空格都跳过）", nb);
+       * dual.gpufollow / dual.cpufollow / keep.one / keep.upper /
+       * split.both / split.gpu */
+      sf_check(n == 15, "只收合法条目（注释/空行/越界/坏值/无点/带空格都跳过）", nb);
       /* 学习写回来的那条带来源标记（值后面跟 " #learn"）。截不掉就是整行被
        * 当成坏值丢弃——表现是页面上明明列着一条档位，核心上却没戴帽，
        * 这是最难查的一种静默失效。 */
@@ -520,23 +545,35 @@ int sf_test_main(void) {
       /* CPU:GPU 双值：拆两段各判各的；空段 = 那一边跟随全局（0）。 */
       {
         int gpuv = -1;
-        sf_check(mode_lookup("com.dual.both", &pct, &gpuv) && pct == 70 && gpuv == 40,
+        sf_check(mode_lookup("com.dual.both", &pct, NULL, NULL, &gpuv) && pct == 70 && gpuv == 40,
                  "70:40 拆成 CPU 70 / GPU 40", NULL);
-        sf_check(mode_lookup("com.dual.gpufollow", &pct, &gpuv)
+        sf_check(mode_lookup("com.dual.gpufollow", &pct, NULL, NULL, &gpuv)
                  && pct == 60 && gpuv == 0,
                  "60: 的 GPU 段留空 = 跟随全局", NULL);
-        sf_check(mode_lookup("com.dual.cpufollow", &pct, &gpuv)
+        sf_check(mode_lookup("com.dual.cpufollow", &pct, NULL, NULL, &gpuv)
                  && pct == 0 && gpuv == 40,
                  ":40 的 CPU 段留空 = 跟随全局，GPU 单独封", NULL);
-        sf_check(!mode_lookup("com.dual.bad1", &pct, &gpuv), "0:40 被拒", NULL);
-        sf_check(!mode_lookup("com.dual.bad2", &pct, &gpuv), "70:101 被拒", NULL);
-        sf_check(!mode_lookup("com.dual.bad3", &pct, &gpuv), "两段都空被拒", NULL);
-        sf_check(!mode_lookup("com.dual.bad4", &pct, &gpuv), "多一个冒号被拒", NULL);
-        sf_check(!mode_lookup("com.dual.bad5", &pct, &gpuv), "keep:40 被拒（keep 不带 GPU 段）", NULL);
-        sf_check(mode_lookup("com.keep.one", &pct, &gpuv) && pct == MODE_KEEP,
+        sf_check(!mode_lookup("com.dual.bad1", &pct, NULL, NULL, &gpuv), "0:40 被拒", NULL);
+        sf_check(!mode_lookup("com.dual.bad2", &pct, NULL, NULL, &gpuv), "70:101 被拒", NULL);
+        sf_check(!mode_lookup("com.dual.bad3", &pct, NULL, NULL, &gpuv), "两段都空被拒", NULL);
+        sf_check(!mode_lookup("com.dual.bad4", &pct, NULL, NULL, &gpuv), "多一个冒号被拒", NULL);
+        sf_check(!mode_lookup("com.dual.bad5", &pct, NULL, NULL, &gpuv), "keep:40 被拒（keep 不带 GPU 段）", NULL);
+        sf_check(mode_lookup("com.keep.one", &pct, NULL, NULL, &gpuv) && pct == MODE_KEEP,
                  "keep → MODE_KEEP（熄屏不交还）", NULL);
-        sf_check(mode_lookup("com.keep.upper", &pct, &gpuv) && pct == MODE_KEEP,
+        sf_check(mode_lookup("com.keep.upper", &pct, NULL, NULL, &gpuv) && pct == MODE_KEEP,
                  "KEEP 大小写都认", NULL);
+        /* big/little：只覆盖 BIG/LITTLE，pct=0 表示中间档跟随全局 */
+        int bv = -1, lv = -1;
+        sf_check(mode_lookup("com.split.both", &pct, &bv, &lv, &gpuv) &&
+                 pct == 0 && bv == 70 && lv == 50 && gpuv == 0,
+                 "70/50 拆成 BIG 70 / LITTLE 50，中间档跟随全局", NULL);
+        sf_check(mode_lookup("com.split.gpu", &pct, &bv, &lv, &gpuv) &&
+                 bv == 70 && lv == 50 && gpuv == 40,
+                 "70/50:40 再带独立 GPU 档", NULL);
+        sf_check(!mode_lookup("com.split.bad1", &pct, &bv, &lv, &gpuv), "70/ 缺小核被拒", NULL);
+        sf_check(!mode_lookup("com.split.bad2", &pct, &bv, &lv, &gpuv), "/50 缺大核被拒", NULL);
+        sf_check(!mode_lookup("com.split.bad3", &pct, &bv, &lv, &gpuv), "0/50 越界被拒", NULL);
+        sf_check(!mode_lookup("com.split.bad4", &pct, &bv, &lv, &gpuv), "70/50/60 段数过多被拒", NULL);
       }
 
       /* mtime 缓存：内容没变再读一次不能重新解析（每轮巡检都重读整个文件
@@ -545,7 +582,7 @@ int sf_test_main(void) {
        * mtime 没变，这条断言就变成"看运气"。utimensat 失败要直接报红，
        * 不能悄悄跳过：跳过的用例和没写的用例是同一回事。 */
       n = load_app_modes_from(fp);
-      sf_check(n == 13 && g_nmode == 13, "mtime 未变时走缓存、表内容不变", NULL);
+      sf_check(n == 15 && g_nmode == 15, "mtime 未变时走缓存、表内容不变", NULL);
       {
         struct stat st0;
         stat(fp, &st0);
@@ -558,7 +595,7 @@ int sf_test_main(void) {
         snprintf(ub, sizeof ub, "utimensat rc=%d", urc);
         sf_check(urc == 0, "能把 mtime 往前推（热重载断言的前提）", ub);
         n = load_app_modes_from(fp);
-        sf_check(n == 14, "文件变了就重载（热生效，不用重启守护）", NULL);
+        sf_check(n == 16, "文件变了就重载（热生效，不用重启守护）", NULL);
         sf_check(mode_lookup_cpu("com.append.two", &pct) && pct == 55, "新条目命中", NULL);
       }
       remove(fp);
@@ -800,6 +837,19 @@ int sf_test_main(void) {
     sf_check(gpu_pwr_for(754000000L) == 2 && gpu_pwr_for(1000000000L) == 2
              && gpu_pwr_for(1716000000L) == 0,
              "MTK 吸附后的频率能映射到 OPP index", NULL);
+
+    /* 禁止 boost：天玑要写"最低频那一档的索引"，不能写死 0（0 常是最高频）。 */
+    sf_check(mtk_opp_lowest_index_text(
+                 "[00] freq: 1716000, volt:  85000\n"
+                 "[01] freq: 1393000, volt:  80000\n"
+                 "[07] freq:  260000, volt:  60000\n") == 7,
+             "索引不连续时按频率找最低档（7），不是表长-1 或 0", NULL);
+    sf_check(mtk_opp_lowest_index_text(
+                 "[00] freq = 260000\n[03] freq = 1716000\n") == 0,
+             "gpufreq v1 的 freq = 写法也认；0 真是最低频时就用 0", NULL);
+    sf_check(mtk_opp_lowest_index_text("[00] freq: 1716000\n") == 0 &&
+             mtk_opp_lowest_index_text("garbage") == -1,
+             "单行表取它自己；解析不到就返回 -1，不写节点", NULL);
 
     g_gpu = save;
   }
@@ -1055,10 +1105,18 @@ int sf_test_main(void) {
     c.up_max = 15; c.down_max = 30;
     struct adapt a;
 
-    /* 1) 第一拍只立基线，绝不因为"看起来很高"就借额度 */
+    /* 1) 前两拍只立基线，绝不因为"看起来很高"就借额度 */
     memset(&a, 0, sizeof a);
     adapt_apply(&a, &c, 900, 50000, 0, 100, 5);
-    sf_check(a.psi_steps == 0 && a.base == 900, "第一拍只立基线，不借档", NULL);
+    adapt_apply(&a, &c, 900, 50000, 0, 105, 5);
+    sf_check(a.psi_steps == 0 && a.base == 900, "前两拍只立基线，不借档", NULL);
+
+    /* 1b) 开机尖峰：第一拍 0、第二拍 250，基线不能被瞬时值顶到 250 */
+    memset(&a, 0, sizeof a);
+    adapt_apply(&a, &c, 0, 50000, 0, 100, 5);
+    adapt_apply(&a, &c, 250, 50000, 0, 105, 5);
+    adapt_apply(&a, &c, 20, 50000, 0, 110, 5);
+    sf_check(a.base == 20, "预热取前两个有效样本的最小值（20），不是尖峰 250", NULL);
 
     /* 2) 静置噪声：基线很低时，绝对增量不够就不许借
           （这条防的是"只看倍数"—— 基线 5、当前 12 也是 2.4 倍） */
@@ -1109,12 +1167,90 @@ int sf_test_main(void) {
     sf_check(a.th_steps * c.th_step <= c.th_max,
              "压档总量不超过 TH_MAX（不会一路压到 1%）", NULL);
 
-    /* 6) PSI 借 + 温控压 同时发生：合计是两者相加，谁也不盖谁 */
+    /* 6) PSI 借 + 温控压 同时发生：温控优先，PSI 这一拍不借 */
     memset(&a, 0, sizeof a);
     adapt_apply(&a, &c, 60, 60000, 0, 400, 5);
     adapt_apply(&a, &c, 400, 80000, 0, 405, 5);
-    sf_check(a.psi_steps == 1 && a.th_steps == 1 && a.delta == 0,
-             "借一档 + 压一档 = 0（两条独立记账）", NULL);
+    sf_check(a.psi_steps == 0 && a.th_steps == 1 && a.delta == -5,
+             "热的时候 PSI 不借，delta = 纯温控 -5（不许抵消）", NULL);
+    for (int i = 0; i < 6; i++) adapt_apply(&a, &c, 400, 80000, 0, 410 + i * 5, 5);
+    sf_check(a.psi_steps == 0 && a.delta == -(a.th_steps * c.th_step),
+             "持续发热：PSI 始终不借，稳态等于纯温控值", NULL);
+
+    /* 6e) 借额度期间基线不再学习：持续高载 30 分钟，护栏不能被自己顶盲 */
+    memset(&a, 0, sizeof a);
+    adapt_apply(&a, &c, 60, 50000, 0, 2000, 5);
+    adapt_apply(&a, &c, 60, 50000, 0, 2005, 5);
+    for (int i = 0; i < 360; i++)
+      adapt_apply(&a, &c, 400, 50000, 0, 2010 + i * 5, 5);
+    sf_check(a.psi_steps >= 1 && a.base < 100 && a.base_frozen > 0,
+             "持续高载 30 分钟仍在借额度，基线没有涨到 stall 上去", NULL);
+    adapt_apply(&a, &c, 20, 50000, 0, 3840, 5);
+    adapt_apply(&a, &c, 20, 50000, 0, 3855, 5);
+    adapt_apply(&a, &c, 20, 50000, 0, 3860, 5);
+    sf_check(a.psi_steps == 0 && a.base_frozen == 0,
+             "借出结束后冻结计数归零，psifrz 是连续值不是累计值", NULL);
+
+    /* 6f) 整数 EMA 的量化停滞：增量不足 1 时基线也要能看到移动 */
+    memset(&a, 0, sizeof a);
+    a.base = 10;
+    adapt_apply_gated(&a, &c, 129, 50000, 0, 2100, 5, 1);
+    sf_check(a.base > 10, "stall=129 时基线从 10 出发也能上升（四舍五入）", NULL);
+
+    /* 6g) 温度传感器消失：不能把上一次热到的档位永久冻住 */
+    memset(&a, 0, sizeof a);
+    adapt_apply(&a, &c, 20, 50000, 0, 2200, 5);
+    for (int i = 0; i < 6; i++)
+      adapt_apply(&a, &c, 20, 80000, 0, 2205 + i * 5, 5);
+    sf_check(a.th_steps == 5, "先热满 5 档", NULL);
+    for (int i = 0; i < 60; i++)
+      adapt_apply(&a, &c, 20, 0, 0, 2300 + i * 5, 5);
+    sf_check(a.th_steps == 0 && a.delta == 0,
+             "温度读不到时按 TH_BACK 逐档放开，不永久压着", NULL);
+    adapt_apply(&a, &c, 400, 0, 0, 2605, 5);
+    sf_check(a.psi_steps == 1,
+             "温度读不到时温控不再挡 PSI，卡了还能借额度", NULL);
+
+    /* 6h) 无效 PSI 样本（-1 哨兵）：只冻结，不许拿 0 去洗基线 */
+    memset(&a, 0, sizeof a);
+    a.base = 60;
+    adapt_apply(&a, &c, -1, 50000, 0, 2700, 5);
+    sf_check(a.base == 60 && a.stall == 0 && a.psi_steps == 0,
+             "无效样本不改基线，stall 对外报 0", NULL);
+
+    /* 6b) 0 档语义：TH_MAX=0 / PSI_GAIN=0 必须真的不动 */
+    memset(&a, 0, sizeof a);
+    c.th_max = 0;
+    adapt_apply(&a, &c, 20, 80000, 0, 600, 5);
+    sf_check(a.th_steps == 0 && a.delta == 0, "TH_MAX=0：温度 80℃ 也不压档", NULL);
+    c.th_max = 25;
+    memset(&a, 0, sizeof a);
+    c.psi_gain = 0;
+    adapt_apply(&a, &c, 60, 50000, 0, 700, 5);
+    adapt_apply(&a, &c, 400, 50000, 0, 705, 5);
+    sf_check(a.psi_steps == 0 && a.delta == 0, "PSI_GAIN=0：再卡也不借", NULL);
+    c.psi_gain = 10;
+
+    /* 6c) GAIN/MAX 小于一档：整条环路不动，不能兜底成至少一档 */
+    memset(&a, 0, sizeof a);
+    c.psi_gain = 5; c.psi_step = 10;
+    adapt_apply(&a, &c, 60, 50000, 0, 800, 5);
+    adapt_apply(&a, &c, 400, 50000, 0, 805, 5);
+    sf_check(a.psi_steps == 0, "PSI_GAIN(5) < PSI_STEP(10)：一档都凑不齐，不借", NULL);
+    c.psi_gain = 10; c.psi_step = 5;
+    memset(&a, 0, sizeof a);
+    c.th_max = 3; c.th_step = 5;
+    adapt_apply(&a, &c, 20, 80000, 0, 900, 5);
+    sf_check(a.th_steps == 0, "TH_MAX(3) < TH_STEP(5)：一档都凑不齐，不压", NULL);
+    c.th_max = 25; c.th_step = 5;
+
+    /* 6d) 交权态清零：adapt_cancel 操作的是 adapt_tick 的全局状态 */
+    adapt_init();
+    adapt_cancel();
+    memset(&a, 0x7f, sizeof a);
+    adapt_snapshot(&a);
+    sf_check(a.psi_steps == 0 && a.th_steps == 0 && a.delta == 0 && a.lend_until == 0,
+             "adapt_cancel 把 PSI/温控/借期/delta 全部清零", NULL);
 
     /* 7) 充电态：插电才算，拔电立刻掉 */
     memset(&a, 0, sizeof a);
@@ -1133,6 +1269,7 @@ int sf_test_main(void) {
     a.base = 50; a.now = 600;
     adapt_apply_gated(&a, &c, 500, 50000, 0, 600, 5, 0);
     sf_check(a.base == 50, "allow_base=0：游戏期的高 stall 不进基线", NULL);
+    a.psi_steps = 0; a.lend_until = 0;   /* 出游戏会 adapt_cancel，档位从 0 开始 */
     adapt_apply_gated(&a, &c, 500, 50000, 0, 605, 5, 1);
     sf_check(a.base > 50, "回到常态后基线继续平滑", NULL);
     memset(&a, 0, sizeof a);

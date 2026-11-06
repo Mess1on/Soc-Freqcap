@@ -178,7 +178,9 @@ ds_start() {
         case "$PID" in ''|*[!0-9]*) ;; *) kill -9 "$PID" 2>/dev/null ;; esac
         sleep 1
       fi
-      [ -f "$LOCK" ] && rm -f "$LOCK" 2>/dev/null
+      # 只清空、不删除：删了会换 inode，旧守护若还没退干净（D 状态/kill -9 失败）
+      # 仍锁着旧文件，新守护再建同名文件就是两把锁 → 两个守护同时巡检。
+      [ -f "$LOCK" ] && : > "$LOCK" 2>/dev/null
       nohup "$DAEMON" start >/dev/null 2>&1 </dev/null &
     fi
     [ ! -f "$PAUSE" ] && ds_start
