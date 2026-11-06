@@ -2,6 +2,6 @@
   "version": "V2.1-test",
   "versionCode": 20112,
   "zipUrl": "https://pan.quark.cn/s/0720635ac9e2",
-  "changelog": "https://raw.githubusercontent.com/Mess1on/Soc-Freqcap/main/CHANGELOG.md",
+  "changelog": "https://cdn.jsdelivr.net/gh/Mess1on/Soc-Freqcap@main/CHANGELOG.md",
   "homepage": "https://github.com/Mess1on/Soc-Freqcap"
 }

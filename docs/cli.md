@@ -111,4 +111,22 @@ CPU 封顶 ±5%（四簇同步）、重启守护、暂停/恢复、停掉并还�
 `update.json` 只认 `version`、`versionCode`、`zipUrl`、`changelog` 四个字段，
 多写的会被管理器忽略，别指望用自定义字段传地址。
 
-改完推到 `main` 就生效——管理器读的是 raw 地址，不用重新发包。
+改完推到 `main`，再清一次 jsDelivr 缓存，发版才算生效：
+
+```sh
+curl "https://purge.jsdelivr.net/gh/Mess1on/Soc-Freqcap@main/update.json"
+curl "https://purge.jsdelivr.net/gh/Mess1on/Soc-Freqcap@main/CHANGELOG.md"
+```
+
+不清的话，jsDelivr 对分支引用有最长 12 小时的缓存，发完版用户还得等半天才看得到。
+
+### 为什么不用 raw.githubusercontent.com
+
+实测一加 13（ColorOS，无代理）上 `raw.githubusercontent.com` **完全不通**（HTTP 000，
+DNS 污染），而 `cdn.jsdelivr.net` 返回 200。
+
+管理器拉清单失败时**不报错**——它把「拉不到」和「没有新版」当成同一件事，界面就
+永远停在「已是最新」。作者这边看起来一切正常，用户那边什么都收不到，这个坑很难自己发现。
+
+所以 `module.prop` 的 `updateJson` 和 `update.json` 的 `changelog` 都走 jsDelivr，
+代价就是上面那个缓存要手动清。
