@@ -40,7 +40,7 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 模块**只负责报版本号，不下载、不安装**——新版统一放网盘，地址写在
 `update.json` 的 `zipUrl`，并同步置顶在 [CHANGELOG.md](CHANGELOG.md)。
 
-当前下载地址：[https://pan.quark.cn/s/0720635ac9e2](https://pan.quark.cn/s/0720635ac9e2)。
+当前下载地址：[https://pan.quark.cn/s/f8423a2f22d1](https://pan.quark.cn/s/f8423a2f22d1)。
 点管理器里的「更新」会下载失败，这是预期行为：GitHub 只放版本号，安装包在夸克网盘，
 复制上面的地址下载 zip 后再手动安装。
 
