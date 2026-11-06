@@ -32,6 +32,17 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 > 详细步骤见 [docs/troubleshooting.md](docs/troubleshooting.md)（「装不上：Installation Blocked」一节），
 > 模块内也带了修复脚本 `tools/fix_metamodule.sh`。
 
+## 更新
+
+管理器（Magisk / KernelSU / APatch）通过 `module.prop` 里的 `updateJson`
+读 [update.json](update.json)，线上 `versionCode` 更大时在模块卡片标出新版。
+
+模块**只负责报版本号，不下载、不安装**——新版统一放网盘，地址写在
+`update.json` 的 `zipUrl`，并同步置顶在 [CHANGELOG.md](CHANGELOG.md)。
+
+历史版本安装包归档在 [releases/](releases/)。发版流程见
+[docs/cli.md](docs/cli.md) 的「版本检查」一节。
+
 ## 最小运行示例
 
 ```sh
@@ -80,7 +91,7 @@ WebUI：管理器模块页 → 打开 WebUI。首页徽标显示「常态限频�
 | [深度睡眠](docs/deep-sleep.md) | Doze 时序、豁免、唤醒榜、待机耗电排查 |
 | [芯片适配包](docs/adaptation.md) | 自动探测扑空时怎么导出、修改、验证 |
 | [WebUI](docs/webui.md) | 页面、主题、发行商词典、图标边界 |
-| [命令行与音量键](docs/cli.md) | `socfreqd` 子命令、`action.sh` 按键菜单 |
+| [命令行与音量键](docs/cli.md) | `socfreqd` 子命令、`action.sh` 按键菜单、版本检查与发版流程 |
 | [排查与恢复](docs/troubleshooting.md) | 卸载残留、管理器输出、已知边界 |
 | [开发与自检](docs/development.md) | 文件清单、测试命令、从源码编译 |
 

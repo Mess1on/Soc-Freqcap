@@ -20,6 +20,8 @@ META-INF/com/google/android/* text eol=lf
 *.js   text eol=lf
 *.md   text eol=lf
 *.ps1  text eol=lf
+# update.json 是管理器直接拉去解析的那份清单，也钉成 LF
+*.json text eol=lf
 # 这份文件自己也钉上：不钉的话 git diff 每次都要多报一条 CRLF 警告，
 # 而警告一多，真正该看的那条就被淹了。
 .gitattributes text eol=lf
