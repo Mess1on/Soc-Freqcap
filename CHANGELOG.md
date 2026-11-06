@@ -1,5 +1,10 @@
 # 更新日志
 
+**下载地址（复制到浏览器打开）：https://pan.quark.cn/s/0720635ac9e2**
+
+> 点模块卡片上的「更新」会显示失败，这是正常的：GitHub 只放版本号，
+> 安装包放在夸克网盘。复制上面的地址下载 zip，再回管理器里手动安装。
+>
 > 版本号比对用 `module.prop` 里的 `versionCode`。管理器（Magisk / KernelSU / APatch）
 > 读 `module.prop` 的 `updateJson`，发现 `update.json` 里的 `versionCode` 更大，
 > 就在模块卡片上提示有新版本。

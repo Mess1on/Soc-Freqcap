@@ -3779,6 +3779,24 @@ console.log('\n== restart 不吊住调用者 ==');
      '两套规则并存：玻璃只在 data-style=glass 下生效，注释不点名其它模块');
   ok(/版本：V2\.1/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
      'README 标题行同步到 V2.1');
+  {
+    /* 管理器按 update.json 的 versionCode 提示更新，和 module.prop 漂移会
+       出现"提示了但装不上"或"明明有新版却不提示"，两边必须同源。 */
+    const up = JSON.parse(fs.readFileSync(MOD0 + '/update.json', 'utf8'));
+    const v = (mp.match(/^version=(.+)$/m) || [])[1];
+    const vc = (mp.match(/^versionCode=(\d+)$/m) || [])[1];
+    ok(!!v && up.version === v.trim() && String(up.versionCode) === vc,
+       'update.json 与 module.prop 的 version/versionCode 一致');
+    ok(/^updateJson=https:\/\//m.test(mp) &&
+       /^https:\/\//.test(up.zipUrl || '') && /^https:\/\//.test(up.changelog || ''),
+       'module.prop 带 updateJson，清单里有 zipUrl/changelog');
+    const ch = fs.readFileSync(MOD0 + '/CHANGELOG.md', 'utf8');
+    ok(new RegExp('^## ' + (up.version || '').replace(/\./g, '\\.'), 'm').test(ch),
+       'CHANGELOG 有当前版本的段落（管理器更新弹窗读它）');
+    /* 点更新必须失败：zipUrl 不能是 GitHub 直链；网盘地址要能在 changelog 里复制 */
+    ok(!/github\.com/i.test(up.zipUrl || '') && (ch || '').includes(up.zipUrl),
+       'zipUrl 指向网盘，且同一地址写在 CHANGELOG 顶部');
+  }
 }
 
 console.log('\n' + (fail === 0 ? `全部通过 (${pass})` : `${fail} 项失败 / ${pass} 项通过`));
