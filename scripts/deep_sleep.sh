@@ -314,9 +314,10 @@ ds_conf_write() {
     cat - >"$DSLEEP_CONF.tmp" <<'EOF'
 # 深度睡眠配置
 # enable=1 打开；0 关闭。关闭只停止干预，不会保留任何系统改动。
+# 新装默认开；升级用户保留原来的值，不会被安装包改掉。
 # 打开后：熄屏满 60 秒让系统进一次 Doze 深度空闲，
 # 并把 push= / 默认短信 / 正在播放的媒体临时加进 Doze 白名单。
-enable=0
+enable=1
 # 每行一条 white=包名：完全豁免，深睡时也不受 Doze 限制（等同系统的「无限制」）。
 # white=com.tencent.mm
 # nice=包名：深睡不碰它（只是保留项，不影响 Doze）。

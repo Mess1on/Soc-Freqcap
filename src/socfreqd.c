@@ -56,7 +56,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.1"
+#define SF_VERSION "2.2 Beta5"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。
@@ -114,6 +114,21 @@ struct cfg {
      smart 下 CPU_PCT_* 退化成"天花板"——状态机的目标不会超过它。 */
   int strategy;
   int grace;           /* 游戏退出宽限秒 */
+  /* 静止降频（智能模式）：亮屏轻载静置 STILL_SETTLE_S 秒后，把目标额外压到
+     天花板的 STILL_FRAC%。最忙簇占用越过 STILL_EXIT 或升到中载即解除。
+     针对刷视频/阅读这类不碰屏幕的场景——解码+渲染会把占用钉在轻载段，
+     状态机长期停在 light 档，静止观看其实用不到那个频率。 */
+  int still_drop;      /* 1 = 开 */
+  int still_frac;      /* 静止目标 = 天花板 × still_frac/100 */
+  int still_settle_s;  /* 进入需要连续静置的秒数 */
+  int still_exit;      /* 解除阈值（单拍生效），须大于轻载进档阈值 8 */
+  /* 动态封顶（「Boost 与压制」页，默认关）：一个开关 = 完整压制——
+     亮屏常态 1s 快拍两档天花板（最优解 / 风格地板）、低载静置压下限、
+     walt 拉频源中和、升频限速；交权/关闭按账本还原。 */
+  int suppress;        /* 1 = 动态封顶（1s 快拍动态天花板） */
+  int sup_style;       /* 0 = 均衡（地板 80%），1 = 省电（地板 70%、降档更快） */
+  int gov_up_us;       /* 升频限速 µs（100~50000，默认 1000） */
+  int gov_down_us;     /* 降频限速 µs（100~50000，默认 1000） */
   int pct[4];          /* big / mid2 / mid / little 封顶百分比 */
   int gpu_pct;         /* GPU 封顶百分比 */
   int gpu_min_lock;    /* 1 = 把 GPU 下限压回最低档（devfreq 一路，非关 boost） */
@@ -132,6 +147,7 @@ struct cfg {
   int boot_full_s;     /* 开机后满血秒数，0 = 关 */
   char governor[32];   /* 日常调速器，空 = 不干预 */
   int big_min;         /* 1 = 超大核压到最低频（不关闭核心） */
+  int cpu_min_lock;    /* 1 = 常态把各簇下限压到 cpuinfo_min（有节流+退避） */
   /* 实时偏移（adapt.c）。都是"百分点"，只加在生效值上，不写回配置。 */
   struct adapt_cfg ad;
 };
@@ -162,6 +178,9 @@ static int g_soff_keep;       /* 熄屏瞬间的快照应用是 pkg=keep */
 static char g_soff_pkg[PKG_LEN];
 static int g_have_lock;
 static int g_lock_fd = -1;
+
+static void cpu_min_patrol(void);
+static void cpu_min_restore(void);
 static volatile sig_atomic_t g_stop;
 
 static void load_cfg(void);
@@ -179,15 +198,21 @@ static long mono_ms(void) {
 }
 
 /* 看门狗心跳：每轮巡检写一次 mtime。service.sh 只 stat 这个文件，
- * 超过 90s 没更新才拉起；比读锁文件 pid 更能发现"活着但卡死"。 */
+ * 超过动态阈值（最大睡眠 + 60s）没更新才拉起；比读锁文件 pid 更能发现"活着但卡死"。
+ * 60 秒写一次就够看门狗判活，没必要每 5 秒闪一次元数据；状态变化仍由
+ * publish_status 每拍发布，页面不受影响。 */
+static long g_hb_at;
 static void heartbeat(void) {
+  long now = mono_sec();
+  if (g_hb_at && now - g_hb_at < 60) return;
   char tmp[256];
   snprintf(tmp, sizeof tmp, "%s.tmp", HEARTBEAT_FILE);
   FILE *f = fopen(tmp, "w");
   if (!f) return;
-  fprintf(f, "%ld\n", mono_sec());
+  fprintf(f, "%ld\n", now);
   fclose(f);
   rename(tmp, HEARTBEAT_FILE);
+  g_hb_at = now;
 }
 
 /* ------------------------------------------------------------------ */
@@ -756,6 +781,12 @@ struct policy {
      "当前值是模块自己写的，还是厂商压得更低"——后者不许盖掉。 */
   long last_cap;
   long last_got;
+  /* 上一次"写下去没生效"的目标与回读值。内核实际下限可能比
+     scaling_min_freq 读到的还高（本机 BIG_MIN 时 1,017,600 写下去
+     会被夹在 1,958,400），同一目标同一读数不再每拍重写，10 分钟后再试。 */
+  long unreach_cap;
+  long unreach_got;
+  long unreach_at;
 };
 
 static int policy_index(const char *dir) {
@@ -779,8 +810,12 @@ static long snap_from_list(const char *list, long want) {
   return best > 0 ? best : want;
 }
 
-/* 把期望值吸附到 <= 它的最高可用频点：封顶语义要求实际永远不超过意图 */
+/* 把期望值吸附到 <= 它的最高可用频点：封顶语义要求实际永远不超过意图。
+ * 100% 例外：直接写 cpuinfo_max_freq。部分内核把最高频（boost 频点）
+ * 放在 scaling_boost_frequencies 里，available 表没有它；再向下吸附会让
+ * 100% 实际变成次高频。写进去被内核夹回也没关系，回读会如实记录。 */
 static long snap_freq(const struct policy *p, long want) {
+  if (p->hw_max > 0 && want >= p->hw_max) return p->hw_max;
   char b[4096], path[224];
   snprintf(path, sizeof path, "%s/scaling_available_frequencies", p->dir);
   if (read_file(path, b, sizeof b)) return want; /* 无频点表就用原值 */
@@ -964,17 +999,18 @@ static int tier_key_of(const long *ladder, int m, long hw_max) {
  * 真正写下去的仍是 min(它, CPU_PCT_*)：滑杆在智能模式下当天花板，
  * 状态机就算判错也顶不到 100%。
  *
- * 判据只用 /proc/stat 的整机忙闲（每拍一次 open+read，约 2KB），
- * 不引入新采样。比一次 dumpsys 便宜三个数量级。
+ * 判据是 /proc/stat 的**逐簇平均占用取最大值**（每拍一次 open+read），
+ * 单核满载不会被 8 核求和稀释；不引入 dumpsys。
  *
- * 滞回：进档 8/30/60，退档 4/25/55。差 4~5 个点，避免负载在阈值附近
- * 抖动时频率跟着来回跳；换档还要连续两拍一致，再抖一层。 */
-static const int kSmartPct[4][2] = {
-  /* 大核, 其余档 */
-  { 30, 40 },   /* idle   */
-  { 45, 50 },   /* light  */
-  { 65, 60 },   /* medium */
-  { 85, 75 },   /* heavy  */
+ * 滞回：进档 8/30/60，退档 4/25/55。升档 1 拍、降档 2 拍。 */
+/* 各档占"用户天花板"的比例：重载用满，其余依次收紧。
+ * 不用绝对百分比：每台机的 CPU_PCT_* 已经被机型预设定过（8E 是 46/51，
+ * 别的机器可能 70+），写死 65/60 会在 46/51 上被天花板夹回、智能等于没开。 */
+static const int kSmartFrac[4] = {
+  45,   /* idle   */
+  65,   /* light  */
+  85,   /* medium */
+  100,  /* heavy  */
 };
 
 struct smart_state {
@@ -982,31 +1018,58 @@ struct smart_state {
   int  pending;
   int  pend_n;
   long switches;
+  int  still;          /* 静止降频生效中（只作用于 idle/light 两档） */
 };
 static struct smart_state g_sm;
 
-static long g_cpu_prev_total, g_cpu_prev_idle;
+/* 每簇平均占用里最忙的一簇。全系统 /proc/stat 是 8 核求和，
+ * 单核满载只有 12.5%，会被稀释成"轻载"；按 policy 分组后，
+ * 两颗大核里一颗满载 = 50%（中载），六颗小核里一颗满载 = 16.7%。
+ * 背景小核忙不会再把大核档位直接顶到 heavy。 */
+static int cluster_max_load(const int *sum, const int *cnt, int n) {
+  int best = -1;
+  for (int i = 0; i < n; i++) {
+    if (cnt[i] <= 0) continue;
+    int avg = sum[i] / cnt[i];
+    if (avg > best) best = avg;
+  }
+  return best;
+}
 
-/* 整机 CPU 忙闲百分比。读不到 / 计数器回退（热插拔、重启）返回 -1。 */
+static long g_cpu_prev_total[MAX_CORES], g_cpu_prev_idle[MAX_CORES];
+static int g_cpu_prev_ok;
+
+/* 采样一次；返回最忙簇的平均占用百分比。
+ * 计数器回退/首次采样返回 -1，调用处保持当前档位。 */
 static int cpu_busy_pct(void) {
-  FILE *f = fopen("/proc/stat", "r");
-  if (!f) return -1;
-  char line[256];
-  int ok = fgets(line, sizeof line, f) != NULL;
-  fclose(f);
-  if (!ok || strncmp(line, "cpu ", 4)) return -1;
-  long v[8] = {0};
-  int k = sscanf(line + 4, "%ld %ld %ld %ld %ld %ld %ld %ld",
-                 &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
-  if (k < 4) return -1;
-  long total = 0;
-  for (int i = 0; i < k; i++) total += v[i];
-  long idle = v[3] + (k > 4 ? v[4] : 0);
-  long dt = total - g_cpu_prev_total, di = idle - g_cpu_prev_idle;
-  g_cpu_prev_total = total;
-  g_cpu_prev_idle = idle;
-  if (dt <= 0 || di < 0 || di > dt) return -1;
-  return (int)((dt - di) * 100 / dt);
+  long total[MAX_CORES], idle[MAX_CORES];
+  memset(total, 0, sizeof total);
+  memset(idle, 0, sizeof idle);
+  if (!core_stat_read(total, idle)) return -1;
+  if (!g_cpu_prev_ok) {
+    memcpy(g_cpu_prev_total, total, sizeof total);
+    memcpy(g_cpu_prev_idle, idle, sizeof idle);
+    g_cpu_prev_ok = 1;
+    return -1;
+  }
+  int sum[MAX_CORES] = {0}, cnt[MAX_CORES] = {0};
+  for (int c = 0; c < MAX_CORES; c++) {
+    if (total[c] <= 0) continue;
+    int pol = core_policy_of(c);
+    if (pol < 0 || pol >= MAX_CORES) continue;
+    /* 计数器没动 = 这颗核 offline/没 tick，不能当成"0% 占用"拉低簇均值 */
+    if (total[c] <= g_cpu_prev_total[c]) {
+      g_cpu_prev_total[c] = total[c];
+      g_cpu_prev_idle[c] = idle[c];
+      continue;
+    }
+    sum[pol] += core_load_pct(total[c], idle[c],
+                              g_cpu_prev_total[c], g_cpu_prev_idle[c]);
+    cnt[pol]++;
+    g_cpu_prev_total[c] = total[c];
+    g_cpu_prev_idle[c] = idle[c];
+  }
+  return cluster_max_load(sum, cnt, MAX_CORES);
 }
 
 /* 纯函数：busy% + 当前档 → 目标档。单测直接喂数。 */
@@ -1024,28 +1087,107 @@ static int smart_target(int cur, int busy) {
   return want;
 }
 
-/* 这一档、这个 tier 的目标百分比（已按用户设的天花板夹过）。 */
-static int smart_pct(int tierkey) {
-  int v = kSmartPct[g_sm.state][tierkey == 0 ? 0 : 1];
-  int ceil = cfg.pct[tierkey];
-  if (ceil >= 1 && ceil <= 100 && v > ceil) v = ceil;
+/* 这一档、这个 tier 的目标百分比（已按用户设的天花板夹过）。
+ * 每个 tier 用**自己**的 CPU_PCT_*：m=3/4 机型的 MID/MID2/LITTLE
+ * 不会再共用同一个固定值。 */
+static int smart_pct_of(int state, int ceil) {
+  if (state < 0 || state > 3) state = 0;
+  if (ceil < 1) ceil = 1;
+  if (ceil > 100) ceil = 100;
+  int v = ceil * kSmartFrac[state] / 100;
   return v < 1 ? 1 : v;
 }
 
-/* 每拍推进一次。返回 1 = 档位变了，调用处要重算封顶。 */
+/* 静止降频的目标：天花板 × frac%（与 smart_pct_of 同一套取整口径）。
+ * 纯函数，单测直接喂数。 */
+static int smart_still_pct(int ceil, int frac) {
+  if (ceil < 1) ceil = 1;
+  if (ceil > 100) ceil = 100;
+  if (frac < 1) frac = 1;
+  if (frac > 100) frac = 100;
+  int v = ceil * frac / 100;
+  return v < 1 ? 1 : v;
+}
+
+/* 纯函数：静止的进/保持占用段。占用要落在 [8, exit) 且档位不高于轻载。
+ * exit 必须大于轻载进档阈值 8，否则这一段永远为空、静止永远不进。 */
+static int still_in_band(int busy, int exit_pct, int state) {
+  return busy >= 8 && busy < exit_pct && state <= 1;
+}
+
+static int smart_pct(int tierkey) {
+  int v = smart_pct_of(g_sm.state, cfg.pct[tierkey]);
+  /* 静止降频只在 idle/light 两档往下压：中载/重载是真实负载，不碰。
+     取 min，温控/电量收紧照常叠在更小的一边。 */
+  if (g_sm.still && g_sm.state <= 1) {
+    int s = smart_still_pct(cfg.pct[tierkey], cfg.still_frac);
+    if (s < v) v = s;
+  }
+  return v;
+}
+
+/* 静止降频的时点状态：最忙簇落进轻载段的起点时刻；0 = 不在段内。 */
+static long g_still_light_since;
+
+/* 每拍推进一次静止状态。返回 1 = 标志翻转，调用处要重算封顶。
+ * 进入靠时长（亮屏轻载静置 STILL_SETTLE_S 秒），解除靠单拍
+ * （占用越过 STILL_EXIT——手指一动就会——或升到中载/退出常态）。
+ * 解除快、进入慢，两把尺子不重叠，不会在阈值附近抖。 */
+static int still_tick(int busy) {
+  long now_s = mono_sec();
+  if (!cfg.still_drop || busy < 0 || strcmp(g_state, "normal") != 0) {
+    g_still_light_since = 0;
+    if (g_sm.still) { g_sm.still = 0; return 1; }
+    return 0;
+  }
+  if (!still_in_band(busy, cfg.still_exit, g_sm.state)) {
+    g_still_light_since = 0;
+    if (g_sm.still) {
+      g_sm.still = 0;
+      /* 占用跌破 8 掉进空闲段时不打日志：空闲档(×45%)本来就比静止更低，
+         这里是"换了个更省的状态"，不是用户唤醒。 */
+      if (busy >= cfg.still_exit)
+        log("静止解除：占用 %d%% ≥ %d%%", busy, cfg.still_exit);
+      return 1;
+    }
+    return 0;
+  }
+  if (!g_still_light_since) {
+    g_still_light_since = now_s ? now_s : 1;
+    return 0;
+  }
+  if (g_sm.still || now_s - g_still_light_since < cfg.still_settle_s) return 0;
+  g_sm.still = 1;
+  log("静止降频：轻载静置 %d s，目标压到天花板 ×%d%%（占用 %d%% 越过 %d%% 解除）",
+      cfg.still_settle_s, cfg.still_frac, busy, cfg.still_exit);
+  return 1;
+}
+
+/* 每拍推进一次。返回 1 = 档位或静止标志变了，调用处要重算封顶。 */
 static int smart_tick(void) {
   int busy = cpu_busy_pct();
   int want = smart_target(g_sm.state, busy);
-  if (want == g_sm.state) { g_sm.pending = want; g_sm.pend_n = 0; return 0; }
-  if (want == g_sm.pending) g_sm.pend_n++;
-  else { g_sm.pending = want; g_sm.pend_n = 1; }
-  if (g_sm.pend_n < 2) return 0;        /* 连续两拍才换 */
-  g_sm.state = want;
-  g_sm.pend_n = 0;
-  g_sm.switches++;
-  log("智能模式：负载 %d%% → 档位 %d（大核 %d%% / 其余 %d%%）", busy, want,
-      smart_pct(0), smart_pct(3));
-  return 1;
+  int changed = 0;
+  if (want == g_sm.state) { g_sm.pending = want; g_sm.pend_n = 0; }
+  else {
+    if (want == g_sm.pending) g_sm.pend_n++;
+    else { g_sm.pending = want; g_sm.pend_n = 1; }
+    /* 升档 1 拍（5s）就切，降档仍要 2 拍（10s）：
+       突发负载不用等 10s 才拿到高频，档位才敢定得比 cap 低。 */
+    int need = want > g_sm.state ? 1 : 2;
+    if (g_sm.pend_n >= need) {
+      g_sm.state = want;
+      g_sm.pend_n = 0;
+      g_sm.switches++;
+      changed = 1;
+    }
+  }
+  /* 静止标志先推进再打日志：换档那一行里的目标要带上静止钳制。 */
+  int still_changed = still_tick(busy);
+  if (changed)
+    log("智能模式：负载 %d%% → 档位 %d（大核 %d%% / 其余 %d%%）", busy,
+        g_sm.state, smart_pct(0), smart_pct(3));
+  return changed || still_changed;
 }
 
 /* 按簇阶梯分档：最高档 big，次高 mid2，中间 mid，最低 little */
@@ -1053,11 +1195,22 @@ static int smart_tick(void) {
  * 充电态是"抬地板"：插着电发热由充电器承担，没必要压着；
  * 但它只作用于全局分档 —— 用户给某个应用单独设的档位是他的明确选择，
  * 插电不该替他改掉。温控和 PSI 叠在地板之上，所以热的时候插着电照样降。 */
+/* 生效偏移。智能模式自己按负载调目标，不再叠 PSI 的向上借额度：
+ * PSI 会把 45% 的轻载档临时顶到 55%，等于把智能刚省下的又还回去。
+ * 温控/电量收紧仍然保留（它们的方向是保护，不是放宽）。 */
+static int effective_delta(const struct adapt *a) {
+  if (cfg.strategy != 1) return a->delta;
+  int d = -(a->th_steps * cfg.ad.th_step) - a->batt_cut;
+  if (d > cfg.ad.up_max) d = cfg.ad.up_max;
+  if (d < -cfg.ad.down_max) d = -cfg.ad.down_max;
+  return d;
+}
+
 static int eff_pct(int base, int per_app) {
   struct adapt a;
   adapt_snapshot(&a);
   /* 电量阶梯也属于"全局让路"，不盖用户给某个应用明确设的档位。 */
-  int d = a.delta;
+  int d = effective_delta(&a);
   if (per_app) d += a.batt_cut;
   /* 充电地板只抬"放宽侧"：本拍有收紧（温控/电量）时不抬。
      否则 65% 设定插电变 100%，温控 -25 只落到 75%，比不插电的 40% 松 35 个点，
@@ -1606,6 +1759,75 @@ static void boost_off_restore(void) {
   boost_restore_path(MTK_BOOST_NODE);
 }
 
+/* ── CPU Boost 中和（walt 输入/调度拉频源）─────────────────────────
+ * 触摸瞬间 walt 的 input_boost 会把 CPU 频率顶上去，是日常频率蹿升的
+ * 大源之一；GPU 侧的 boost 源早已由 GPU_BOOST_OFF 处理，这里是 CPU 侧。
+ * 节点存在才写 0（高通 walt；其他 SoC 没有这些节点就自然跳过），
+ * 值记进账本，交权/关闭/卸载时按账本还原。写入一次不对抗：
+ * powerhal 之后若再抬属于厂商决策，重写只会变成拉锯。 */
+static const char *g_cpu_boost_nodes[] = {
+    /* 内核把 input_boost 收进子目录（一加 13 / ColorOS 16 实测），
+       文件保留全名：input_boost_ms = 100（每次触摸拉频 100ms，日常
+       频率蹿升的大源）。ms 归零后 freq 表不起作用，不动它（避免把
+       多值表写坏）。 */
+    "/proc/sys/walt/input_boost/input_boost_ms",
+    /* 其他内核的平铺布局： */
+    "/proc/sys/walt/input_boost_ms",
+    "/proc/sys/walt/sched_per_task_boost",
+    "/proc/sys/walt/sched_boost",
+};
+
+static long g_boost_log_at = -600;
+
+static void suppress_boost_apply(void) {
+  int n = 0;
+  for (size_t i = 0; i < sizeof g_cpu_boost_nodes / sizeof *g_cpu_boost_nodes; i++) {
+    const char *p = g_cpu_boost_nodes[i];
+    if (access(p, F_OK)) continue;
+    if (read_num(p) == 0) continue;
+    if (!write_journaled(NODES_JOURNAL, p, 0)) n++;
+  }
+  if (n) {
+    long now = mono_sec();
+    if (now - g_boost_log_at >= 600) {
+      g_boost_log_at = now;
+      log("CPU Boost 已中和（%d 个 walt 节点）", n);
+    }
+  }
+}
+
+static void suppress_boost_restore(void) {
+  for (size_t i = 0; i < sizeof g_cpu_boost_nodes / sizeof *g_cpu_boost_nodes; i++)
+    boost_restore_path(g_cpu_boost_nodes[i]);
+}
+
+/* 任务组的 uclamp.min：把前台/系统的"最低性能请求"压到 0。
+ * 这不是频率上限，而是调度器选频时的下限；和只压 max_freq 是两件事。
+ * 节点不存在（cgroup v2 / 厂商换了布局）就跳过，不猜路径。 */
+static const char *g_sup_uclamp_nodes[] = {
+    "/dev/cpuctl/top-app/cpu.uclamp.min",
+    "/dev/cpuctl/system/cpu.uclamp.min",
+    "/dev/cpuctl/cpu/cpu.uclamp.min",
+    "/dev/cpuctl/foreground/cpu.uclamp.min",
+    "/dev/cpuctl/background/cpu.uclamp.min",
+};
+
+static void suppress_uclamp_apply(void) {
+  int n = 0;
+  for (size_t i = 0; i < sizeof g_sup_uclamp_nodes / sizeof *g_sup_uclamp_nodes; i++) {
+    const char *p = g_sup_uclamp_nodes[i];
+    if (access(p, F_OK)) continue;
+    if (read_num(p) == 0) continue;
+    if (!write_journaled(NODES_JOURNAL, p, 0)) n++;
+  }
+  if (n) log("调度下限已压低（%d 个 uclamp 节点）", n);
+}
+
+static void suppress_uclamp_restore(void) {
+  for (size_t i = 0; i < sizeof g_sup_uclamp_nodes / sizeof *g_sup_uclamp_nodes; i++)
+    boost_restore_path(g_sup_uclamp_nodes[i]);
+}
+
 /* ------------------------------------------------------------------ */
 /* 调速器                                                             */
 /* ------------------------------------------------------------------ */
@@ -1617,6 +1839,180 @@ static int g_npol;
  * 手里夺走，和"游戏态把权限交还系统"冲突。 */
 static int is_vendor_gov(const char *g) {
   return !strncmp(g, "hmbird", 6) || !strncmp(g, "scx", 3);
+}
+
+/* ── 升频限速（调度器通用调参）────────────────────────────────────
+ * 把每个 policy 调速器的 up/down_rate_limit_us 统一到 1000µs：升频
+ * 每 ms 至多一次，削平触摸/渲染突发造成的频率尖峰；降频同样 1ms，
+ * 负载掉下去立刻回落。walt / interactive / schedutil（含 MTK
+ * sugov_ext）都有这对节点，路径按各 policy 实际调速器名拼
+ * （<policy>/<gov>/<param>，个别内核放在 policy 根下，两处都试）。
+ * 厂商自有调速器（hmbird/scx）不碰。值记进账本，交权/关闭/卸载还原。 */
+static int gov_param_path(int i, const char *param, char *out, size_t cap) {
+  char gov[32] = {0};
+  char gp[256];
+  snprintf(gp, sizeof gp, "%s/scaling_governor", g_pol[i].dir);
+  if (!read_file(gp, gov, sizeof gov)) return 0;
+  trim(gov);
+  if (!gov[0] || is_vendor_gov(gov)) return 0;
+  snprintf(out, cap, "%s/%s/%s", g_pol[i].dir, gov, param);
+  if (!access(out, F_OK)) return 1;
+  snprintf(out, cap, "%s/%s", g_pol[i].dir, param);
+  return !access(out, F_OK);
+}
+
+static void suppress_smooth_apply(void) {
+  int n = 0;
+  for (int i = 0; i < g_npol; i++) {
+    char path[320];
+    static const char *const params[] = { "up_rate_limit_us", "down_rate_limit_us" };
+    for (size_t k = 0; k < sizeof params / sizeof *params; k++) {
+      if (!gov_param_path(i, params[k], path, sizeof path)) continue;
+      long want = k == 0 ? cfg.gov_up_us : cfg.gov_down_us;
+      if (read_num(path) == want) continue;   /* 已是目标值：不重复写 */
+      if (!write_journaled(NODES_JOURNAL, path, want)) n++;
+    }
+  }
+  if (n) log("升频限速已应用（%d 个节点 → %d/%dµs）", n, cfg.gov_up_us, cfg.gov_down_us);
+}
+
+static void suppress_smooth_restore(void) {
+  for (int i = 0; i < g_npol; i++) {
+    char path[320];
+    static const char *const params[] = { "up_rate_limit_us", "down_rate_limit_us" };
+    for (size_t k = 0; k < sizeof params / sizeof *params; k++) {
+      if (!gov_param_path(i, params[k], path, sizeof path)) continue;
+      boost_restore_path(path);
+    }
+  }
+}
+
+/* ── 逐芯片调速器工作点参数（gov_<tier>_<节点名>=数字）────────────
+ * 数据在 adapt/<soc>.conf：**有 gov_ 行的芯片才调节**，没有就完全不
+ * 碰这一层（参数错了是负优化，宁缺毋滥）。参数名 = 调速器 tunables
+ * 的节点名（walt: hispeed_freq / adaptive_low_freq / hispeed_load /
+ * up_down_rate_limit_us…），值必须是纯数字；target_loads 这类带空格
+ * 的表暂不支持（journal 是数值型）。应用：<policy>/<调速器>/<节点>
+ * （个别内核放 policy 根下也兜底），厂商自有调速器（hmbird/scx）
+ * 不碰。值记进账本，交权/关闭还原。
+ * 种子：sm8750 的 hispeed 两行是真机运行实测——walt 的 hispeed 是
+ * "负载冲过 hispeed_load 时直接落到的频点"，本机官方默认 0（关闭），
+ * 压到 1689600/960000 = 突发先落到高效频点、配合升频限速削掉冲顶。
+ * 是否长期最优需 A/B。 */
+#define GOV_TIER_N     4
+#define GOV_KV_MAX     12
+#define GOV_PARAM_MAX  48
+struct gov_kv { char param[GOV_PARAM_MAX]; long val; };
+static struct gov_kv g_govkv[GOV_TIER_N][GOV_KV_MAX];
+static int g_govkn[GOV_TIER_N];
+static int g_gov_have;
+static char g_gov_applied[24][128];
+static int  g_gov_applied_n;
+
+/* 纯函数：解析一行 gov_<tier>_<param>=<数字>。
+ * 返回 1 成功；0 = 不是 gov 行 / tier 不认识 / 参数名非法 / 值非纯数字。 */
+static int gov_parse_line(const char *line, int *tier, char *param,
+                          size_t pn, long *val) {
+  static const char *const tiers[GOV_TIER_N] = { "big", "mid2", "mid", "little" };
+  if (!line || strncmp(line, "gov_", 4)) return 0;
+  const char *rest = line + 4;
+  for (int t = 0; t < GOV_TIER_N; t++) {
+    size_t tl = strlen(tiers[t]);
+    if (strncmp(rest, tiers[t], tl) || rest[tl] != '_') continue;
+    const char *p = rest + tl + 1;
+    const char *eq = strchr(p, '=');
+    if (!eq || eq == p) return 0;
+    size_t pl = (size_t)(eq - p);
+    if (pl >= pn) return 0;
+    for (size_t c = 0; c < pl; c++)
+      if (!isalnum((unsigned char)p[c]) && p[c] != '_') return 0;
+    const char *v = eq + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    if (!isdigit((unsigned char)*v)) return 0;
+    char num[24]; size_t ni = 0;
+    while (isdigit((unsigned char)v[ni]) && ni < sizeof num - 1) ni++;
+    /* 值必须是纯数字：85:1344000 这类 target_loads 表不能被截成 85 写进节点。 */
+    while (v[ni] == ' ' || v[ni] == '\t' || v[ni] == '\r' || v[ni] == '\n') ni++;
+    if (v[ni] != 0) return 0;
+    char tmp[24];
+    memcpy(tmp, v, ni); tmp[ni] = 0;
+    memcpy(param, p, pl); param[pl] = 0;
+    *val = strtol(tmp, NULL, 10);
+    *tier = t;
+    return 1;
+  }
+  return 0;
+}
+
+/* 从 adapt/<小写soc>.conf 读 gov_ 行。文件不存在 = 该芯片没数据。 */
+static void suppress_gov_load(void) {
+  char soc[64], path[256];
+  read_soc_name(soc, sizeof soc);
+  for (char *c = soc; *c; c++) *c = (char)tolower((unsigned char)*c);
+  snprintf(path, sizeof path, SF_MODDIR "/adapt/%s.conf", soc);
+  FILE *f = fopen(path, "r");
+  if (!f) {
+    log("调速器工作点：%s 无适配数据，不调节", soc);
+    return;
+  }
+  char line[512];
+  while (fgets(line, sizeof line, f)) {
+    char *h = strchr(line, '#');
+    if (h) *h = 0;
+    int tier; char param[GOV_PARAM_MAX]; long val;
+    if (!gov_parse_line(line, &tier, param, sizeof param, &val)) continue;
+    int dup = 0;
+    for (int k = 0; k < g_govkn[tier]; k++)
+      if (!strcmp(g_govkv[tier][k].param, param)) dup = 1;
+    if (dup || g_govkn[tier] >= GOV_KV_MAX) continue;
+    snprintf(g_govkv[tier][g_govkn[tier]].param, GOV_PARAM_MAX, "%s", param);
+    g_govkv[tier][g_govkn[tier]].val = val;
+    g_govkn[tier]++;
+    g_gov_have = 1;
+  }
+  fclose(f);
+  if (g_gov_have) {
+    int total = 0;
+    for (int t = 0; t < GOV_TIER_N; t++) total += g_govkn[t];
+    log("调速器工作点：%s 适配含 %d 组参数（随动态封顶生效）", soc, total);
+  }
+}
+
+static void suppress_gov_apply(void) {
+  if (!cfg.suppress || !g_gov_have) return;
+  int n = 0;
+  for (int i = 0; i < g_npol; i++) {
+    if (g_pol[i].tier < 0 || g_pol[i].tier >= GOV_TIER_N) continue;
+    char gov[32] = {0};
+    char gp[256];
+    snprintf(gp, sizeof gp, "%s/scaling_governor", g_pol[i].dir);
+    if (!read_file(gp, gov, sizeof gov)) continue;
+    trim(gov);
+    if (!gov[0] || is_vendor_gov(gov)) continue;
+    for (int k = 0; k < g_govkn[g_pol[i].tier]; k++) {
+      char path[320];
+      const char *param = g_govkv[g_pol[i].tier][k].param;
+      long val = g_govkv[g_pol[i].tier][k].val;
+      snprintf(path, sizeof path, "%s/%s/%s", g_pol[i].dir, gov, param);
+      if (access(path, F_OK))
+        snprintf(path, sizeof path, "%s/%s", g_pol[i].dir, param);
+      if (access(path, F_OK)) continue;       /* 该内核没有此节点：跳过 */
+      if (read_num(path) == val) continue;    /* 已是目标值 */
+      if (!write_journaled(NODES_JOURNAL, path, val)) {
+        n++;
+        if (g_gov_applied_n < 24) {
+          snprintf(g_gov_applied[g_gov_applied_n], 128, "%s", path);
+          g_gov_applied_n++;
+        }
+      }
+    }
+  }
+  if (n) log("调速器工作点已应用（%d 个节点）", n);
+}
+
+static void suppress_gov_restore(void) {
+  for (int i = 0; i < g_gov_applied_n; i++) boost_restore_path(g_gov_applied[i]);
+  g_gov_applied_n = 0;
 }
 
 /* 荣耀/华为/三星的 cpufreq 只认自家调度策略：把 scaling_governor 切成
@@ -1888,7 +2284,7 @@ static int foreground_pkg(char *out) {
  * 但它只在前台**换人**时才需要重跑：先在 /dev/cpuset/top-app/cgroup.procs
  * 上读一次 PID 集合（一次 open，几微秒），集合没变就沿用上一拍的包名。
  *
- * 为什么不用"固定 TTL 缓存"（powerd 用的 2 秒那种）：那是给一个循环里
+ * 为什么不用"固定 TTL 缓存"：那是给一个循环里
  * 多个调用点共用一次探测设计的；这里每拍只探一次，TTL 短于巡检周期时
  * 等于没缓存。集合变化才是真正的"可能换前台"信号，而且延迟仍是一拍，
  * 游戏解锁不受影响。
@@ -2008,9 +2404,10 @@ static int is_game(const char *pkg) {
  * 熄屏策略见 SCREEN_POLICY；keep 只影响熄屏，不影响亮屏时的全局分档。 */
 #define MODE_FULL (-1)
 #define MODE_KEEP (-2)
+#define MODE_SOFF (-3)   /* 熄屏时交还，亮屏仍按全局 */
 struct app_mode {
   char pkg[PKG_LEN];
-  int pct;    /* MODE_FULL / MODE_KEEP / 0（CPU 跟随全局）或 1..100 */
+  int pct;    /* MODE_FULL / MODE_KEEP / MODE_SOFF / 0（CPU 跟随全局）或 1..100 */
   int big;    /* 0 = 跟随 pct/全局；否则 BIG 簇 1..100 */
   int little; /* 0 = 跟随 pct/全局；否则 LITTLE 簇 1..100 */
   int gpu;    /* 0 = GPU 跟随全局，否则 1..100 */
@@ -2087,6 +2484,9 @@ static int load_app_modes_from(const char *path) {
     } else if (!strcmp(val, "keep") || !strcmp(val, "KEEP")) {
       if (gpu_part) continue;
       pct = MODE_KEEP;      /* 只影响熄屏；亮屏仍按全局分档 */
+    } else if (!strcmp(val, "soff") || !strcmp(val, "SOFF")) {
+      if (gpu_part) continue;
+      pct = MODE_SOFF;      /* 熄屏时交还系统；亮屏仍按全局分档 */
     } else if (val[strspn(val, "0123456789")]) {
       continue;             /* 非纯数字 */
     } else {
@@ -2232,6 +2632,227 @@ static void gpu_patrol(void) {
   if (got > t) write_gpu(t, 0);
   g_gpu.active = t;
   gpu_min_to_floor();
+}
+
+/* ── 动态封顶（贴顶驱动的三档天花板）──────────────────────────────
+ * 亮屏常态把长睡切成 1s 快拍，天花板分三档：用户最优解、风格中间档、
+ * 风格地板。无贴顶且占用低，先降到中间档，再连续低载才降到地板；
+ * 调度器顶着当前档要更高（cur_freq 贴顶）时，先放一档而不是直接回满，
+ * 仍贴顶下一拍才回最优解——避免"地板→满频→地板"来回平均偏高。
+ * 升档不看占用率——cap 压低会推高占用率，拿它判需求会自激振荡。
+ * 到地板且无贴顶持续 5 拍，把各簇下限压到硬件最低（记账，贴顶立即
+ * 还原）。进游戏/满血/熄屏自动暂停，暂停点调 sup_exit()/sup_cancel()
+ * 把天花板与下限交还；压制写入会同步 last_cap/last_got，既有 force
+ * 路径能无缝接管。系统调度器自己的升频仍由它决定，这里只收紧
+ * "允许蹿到的上限"。 */
+#define SUP_FALL       20    /* busy<20 且无贴顶：计入降档 */
+#define SUP_MIN_TICKS  5     /* 到地板且无贴顶，连续这么多拍才压下限 */
+/* 风格参数（SUP_STYLE）：均衡 = 地板 80%、中间 90%；省电 = 地板 70%、
+ * 中间 85%。低载先到中间，再连续低载到地板；贴顶先回中间，仍贴顶才回满。 */
+static int sup_floor(void)      { return cfg.sup_style ? 70 : 80; }
+static int sup_mid(void)        { return cfg.sup_style ? 85 : 90; }
+static int sup_fall_ticks(void) { return cfg.sup_style ? 2 : 3; }
+
+#define SUP_OPT    0
+#define SUP_MID_LV 1
+#define SUP_FLOOR_LV 2
+static int g_sup_level;     /* 0=最优解，1=风格中间档，2=风格地板 */
+static int g_sup_fall_n;    /* 连续低载计数 */
+static int g_sup_up_n;      /* 连续贴顶计数：2 拍才放一档，滤掉滑动抖动 */
+static int g_sup_min_n;     /* 到底后连续空闲计数 */
+static int g_sup_min_on;    /* 下限已压 */
+static int g_sup_chg_pause; /* 插电暂停中（插电不封顶策略） */
+static long g_sup_reapply_at; /* 上次补写 boost/uclamp 的时刻 */
+/* 内核钳制记忆：写 max 被夹回（目标低于该簇实际下限）时记住回读值，
+ * 600s 内不再对更低的目标做无效写入——否则会变成每秒一次的空转刷写。 */
+static long g_sup_stuck[MAX_POLICY];
+static long g_sup_stuck_at[MAX_POLICY];
+
+static int g_sup_prime_min = -1;
+/* 只对最高频簇是“超大核”、日用不需要它的两颗 SoC 开放；其他芯片保持
+ * 统一的百分比阶梯，不拿别家的拓扑假设硬套。 */
+static int sup_prime_min_enabled(void) {
+  if (g_sup_prime_min < 0) {
+    char soc[64] = "";
+    read_soc_name(soc, sizeof soc);
+    g_sup_prime_min = !strncasecmp(soc, "SM8750", 6) ||
+                      !strncasecmp(soc, "SM8850", 6);
+  }
+  return g_sup_prime_min;
+}
+
+static int sup_pct(void) {
+  if (g_sup_level == SUP_FLOOR_LV) return sup_floor();
+  if (g_sup_level == SUP_MID_LV) return sup_mid();
+  return 100;
+}
+
+static long sup_cap_for(const struct policy *p) {
+  if (g_sup_level <= SUP_OPT) return p->cap;
+  /* 这两颗 SoC 的日用场景里，超大核通常不是瓶颈：动态压制时直接把
+     最高频簇放到硬件最低，大核仍按阶梯收；其他芯片不做这个假设。 */
+  if (sup_prime_min_enabled() && (p->tier & 3) == 0 && p->hw_min > 0)
+    return snap_freq(p, p->hw_min);
+  return snap_freq(p, p->cap * sup_pct() / 100);
+}
+
+/* 下限压放（记账）。on=0 时只还原本策略压过的，不动系统后来的改写。 */
+static void sup_min_clamp(int on) {
+  for (int i = 0; i < g_npol; i++) {
+    if (g_pol[i].hw_min <= 0) continue;
+    char path[256];
+    snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
+    if (on) {
+      long cur = read_num(path);
+      if (cur <= 0 || cur <= g_pol[i].hw_min) continue;
+      if (!write_journaled(NODES_JOURNAL, path, g_pol[i].hw_min)) g_sup_min_on = 1;
+    } else if (g_sup_min_on) {
+      boost_restore_path(path);
+    }
+  }
+  if (!on) g_sup_min_on = 0;
+}
+
+/* 退出压制——只清标志与还原下限，不动天花板：
+ * 交权路径（游戏/满血）自己会把上限写到硬件最高，这里再写 cap 会
+ * 把刚放开的帽又压回去。 */
+static void sup_cancel(void) {
+  g_sup_level = 0;
+  g_sup_fall_n = 0;
+  g_sup_up_n = 0;
+  g_sup_min_n = 0;
+  g_sup_reapply_at = 0;
+  if (g_sup_min_on) sup_min_clamp(0);
+}
+
+/* 退出压制并回到生效封顶：留在常态的暂停点（熄屏、配置关闭）用。 */
+static void sup_exit(void) {
+  sup_cancel();
+  suppress_boost_restore();
+  suppress_smooth_restore();
+  suppress_gov_restore();
+  suppress_uclamp_restore();
+  for (int i = 0; i < g_npol; i++) {
+    char path[256];
+    long want = g_pol[i].cap;
+    snprintf(path, sizeof path, "%s/scaling_max_freq", g_pol[i].dir);
+    if (want > 0 && read_num(path) != want) {
+      if (!write_journaled(NODES_JOURNAL, path, want)) {
+        long got = read_num(path);
+        g_pol[i].last_cap = want;
+        g_pol[i].last_got = got > 0 ? got : want;
+      }
+    }
+  }
+}
+
+/* 每个快拍调一次（亮屏常态尾部，1s 粒度）。 */
+static void suppress_tick(void) {
+  long nows = mono_sec();
+  /* 系统在切前台/亮屏时会把 input_boost_ms 恢复成 100，手指一滑就重新抬频。
+     boost 每个 1s 快拍都查（已经是 0 就不写），uclamp 每分钟补一次。 */
+  suppress_boost_apply();
+  if (!g_sup_reapply_at || nows - g_sup_reapply_at >= 60) {
+    suppress_uclamp_apply();
+    g_sup_reapply_at = nows;
+  }
+  /* 逐簇判"贴顶饥饿"：调度器顶着我们给的天花板要更高。
+     三种不算贴顶：level=0（没有我们的约束在起作用）、该簇被内核钳住
+     （下限比我们的地板还高，天花板无效）、以及 cur 还没到天花板。
+     注意不能拿 busy 当升档依据：cap 压低本身会推高占用率（同样的活
+     跑更久），拿它判需求会自激——天花板在地板和最优解之间振荡。 */
+  int hungry = 0;
+  int i;
+  for (i = 0; i < g_npol && !hungry; i++) {
+    if (g_pol[i].cap <= 0 || g_sup_level == 0) continue;
+    if (sup_prime_min_enabled() && (g_pol[i].tier & 3) == 0) continue;
+    long want = sup_cap_for(&g_pol[i]);
+    if (g_sup_stuck[i] && want <= g_sup_stuck[i] &&
+        nows - g_sup_stuck_at[i] < 600)
+      continue;                              /* 天花板被内核钳住：无效约束 */
+    char path[256];
+    snprintf(path, sizeof path, "%s/scaling_cur_freq", g_pol[i].dir);
+    long cur = read_num(path);
+    if (cur > 0 && cur >= want) hungry = 1;
+  }
+  int busy = cpu_busy_pct();
+  if (busy < 0) busy = SUP_FALL;           /* 无样本：按"不升不压"处理 */
+  if (hungry) {
+    /* 连续 2 拍贴顶才放一档：单次滑动/切屏的瞬时顶帽不把天花板拉回满频。 */
+    if (g_sup_up_n < 2) {
+      g_sup_up_n++;
+    } else {
+      if (g_sup_level == SUP_FLOOR_LV) {
+        g_sup_level = SUP_MID_LV;
+        log("动态封顶：贴顶，先放到 %d%%", sup_pct());
+      } else if (g_sup_level == SUP_MID_LV) {
+        g_sup_level = SUP_OPT;
+        log("动态封顶：仍贴顶，放开到最优解");
+      }
+      g_sup_up_n = 0;
+    }
+    g_sup_fall_n = 0;
+    g_sup_min_n = 0;
+    if (g_sup_min_on) {
+      sup_min_clamp(0);
+      log("动态封顶：活动恢复，下限还原");
+    }
+  } else if (busy < SUP_FALL) {
+    g_sup_up_n = 0;
+    /* 无饥饿且占用低：先连续 N 拍降到中间档，再连续 N 拍降到地板。 */
+    if (g_sup_fall_n < sup_fall_ticks()) g_sup_fall_n++;
+    else if (g_sup_level == SUP_OPT) {
+      g_sup_level = SUP_MID_LV;
+      g_sup_fall_n = 0;
+      log("动态封顶：持续低载，先收到 %d%%", sup_pct());
+    } else if (g_sup_level == SUP_MID_LV) {
+      g_sup_level = SUP_FLOOR_LV;
+      g_sup_fall_n = 0;
+      log("动态封顶：持续低载，收到地板 %d%%", sup_pct());
+    }
+    /* 到地板且无贴顶：压下限（抖音这类静置场景的空闲大头）。
+       忙碌与否不作为条件——下限只影响"能闲到多低"，调度器自己决定；
+       收口交给贴顶（有簇顶着天花板就放开并还原下限）。 */
+    if (g_sup_level == SUP_FLOOR_LV) {
+      if (g_sup_min_n < SUP_MIN_TICKS) g_sup_min_n++;
+      else if (!g_sup_min_on) {
+        sup_min_clamp(1);
+        log("动态封顶：静置空闲，下限压到硬件最低");
+      }
+    }
+  } else {
+    /* 忙碌但没有贴顶（调度器在天花板下自洽）：保持当前档不升不降，
+       下限维持原状——收口交给贴顶路径。 */
+    g_sup_fall_n = 0;
+    g_sup_up_n = 0;
+  }
+  /* 天花板写入：只写与当前值不同的拍（level 0 时等价于 1s 巡检压回）。
+     内核把上限夹在更高处（目标低于该簇实际下限）时记住回读值并退避，
+     不做每秒一次的无效写入。 */
+  for (i = 0; i < g_npol; i++) {
+    char path[256];
+    long want = sup_cap_for(&g_pol[i]);
+    if (g_sup_stuck[i] && want <= g_sup_stuck[i] &&
+        nows - g_sup_stuck_at[i] < 600)
+      continue;                              /* 已知写不进去：退避 */
+    snprintf(path, sizeof path, "%s/scaling_max_freq", g_pol[i].dir);
+    long cur = read_num(path);
+    if (cur > 0 && cur != want) {
+      if (!write_journaled(NODES_JOURNAL, path, want)) {
+        long got = read_num(path);
+        if (got == cur && got != want) {     /* 写了没动：被内核夹住 */
+          g_sup_stuck[i] = got;
+          g_sup_stuck_at[i] = nows;
+        } else {
+          g_sup_stuck[i] = 0;                /* 写进去了（或值变了） */
+        }
+        g_pol[i].last_cap = want;
+        g_pol[i].last_got = got > 0 ? got : want;
+      }
+    } else if (cur > 0 && cur == want && g_sup_stuck[i] && want > g_sup_stuck[i]) {
+      g_sup_stuck[i] = 0;                    /* 下限被谁放宽了：解除退避 */
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -2425,6 +3046,8 @@ static int boot_boost_active(void) {
 }
 
 /* 只做 CPU 上限巡检，不碰 state/权限。apply_normal 和熄屏 keep 轻巡检共用。 */
+static long g_capfloor_log_at = -600;  /* 初值 -600：开机头 10 分钟也能打第一条 */
+
 static void caps_patrol(int force) {
   for (int i = 0; i < g_npol; i++) {
     char path[224];
@@ -2432,25 +3055,73 @@ static void caps_patrol(int force) {
     snprintf(path, sizeof path, "%s/scaling_max_freq", g_pol[i].dir);
     cur = read_num(path);
     if (cur < 0) continue;
+    long want = g_pol[i].cap;
     /* 常态巡检：厂商把上限顶高了就压回去 */
-    if (!force && cur <= g_pol[i].cap) continue;
+    if (!force && cur <= want) continue;
     /* force 升帽时先确认当前值就是模块上一轮写的那个。
        若 cur 比 cap 低、又不是我们写的，说明厂商热管理压得更低，别盖。
        降帽（cur > cap）不受这条限制，热的时候必须压。 */
-    if (force && cur <= g_pol[i].cap) {
+    if (force && cur <= want) {
       if (!(g_pol[i].last_got > 0 && cur == g_pol[i].last_got &&
-            g_pol[i].cap > g_pol[i].last_cap))
+            want > g_pol[i].last_cap))
         continue;
     }
-    if (!write_journaled(NODES_JOURNAL, path, g_pol[i].cap)) {
+    long now = mono_sec();
+    /* 同一目标、同一回读值刚刚已经证明写不动：10 分钟内不再重试。
+       内核的实际下限可能高于 scaling_min_freq 读到的数，单靠下面的
+       floor 判断拦不住（本机写 1,017,600 会被夹在 1,958,400）。 */
+    if (want == g_pol[i].unreach_cap && cur == g_pol[i].unreach_got &&
+        now - g_pol[i].unreach_at < 600)
+      continue;
+    /* 内核可能把允许下限锁在 cpuinfo_min 之上（本机 1,017,600）。
+       目标比这个下限还低时，写下去会被夹回当前值；不识别的话每拍都写一次、
+       每拍记一行（BIG_MIN=1 时目标 1% = 43,200 会触发）。按低限生效即可，
+       下一拍 cur <= want 自然就不写了。 */
+    char mpath[224];
+    snprintf(mpath, sizeof mpath, "%s/scaling_min_freq", g_pol[i].dir);
+    long floor = read_num(mpath);
+    if (floor > 0 && want < floor) {
+      if (now - g_capfloor_log_at >= 600) {
+        g_capfloor_log_at = now;
+        log("%s 封顶目标 %ld 低于内核下限 %ld，按 %ld 生效", g_pol[i].name,
+            want, floor, floor);
+      }
+      want = floor;
+    }
+    if (cur == want) {          /* 写下去也不会变，别做无效写入 */
+      g_pol[i].last_cap = want;
+      g_pol[i].last_got = cur;
+      g_pol[i].unreach_cap = 0;
+      g_pol[i].unreach_got = 0;
+      g_pol[i].unreach_at = 0;
+      continue;
+    }
+    if (!write_journaled(NODES_JOURNAL, path, want)) {
       long got = read_num(path);
-      g_pol[i].last_cap = g_pol[i].cap;
+      g_pol[i].last_cap = want;
       g_pol[i].last_got = got;
-      if (force)
-        log("  %-8s 上限 -> %ld%s", g_pol[i].name, got,
-            got < g_pol[i].cap ? "（厂商已压更低）" : "");
-      else
-        log("RESTORE %s: %ld -> %ld", g_pol[i].name, cur, got);
+      if (got > 0 && got == cur && got != want) {
+        /* 写下去没动：内核真实下限比读到的 min 更高，记住这对值 */
+        if (force)
+          log("  %-8s 上限 -> %ld%s", g_pol[i].name, got,
+              got < want ? "（厂商已压更低）" : "（写入未生效）");
+        else if (now - g_capfloor_log_at >= 600) {
+          g_capfloor_log_at = now;
+          log("%s 上限被内核夹在 %ld，按 %ld 生效", g_pol[i].name, got, got);
+        }
+        g_pol[i].unreach_cap = want;
+        g_pol[i].unreach_got = got;
+        g_pol[i].unreach_at = now;
+      } else {
+        g_pol[i].unreach_cap = 0;
+        g_pol[i].unreach_got = 0;
+        g_pol[i].unreach_at = 0;
+        if (force)
+          log("  %-8s 上限 -> %ld%s", g_pol[i].name, got,
+              got < want ? "（厂商已压更低）" : "");
+        else
+          log("RESTORE %s: %ld -> %ld", g_pol[i].name, cur, got);
+      }
     }
     apply_governor(&g_pol[i]);
   }
@@ -2467,10 +3138,24 @@ static void apply_normal(int force) {
     /* 开关关掉时也要走一次还原：用户可能刚在页面上把它关掉。 */
     if (cfg.gpu_boost_off) boost_off_apply();
     else boost_off_restore();
+    /* 动态封顶开启时：walt 拉频源中和 + 升频限速 + 调速器工作点参数
+       随压制一起生效；关闭/交权时按账本还原。 */
+    if (cfg.suppress && !g_sup_chg_pause) {
+      suppress_boost_apply();
+      suppress_smooth_apply();
+      suppress_gov_apply();
+      suppress_uclamp_apply();
+    } else {
+      suppress_boost_restore();
+      suppress_smooth_restore();
+      suppress_gov_restore();
+      suppress_uclamp_restore();
+    }
     gpu_min_to_floor();
     apply_gpu_cap(1);
   }
   caps_patrol(changed);
+  if (!g_screen_off) cpu_min_patrol();
   if (changed) {
     snprintf(g_state, sizeof g_state, "normal");
     snprintf(g_reason, sizeof g_reason, "-");
@@ -2529,11 +3214,26 @@ static void hand_back_full(const char *why) {
   for (int i = 0; i < g_npol; i++) {
     char path[256];
     snprintf(path, sizeof path, "%s/scaling_max_freq", g_pol[i].dir);
+    long cur = read_num(path);
+    /* 只撤模块自己写的帽：current 等于模块最近一次目标或设定帽，才写回硬件最高。
+       厂商游戏助手/热控已经把上限压低时保留它，否则进游戏的一瞬间会把它盖回满频。 */
+    long own = g_pol[i].last_cap > 0 ? g_pol[i].last_cap : g_pol[i].cap;
+    if (cur > 0 && cur != own && cur != g_pol[i].cap) {
+      log("  %-8s 保留厂商上限 %ld（模块帽 %ld）", g_pol[i].name, cur, own);
+      continue;
+    }
     if (!write_journaled(NODES_JOURNAL, path, snap_freq(&g_pol[i], g_pol[i].hw_max)))
       log("  %-8s -> 硬件最高 %ld", g_pol[i].name, g_pol[i].hw_max);
   }
   if (g_gpu.ok) {
-    write_gpu(g_gpu.max_hz, 1);
+    long gcur = read_num(g_gpu.max_node);
+    if (g_gpu.max_is_mhz && gcur > 0) gcur *= 1000000;
+    /* 同理：厂商已经把 GPU 上限压得更低时，交权不要再把它抬回硬件最高。 */
+    if (gcur > 0 && g_gpu.active > 0 && gcur != g_gpu.active) {
+      log("  GPU 保留厂商上限 %ldHz", gcur);
+    } else {
+      write_gpu(g_gpu.max_hz, 1);
+    }
     if (g_gpu.pwr_node[0]) write_journaled(NODES_JOURNAL, g_gpu.pwr_node, 0);
   }
 
@@ -2558,6 +3258,16 @@ static void hand_back_full(const char *why) {
   restore_governors_core(1);
   /* GPU Boost 开关是常态省电项，交权态一律放回去。 */
   boost_off_restore();
+  /* 动态封顶带的 walt 拉频源中和与升频限速：交权给厂商干净的原值。 */
+  suppress_boost_restore();
+  suppress_smooth_restore();
+  /* 工作点参数：交权后系统可能切换调速器，这里一并还原。 */
+  suppress_gov_restore();
+  suppress_uclamp_restore();
+  /* 动态封顶的下限与标志一并清理（天花板由上面的满频写入处理）。 */
+  sup_cancel();
+  /* CPU 下限是常态省电项：交权（游戏/满血/熄屏解除）时还给系统原值。 */
+  cpu_min_restore();
   log("  CPU/GPU 节点写权限已交由系统接管");
   /* state 由调用方决定：游戏/满血应用是 game，熄屏交还是 full。
      hand_back_full 自己写死 game 会让熄屏状态显示成"游戏中"。 */
@@ -2597,11 +3307,95 @@ static void cpu_min_to_floor(void) {
   if (n) log("熄屏：CPU 下限压到硬件最低（%d 个簇）", n);
 }
 
+/* 亮屏常态的 CPU 下限巡检（CPU_MIN_LOCK）。
+ * 不像熄屏那样无条件写：perfd 会把 min 抬回去，每拍对写会拖慢唤醒。
+ * 这里先读、偏离才写，全局 30 秒最多写一次；连续 3 次被内核夹回
+ * 就停 10 分钟（本机内核把下限锁在 556800，写 384000 会被夹回）。 */
+static long g_min_writes, g_min_last, g_min_fail_at;
+static int  g_min_fails;
+/* 每簇的下限战况：累计被夹回 9 次（约 3 轮退避）判定"系统把下限钉死"，
+ * 本启动放弃该簇、每 30 分钟复探一次（系统放开自动恢复）——
+ * 不再无限退避循环，UI 也如实显示"被系统钉住"而不是永远"退避中"。 */
+static int  g_min_pfails[MAX_POLICY];
+static int  g_min_giveup[MAX_POLICY];
+static long g_min_pinned[MAX_POLICY];
+static long g_min_give_at;
+
+static void cpu_min_patrol(void) {
+  /* 动态封顶开启时，亮屏下限由压制的"低载静置压下限"接管：
+     两条路都写 scaling_min_freq 会互相还原，变成拉锯。 */
+  if (cfg.suppress) return;
+  if (!cfg.cpu_min_lock) return;
+  long now = mono_sec();
+  if (g_min_fails >= 3) {
+    if (now - g_min_fail_at < 600) return;
+    /* 退避到期必须清零，否则 g_min_fails 永远 >=3，之后每拍都写、
+       每拍被夹回，再也不进退避。 */
+    g_min_fails = 0;
+    g_min_fail_at = 0;
+  }
+  if (g_min_last && now - g_min_last < 30) return;
+  for (int i = 0; i < g_npol; i++) {
+    if (g_pol[i].hw_min <= 0) continue;
+    char path[256];
+    snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
+    long cur = read_num(path);
+    if (cur <= 0 || cur <= g_pol[i].hw_min) continue;
+    if (g_min_giveup[i]) {
+      /* 钉死簇：30 分钟复探一次，其余时间跳过。 */
+      if (now - g_min_give_at < 1800) continue;
+      g_min_give_at = now;
+    }
+    if (write_journaled(NODES_JOURNAL, path, g_pol[i].hw_min)) continue;
+    g_min_writes++;
+    g_min_last = now;
+    long got = read_num(path);
+    if (got > g_pol[i].hw_min) {
+      if (++g_min_pfails[i] >= 9 && !g_min_giveup[i]) {
+        g_min_giveup[i] = 1;
+        g_min_pinned[i] = got;
+        g_min_give_at = now;
+        log("CPU 下限：%s 被系统钉在 %ld，本启动不再尝试（30 分钟复探一次）",
+            g_pol[i].name, got);
+      }
+      int before = g_min_fails;
+      if (++g_min_fails >= 3) {
+        g_min_fail_at = now;
+        /* 一轮里多个簇先后被夹回时只在刚跨过阈值那一下打一行 */
+        if (before < 3)
+          log("CPU 下限被内核夹在 %ld（%s）：已连续 3 次被夹回，暂停 10 分钟",
+              got, g_pol[i].name);
+      }
+    } else {
+      g_min_fails = 0;
+      g_min_pfails[i] = 0;
+      if (g_min_giveup[i]) {
+        g_min_giveup[i] = 0;
+        log("CPU 下限：%s 系统已放开，恢复下限巡检", g_pol[i].name);
+      }
+    }
+  }
+}
+
 static void cpu_min_restore(void) {
   for (int i = 0; i < g_npol; i++) {
     char path[256];
     snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
-    boost_restore_path(path);
+    long orig;
+    if (!journal_value(NODES_JOURNAL, path, &orig)) continue;
+    long target = orig;
+    /* 账本里的"原值"可能已经是厂商瞬时 boost（本机 policy6 是 1,958,400）。
+       直接还原会把下限顶到当前封顶，整簇再也降不下来；这种值按硬件最低还原，
+       性能需要时由调速器 / perfd 自己再抬。 */
+    if (g_pol[i].cap > 0 && g_pol[i].hw_min > 0 && orig >= g_pol[i].cap) {
+      target = g_pol[i].hw_min;
+      log("%s 下限原值 %ld 会顶住封顶 %ld，按硬件最低 %ld 还原",
+          g_pol[i].name, orig, g_pol[i].cap, target);
+    }
+    if (read_num(path) == target) continue;
+    write_num(path, target);
+    int m = journal_mode(NODES_JOURNAL, path);
+    if (m >= 0) chmod(path, (mode_t)m);
   }
 }
 
@@ -2610,17 +3404,28 @@ static void cpu_min_restore(void) {
 static void enter_screen_off(void) {
   if (g_screen_off) return;
   int mpct = 0, mbig = 0, mlit = 0;
-  /* cap：全局"熄屏也保持封顶"，轻巡检；keep：只看前台应用是不是 pkg=keep。 */
-  int global_cap = cfg.screen_policy == SCREEN_CAP && !strcmp(g_state, "normal");
-  int keep = global_cap ||
-             (!strcmp(g_state, "normal") && g_fg[0] &&
-              mode_lookup(g_fg, &mpct, &mbig, &mlit, NULL) && mpct == MODE_KEEP);
+  /* 熄屏白名单优先：pkg=soff 的应用在前台时，熄屏照样交还系统，
+     其余应用才吃全局 cap。keep 仍然是"熄屏也封顶"。 */
+  int have_mode = !strcmp(g_state, "normal") && g_fg[0] &&
+                  mode_lookup(g_fg, &mpct, &mbig, &mlit, NULL);
+  int soff_full = have_mode && mpct == MODE_SOFF;
+  int global_cap = cfg.screen_policy == SCREEN_CAP && !strcmp(g_state, "normal") &&
+                   !soff_full;
+  int keep = global_cap || (have_mode && mpct == MODE_KEEP);
   g_screen_off = 1;
   g_scr_check = 0;
   g_deep = 0;
   g_idle_ema = 0;
   g_idle_hold = 0;
   g_soff_th = 0;
+  /* 静止是亮屏轻载的产物：熄屏路径自己管自己，带着旧标志醒来
+     会让亮屏第一拍的目标偏低。 */
+  g_sm.still = 0;
+  g_still_light_since = 0;
+  /* 动态封顶同步收口：保持封顶的路径把天花板交还生效封顶；
+     交还路径随后 hand_back_full 自己写满频。 */
+  if (keep) sup_exit();
+  else sup_cancel();
   g_soff_keep = keep;
   snprintf(g_soff_pkg, sizeof g_soff_pkg, "%s",
            keep && !global_cap ? g_fg : "");
@@ -2672,6 +3477,9 @@ static void leave_screen_off(void) {
   g_idle_hold = 0;
   g_soff_keep = 0;
   g_soff_th = 0;
+  g_sm.still = 0;
+  g_still_light_since = 0;
+  sup_exit();
   g_soff_pkg[0] = 0;
   log("亮屏，恢复常态巡检");
   /* cap：下限还原、封顶重算（充电地板重新生效）。 */
@@ -2747,6 +3555,7 @@ static void load_cfg(void) {
   cfg.gpu_min_lock = 1;
   cfg.gpu_boost_off = 1;
   cfg.big_min = 0;
+  cfg.cpu_min_lock = 0;
   /* 熄屏策略：基准 keep（旧行为）。全新安装的 conf 写 uncap；
      升级用户没有 SCREEN_POLICY 时按旧 SCREEN_UNCAP 保持现状；
      两个键都没有的手写/极老配置按新装默认 uncap（见下面的映射）。 */
@@ -2757,7 +3566,10 @@ static void load_cfg(void) {
   cfg.idle_current_ma = 250;
   cfg.idle_hold_cycle = 2;
   cfg.strategy = 0;
-  cfg.idle_interval = 30;
+  cfg.still_drop = 1;  cfg.still_frac = 55;  cfg.still_settle_s = 60;
+  cfg.still_exit = 25;
+  cfg.suppress = 0;
+  cfg.sup_style = 0;  cfg.gov_up_us = 1000;  cfg.gov_down_us = 1000;  cfg.idle_interval = 30;
   cfg.wake_delta_ma = 150;
   snprintf(cfg.batt_current_path, sizeof cfg.batt_current_path,
            "/sys/class/power_supply/battery/current_now");
@@ -2767,12 +3579,14 @@ static void load_cfg(void) {
      旧版这里写的是 conservative，升级用户的配置里可能还留着那一行，
      customize.sh 会做一次迁移清掉。 */
   cfg.governor[0] = 0;
-  /* 实时偏移的默认值。三条都默认开：装了模块的人要的就是"该压住、该让路时
-     也让得出去"。每个来源各有上限，合计再有一对总闸（默认 +15 / -30），
+  /* 实时偏移的默认值。插电放宽默认开（电从充电器来，没必要压着）；
+     温控闭环默认**关**——交给内核热管理，想主动压再开；PSI 默认开但
+     只借一档（+5%）：护栏要的是"偶尔让一下"，不是把封顶顶回去。
+     每个来源各有上限，合计再有一对总闸（默认 +15 / -30），
      避免"每一项都合法、叠起来不可用"。 */
-  cfg.ad.psi = 1;   cfg.ad.psi_gain = 10;  cfg.ad.psi_step = 5;
+  cfg.ad.psi = 1;   cfg.ad.psi_gain = 5;   cfg.ad.psi_step = 5;
   cfg.ad.psi_hold = 30;  cfg.ad.psi_back = 15;
-  cfg.ad.th = 1;    cfg.ad.th_high = 75;   cfg.ad.th_low = 68;
+  cfg.ad.th = 0;    cfg.ad.th_high = 75;   cfg.ad.th_low = 68;
   cfg.ad.th_step = 5;   cfg.ad.th_max = 25;  cfg.ad.th_back = 20;
   cfg.ad.chg = 1;   cfg.ad.chg_pct = 100;
   cfg.ad.up_max = 15;    cfg.ad.down_max = 30;
@@ -2833,12 +3647,40 @@ static void load_cfg(void) {
     cfg.boot_full_s = clampi(atoi(v), 0, 600, 60);
   if (cfg_get("GAME_GRACE_SEC", v) == 0)
     cfg.grace = clampi(atoi(v), cfg.interval, 300, 10);
+  /* 静止降频。STILL_EXIT 的下限 10 > 轻载进档阈值 8：低于它静止永远进不去，
+     与其让用户配出一个静默无效的值，不如在读取时挡住。 */
+  if (cfg_get("STILL_DROP", v) == 0)
+    cfg.still_drop = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("STILL_FRAC", v) == 0)
+    cfg.still_frac = clampi(atoi(v), 10, 90, 55);
+  if (cfg_get("STILL_SETTLE_S", v) == 0)
+    cfg.still_settle_s = clampi(atoi(v), 10, 600, 60);
+  if (cfg_get("STILL_EXIT", v) == 0)
+    cfg.still_exit = clampi(atoi(v), 10, 95, 25);
+  if (cfg_get("SUPPRESS", v) == 0)
+    cfg.suppress = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("SUP_STYLE", v) == 0)
+    cfg.sup_style = !strcasecmp(v, "sav") ? 1 : 0;
+  if (cfg_get("GOV_UP_US", v) == 0)
+    cfg.gov_up_us = clampi(atoi(v), 100, 50000, 1000);
+  if (cfg_get("GOV_DOWN_US", v) == 0)
+    cfg.gov_down_us = clampi(atoi(v), 100, 50000, 1000);
   if (cfg_get("GPU_PCT", v) == 0)
     cfg.gpu_pct = clampi(atoi(v), 1, 100, 45);
-  if (cfg_get("GPU_MIN_LOCK", v) == 0)
-    cfg.gpu_min_lock = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
-  if (cfg_get("GPU_BOOST_OFF", v) == 0)
-    cfg.gpu_boost_off = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  /* GPU 下限锁定和 Boost 源中和已合并成一个开关。旧配置里可能只有
+     GPU_MIN_LOCK：没有 GPU_BOOST_OFF 时按旧值迁移；两个都没有按开。
+     cfg.gpu_min_lock 只作为旧代码的别名，不再单独开放。 */
+  int gbo_seen = 0, gml_seen = 0, gbo_val = 1, gml_val = 1;
+  if (cfg_get("GPU_BOOST_OFF", v) == 0) {
+    gbo_seen = 1;
+    gbo_val = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  }
+  if (cfg_get("GPU_MIN_LOCK", v) == 0) {
+    gml_seen = 1;
+    gml_val = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  }
+  cfg.gpu_boost_off = gbo_seen ? gbo_val : (gml_seen ? gml_val : 1);
+  cfg.gpu_min_lock = cfg.gpu_boost_off;
   if (cfg_get("CPU_GOVERNOR", v) == 0) {
     trim(v);
     /* 只接受白名单内的名字，避免把任意字符串写进 sysfs */
@@ -2857,6 +3699,8 @@ static void load_cfg(void) {
   }
   if (cfg_get("BIG_MIN", v) == 0)
     cfg.big_min = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("CPU_MIN_LOCK", v) == 0)
+    cfg.cpu_min_lock = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   for (int i = 0; i < 4; i++)
     if (cfg_get(keys[i], v) == 0)
       cfg.pct[i] = clampi(atoi(v), 1, 100, dflt[i]);
@@ -2865,7 +3709,7 @@ static void load_cfg(void) {
      放开了填会让模块看起来"没生效"或"压太狠"。 */
   if (cfg_get("PSI_ADAPT", v) == 0)
     cfg.ad.psi = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
-  if (cfg_get("PSI_GAIN", v) == 0) cfg.ad.psi_gain = clampi(atoi(v), 0, 30, 10);
+  if (cfg_get("PSI_GAIN", v) == 0) cfg.ad.psi_gain = clampi(atoi(v), 0, 30, 5);
   if (cfg_get("PSI_STEP", v) == 0) cfg.ad.psi_step = clampi(atoi(v), 1, 10, 5);
   if (cfg_get("PSI_HOLD", v) == 0) cfg.ad.psi_hold = clampi(atoi(v), 5, 600, 30);
   if (cfg_get("PSI_BACK", v) == 0) cfg.ad.psi_back = clampi(atoi(v), 5, 600, 15);
@@ -2914,11 +3758,25 @@ static void load_cfg(void) {
 /* 状态发布                                                           */
 /* ------------------------------------------------------------------ */
 
+static char g_status_cache[4096];
+static size_t g_status_len;
+
+/* 往固定缓冲区追加；状态很短，不需要动态分配。 */
+static size_t ps_append(char *b, size_t cap, size_t n, const char *fmt, ...) {
+  if (n >= cap) return n;
+  va_list ap;
+  va_start(ap, fmt);
+  int w = vsnprintf(b + n, cap - n, fmt, ap);
+  va_end(ap);
+  if (w < 0) return n;
+  size_t add = (size_t)w;
+  if (add > cap - n - 1) add = cap - n - 1;
+  return n + add;
+}
+
 static void publish_status(void) {
-  char tmp[256];
-  snprintf(tmp, sizeof tmp, "%s.tmp", STATUS_FILE);
-  FILE *f = fopen(tmp, "w");
-  if (!f) return;
+  char buf[4096];
+  size_t n = 0;
   /* 生效中的应用档位。"" 表示没有专属档位，走全局百分比。 */
   char mode[16], gmode[8];
   if (g_app_pct == MODE_FULL) snprintf(mode, sizeof mode, "full");
@@ -2942,30 +3800,55 @@ static void publish_status(void) {
       if (g_pol[i].tier >= 0 && g_pol[i].tier < 4) used[g_pol[i].tier] = 1;
     for (int t = 0; t < 4; t++) ntier += used[t];
   }
-  fprintf(f, "state=%s\nscreen=%s\nsoff=%d\nsoff_keep=%d\ngame_pkg=%s\nreason=%s\n"
+  int cmin_paused = cfg.cpu_min_lock && g_min_fails >= 3 &&
+                    mono_sec() - g_min_fail_at < 600;
+  int cmin_give = 0;
+  for (int i = 0; i < g_npol; i++) cmin_give += g_min_giveup[i];
+  n = ps_append(buf, sizeof buf, n,
+             "state=%s\nscreen=%s\nsoff=%d\nsoff_keep=%d\ngame_pkg=%s\nreason=%s\n"
              "fg=%s\napp_mode=%s\napp_big=%d\napp_little=%d\napp_gpu=%s\n"
              "pid=%d\nver=%s\nntier=%d\n"
-             "strat=%d\nsmart=%d\ntick=%ld\nfgprobe=%ld\ngminw=%ld\n",
+             "strat=%d\nsmart=%d\nstill=%d\nsup=%d\ntick=%ld\nfgprobe=%ld\ngminw=%ld\n"
+             "cminw=%ld\ncminf=%d\ncminpaused=%d\ncming=%d\n",
           g_state, g_deep ? "deep" : (g_screen_off ? "off" : "on"),
           g_deep ? cfg.idle_interval : cfg.soff_interval, g_soff_keep,
           g_game[0] ? g_game : "-", g_reason,
           g_fg[0] ? g_fg : "-", mode, g_app_big, g_app_little, gmode,
           getpid(), SF_VERSION, ntier,
-          cfg.strategy, g_sm.state, g_tick_n, g_fg_probe_n, g_gmin_writes);
+          cfg.strategy, g_sm.state, g_sm.still,
+          cfg.suppress ? sup_pct() : 0,
+          g_tick_n, g_fg_probe_n, g_gmin_writes,
+          g_min_writes, g_min_fails, cmin_paused, cmin_give);
   /* 实时偏移的三个来源一起发出去：页面上"实际比设定宽/严了多少"必须说得出是谁干的，
    * 只剩一个合计数就等于让人猜。读不到的传感器发 -1，页面据此不显示那一项。 */
   {
     struct adapt a;
     adapt_snapshot(&a);
-    fprintf(f, "dlt=%d\nbatt=%d\nbcut=%d\nstall=%d\npsib=%d\navg10=%d\ntemp=%d\n"
+    n = ps_append(buf, sizeof buf, n,
+               "dlt=%d\nbatt=%d\nbcut=%d\nstall=%d\npsib=%d\navg10=%d\ntemp=%d\n"
                "chg=%d\npsi=%d\nth=%d\npsifrz=%d\n",
-            a.delta, a.capacity, a.batt_cut,
+            effective_delta(&a), a.capacity, a.batt_cut,
             (a.have_psi && a.psi_valid) ? a.stall : -1, a.base, a.avg10x100,
             a.temp_m > 0 ? a.temp_m / 1000 : -1, a.charging, a.psi_steps, a.th_steps,
             a.base_frozen);
   }
-  fclose(f);
-  rename(tmp, STATUS_FILE);
+  /* 熄屏轻巡检周期长、内容经常一模一样；一样就不落盘，省掉一次
+     tmp 写 + rename 的 flash 元数据。亮屏仍每拍写，页面要实时数。 */
+  if (g_screen_off && access(STATUS_FILE, F_OK) == 0 && g_status_len &&
+      n == g_status_len && !memcmp(buf, g_status_cache, n))
+    return;
+  char tmp[256];
+  snprintf(tmp, sizeof tmp, "%s.tmp", STATUS_FILE);
+  FILE *out = fopen(tmp, "w");
+  if (!out) return;
+  int ok = fwrite(buf, 1, n, out) == n;
+  ok = (fclose(out) == 0) && ok;
+  if (!ok || rename(tmp, STATUS_FILE) != 0) {
+    unlink(tmp);
+    return;
+  }
+  memcpy(g_status_cache, buf, n);
+  g_status_len = n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -3277,6 +4160,22 @@ int main(int argc, char **argv) {
     load_cfg();
     struct policy p[MAX_POLICY];
     int n = detect_policies(p);
+    /* 智能模式的档位活在守护进程里，export 是独立进程：不读 status 的话
+       g_sm.state 永远是 0，页面会把"空闲档目标"当成当前封顶显示。
+       静止标志同理——它也会压低 smart_pct 的目标。 */
+    {
+      FILE *sf = fopen(STATUS_FILE, "r");
+      if (sf) {
+        char ln[128];
+        while (fgets(ln, sizeof ln, sf)) {
+          if (!strncmp(ln, "smart=", 6))
+            g_sm.state = clampi(atoi(ln + 6), 0, 3, 0);
+          else if (!strncmp(ln, "still=", 6))
+            g_sm.still = atoi(ln + 6) ? 1 : 0;
+        }
+        fclose(sf);
+      }
+    }
     assign_pct(p, n); /* 让 WebUI 显示的是当前百分比算出的封顶值 */
     /* 不加载的话 npkg 恒为 0，WebUI 的"游戏名单"计数就是错的 */
     load_game_pkgs();
@@ -3295,6 +4194,7 @@ int main(int argc, char **argv) {
     printf("gpu_min_lock=%d\n", cfg.gpu_min_lock);
     printf("gpu_boost_off=%d\n", cfg.gpu_boost_off);
     printf("big_min=%d\n", cfg.big_min);
+    printf("cpu_min_lock=%d\n", cfg.cpu_min_lock);
     printf("screen_uncap=%d\n", cfg.screen_uncap);
     printf("screen_policy=%s\n", cfg.screen_policy == SCREEN_UNCAP ? "uncap"
                               : cfg.screen_policy == SCREEN_CAP ? "cap" : "keep");
@@ -3581,6 +4481,7 @@ int main(int argc, char **argv) {
   }
   assign_pct(g_pol, g_npol);
   detect_gpu(0);
+  suppress_gov_load();   /* adapt/<soc>.conf 的 gov_ 行：有数据才调节工作点 */
 
   /*
    * 先按持久化快照回收上次崩溃留下的写入，再取新基准。
@@ -3613,7 +4514,6 @@ int main(int argc, char **argv) {
   long ad_last = 0;       /* 上一次算实时偏移的时刻，用来量真实的巡检间隔 */
   uint64_t seen = cfg_stamp();
   for (; !g_stop;) {
-    g_tick_n++;
     /* 每轮开头复位：这一轮只要偏移动过，后面几处 apply_normal 就得 force 写 */
     int adapt_changed = 0;
     /* pause 自查：手工 touch pause 与 WebUI 的"暂停"都在一个巡检周期内生效。
@@ -3660,8 +4560,13 @@ int main(int argc, char **argv) {
                其余时间只读两个频率节点。 */
             if (cfg.screen_policy == SCREEN_CAP && ++g_soff_th >= 4) {
               g_soff_th = 0;
-              if (adapt_screen_off_tick(&cfg.ad, cfg.soff_interval * 4))
+              if (adapt_screen_off_tick(&cfg.ad, cfg.soff_interval * 4)) {
+                /* 温控只改了 adapt 快照；cap 还是进熄屏时算的旧值。
+                   不重算 assign_pct 的话 CPU 帽整夜不动（GPU 走
+                   gpu_target() 实时读快照，所以只有 GPU 在降）。 */
+                assign_pct(g_pol, g_npol);
                 apply_normal(1);
+              }
             }
           }
           publish_status();
@@ -3693,6 +4598,9 @@ int main(int argc, char **argv) {
       g_idle_hold = 0;
       if (!strcmp(g_state, "full")) apply_normal(1);
     }
+    /* 灯亮才算一拍：熄屏轻巡检直接 continue，tick 不涨，
+       status 内容才能稳定到"不变就不落盘"。 */
+    g_tick_n++;
     /* 实时偏移：每轮读一次 PSI / 最热温度传感器 / 充电态。
      * 生效值变了就把封顶重算一遍，并且这一轮必须 force 写 ——
      * 巡检的判断是 cur<=cap 就跳过，"放宽"这个方向正好落在跳过分支里，
@@ -3708,12 +4616,18 @@ int main(int argc, char **argv) {
          游戏/满血/熄屏仍然不更新；交权态也不推进步进机（adv=0）。 */
       int base_ok = !strcmp(g_state, "normal");
       int adv = base_ok && !g_screen_off;
-      if (adapt_tick_ex(&cfg.ad, adt, base_ok, adv)) {
+      /* 智能模式整条冻结 PSI：它已经按逐簇负载给了目标，PSI 再借额度
+         只会把目标顶回去；更糟的是 PSI 档位变化会触发 adapt_changed，
+         封顶没变也走一遍 force 重写 + 日志。 */
+      struct adapt_cfg ac = cfg.ad;
+      if (cfg.strategy == 1) ac.psi = 0;
+      if (adapt_tick_ex(&ac, adt, base_ok, adv)) {
         struct adapt a;
         adapt_snapshot(&a);
         adapt_changed = 1;
-        log("  实时偏移 %+d 个百分点（PSI %d 档 / 温控 %d 档 / %s）", a.delta,
-            a.psi_steps, a.th_steps, a.chg_on ? "插电放宽" : "未插电");
+        log("  实时偏移 %+d 个百分点（PSI %d 档 / 温控 %d 档 / %s）",
+            effective_delta(&a), a.psi_steps, a.th_steps,
+            a.chg_on ? "插电放宽" : "未插电");
       }
     }
     /* 配置和偏移都看过之后，统一在这里重算生效封顶。
@@ -3724,6 +4638,9 @@ int main(int argc, char **argv) {
     if (cfg.strategy == 1) smart_changed = smart_tick();
     if (cfg_changed || adapt_changed || smart_changed) {
       assign_pct(g_pol, g_npol);
+      /* 配置变更时压制收口一次：天花板/下限回到新封顶，压制随后
+         按新值继续；关闭压制则在此彻底交还。 */
+      if (cfg_changed) sup_exit();
       /* 全局分档刚被重算，生效中的应用专属档位要盖回去，
        * 否则保存配置会让正在生效的专属档位静默退回全局百分比。 */
       if (g_app_pct > 0 || g_app_big > 0 || g_app_little > 0)
@@ -3785,7 +4702,7 @@ int main(int argc, char **argv) {
                      ? mode_lookup(fg, &mpct, &mbig, &mlit, &mgpu) : 0;
     int is_full = has_mode && mpct == MODE_FULL;
     /* keep 只影响熄屏：亮屏时按没有专属档位处理，继续走全局分档/学习。 */
-    if (has_mode && mpct == MODE_KEEP) has_mode = 0;
+    if (has_mode && (mpct == MODE_KEEP || mpct == MODE_SOFF)) has_mode = 0;
     int want_pct = (has_mode && !is_full && mpct > 0) ? mpct : 0;
     int want_big = (has_mode && !is_full) ? mbig : 0;
     int want_little = (has_mode && !is_full) ? mlit : 0;
@@ -3881,9 +4798,43 @@ int main(int argc, char **argv) {
        * adapt_changed 同理，而且更常见：PSI 借出额度、或凉下来还档，都是升档。 */
       apply_normal(caps_changed || adapt_changed);
       gpu_patrol();
+      /* 工作点参数周期性补应用：系统会动态切 walt↔scx，切走的窗口里
+         walt 节点消失、这里自动跳过；切回后 5s 内重新生效（幂等：
+         值相同不写）。 */
+      suppress_gov_apply();
     }
     publish_status();
-    sleep(cfg.interval);
+    /* 动态封顶：亮屏常态把长睡切成 1s 快拍（快拍里只做压制与压回），
+       其余路径维持原节奏；熄屏/游戏/满血分支各自 continue，不经过这里。
+       插电时暂停：插电不封顶是既定策略，压制的相对阶梯此时会把满频
+       又按 80% 压住，与策略矛盾——交还并记暂停，拔电下一拍自动恢复。 */
+    {
+      struct adapt a;
+      adapt_snapshot(&a);
+      if (cfg.suppress && !a.chg_on) {
+        if (g_sup_chg_pause) {
+          g_sup_chg_pause = 0;
+          log("动态封顶：拔电恢复");
+          /* 充电期间交还过 boost/uclamp；拔电立刻补回，不能等下一次状态变化 */
+          suppress_boost_apply();
+          suppress_smooth_apply();
+          suppress_gov_apply();
+          suppress_uclamp_apply();
+          g_sup_reapply_at = mono_sec();
+        }
+        for (int k = 0; k < cfg.interval && !g_stop; k++) {
+          suppress_tick();
+          sleep(1);
+        }
+      } else {
+        if (cfg.suppress && !g_sup_chg_pause) {
+          sup_exit();
+          g_sup_chg_pause = 1;
+          log("动态封顶：充电中暂停（插电不封顶）");
+        }
+        sleep(cfg.interval);
+      }
+    }
   }
 
   cleanup();

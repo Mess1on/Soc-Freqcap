@@ -365,7 +365,17 @@ int adapt_tick_ex(const struct adapt_cfg *c, int dt, int allow_base, int advance
   long total = 0;
   int stall = 0;
   int valid = 0;
-  if (read_str(g_psi_path, line, sizeof line) && parse_psi(line, &avg10x100, &total)) {
+  if (!c->psi) {
+    /* PSI 整条关掉时不必每拍读 /proc：stall=-1 表示这一拍没有有效样本，
+       step_psi 本来就整条不动作。
+       同时把上一次的累计量作废：smart 期间 g_prev_total 会冻在切智能前那一拍，
+       切回 cap 的第一拍会拿"整个 smart 期间的累计 µs / 5 秒"算出天文数字。
+       清 0 后首拍按无基线冻结，下一拍重新建立差分。 */
+    stall = -1;
+    g.psi_valid = 0;
+    g_prev_total = 0;
+    g.avg10x100 = 0;
+  } else if (read_str(g_psi_path, line, sizeof line) && parse_psi(line, &avg10x100, &total)) {
     g.avg10x100 = avg10x100;
     g.have_psi = 1;
     long dwall = g_prev_mono ? now - g_prev_mono : 0;

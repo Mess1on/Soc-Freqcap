@@ -118,6 +118,10 @@ ok "$(A conf_set BIG_MIN 1 | head -1)" "OK BIG_MIN=1" "超大核最低频开关�
 reject conf_set BIG_MIN 2
 ok "$(A conf_set BIG_MIN 0 >/dev/null; grep '^BIG_MIN=' socfreq.conf)" "BIG_MIN=0" \
    "超大核最低频恢复默认"
+ok "$(A conf_set CPU_MIN_LOCK 1 | head -1)" "OK CPU_MIN_LOCK=1" "CPU 下限锁开关能写"
+reject conf_set CPU_MIN_LOCK 2
+ok "$(A conf_set CPU_MIN_LOCK 0 >/dev/null; grep '^CPU_MIN_LOCK=' socfreq.conf)" "CPU_MIN_LOCK=0" \
+   "CPU 下限锁可关"
 # 非 0 时必须至少凑出一整档；否则界面填的数和实际动作对不上
 reject conf_set PSI_GAIN 3
 A conf_set PSI_GAIN 5 >/dev/null
@@ -126,6 +130,12 @@ A conf_set PSI_GAIN 10 >/dev/null
 reject conf_set TH_MAX 3
 A conf_set TH_MAX 5 >/dev/null
 reject conf_set TH_STEP 10
+# 压制风格是字符串键：走 elif 分支，不能掉进数字校验（NOT_NUM 会把
+# 省电风格的保存整个拒掉，页面表现为"跳回均衡"）
+reject conf_set SUP_STYLE xxx
+reject conf_set SUP_STYLE 1
+A conf_set SUP_STYLE sav >/dev/null
+A conf_set SUP_STYLE bal >/dev/null
 A conf_set TH_MAX 25 >/dev/null
 A conf_set TH_STEP 5 >/dev/null
 reject conf_set CPU_GOVERNOR 'scx'
@@ -1246,7 +1256,7 @@ ok "$(cmp -s "$PK/data/socfreq.conf" "$PK/data/defaults/socfreq.conf" && echo sa
    "性能配置回到出厂默认（data/defaults 留的原件）"
 ok "$(cmp -s "$PK/data/app_modes.conf" "$PK/app_modes.conf" && echo same)" "same" \
    "分应用档位回到模块自带默认"
-ok "$(grep -c '^enable=0$' "$PK/data/dsleep.conf")" "1" "深睡开关回到默认关"
+ok "$(grep -c '^enable=1$' "$PK/data/dsleep.conf")" "1" "深睡开关回到默认开"
 ok "$([ -f "$PK/data/override.conf" ] && echo yes || echo no)" "no" "适配覆盖被撤掉"
 ok "$(cat "$PK/data/games.txt" 2>/dev/null)" "my own game" "游戏名单保留（不是配置）"
 ok "$(cat "$PK/data/vendors.txt" 2>/dev/null)" "my vendor" "发行商词典保留"
@@ -1269,7 +1279,7 @@ chmod +x "$DSSTUB/setsid"
 DSA() { PATH="$DSSTUB:$ORIG_PATH" DS_STUB_LOG="$TMP/ds_start.log" \
         SOCFREQ_DATA_DIR="$TMP" sh webroot/api.sh "$@"; }
 
-ok "$(DSA ds_get | sed -n 's/^enable=//p')" "0" "默认是关的"
+ok "$(DSA ds_get | sed -n 's/^enable=//p')" "1" "默认是开的"
 ok "$(DSA ds_get | sed -n 's/^alive=//p')" "0" "没守护时报未运行"
 ok "$(DSA ds_get | sed -n 's/^paused=//p')" "0" "没暂停文件时报未暂停"
 ok "$(DSA ds_get | sed -n 's/^dsactive=//p')" "0" "没状态文件时报未在深睡"
@@ -1349,7 +1359,7 @@ ok "$(P preset_get | sed -n 's/^none=//p')" "0" "命中 SoC 时 none=0"
 ok "$(P preset_get | sed -n 's/^big=//p')" "80" "preset_get 带出 BIG"
 ok "$(P preset_get | grep -c '^mid=67$')" "1" "preset_get 带出 MID"
 ok "$(P preset_get | sed -n 's/^title=//p')" "天玑 9400 测试预设" "preset_get 带出标题"
-ok "$(P preset_apply | head -1)" "OK 7" "preset_apply 写入 7 个键（没有 MID2 就不传）"
+ok "$(P preset_apply | head -1)" "OK 12" "preset_apply 写入 12 个键（7 个适配值 + 5 个策略键，没有 MID2 就不传）"
 ok "$(grep '^CPU_PCT_BIG=' socfreq.conf)" "CPU_PCT_BIG=80" "预设 BIG 已落盘"
 ok "$(grep '^CPU_PCT_MID=' socfreq.conf)" "CPU_PCT_MID=67" "预设 MID 已落盘"
 ok "$(grep '^GPU_PCT=' socfreq.conf)" "GPU_PCT=35" "预设 GPU 已落盘"

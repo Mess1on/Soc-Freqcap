@@ -117,7 +117,25 @@ fi
 #
 # 只在新位置不存在时才搬运，避免覆盖用户已改过的配置。
 DATA=/data/adb/soc_freqcap
-mkdir -p "$DATA/run" 2>/dev/null && ui_print "  配置目录：$DATA"
+# 同名文件 / 悬空软链会让 mkdir 静默失败，直到写标记文件时才报
+# “nonexistent directory”，错误信息完全指错地方。先移开障碍再建；
+# 建不出来就提前说清原因，不要带着半个数据目录继续装。
+if [ -L "$DATA" ] || { [ -e "$DATA" ] && [ ! -d "$DATA" ]; }; then
+  mv -f "$DATA" "$DATA.bad.$$" 2>/dev/null \
+    && ui_print "  数据目录位置被占用，已移到 $DATA.bad.$$"
+fi
+if [ -e "$DATA/run" ] && [ ! -d "$DATA/run" ]; then
+  mv -f "$DATA/run" "$DATA/run.bad.$$" 2>/dev/null
+fi
+mkdir -p "$DATA/run" 2>/dev/null
+if [ ! -d "$DATA/run" ]; then
+  /system/bin/mkdir -p "$DATA/run" 2>/dev/null
+fi
+if [ ! -d "$DATA/run" ]; then
+  ui_print "  !! 无法创建 $DATA（检查 /data 空间、同名文件或 SELinux 权限）"
+  abort
+fi
+ui_print "  配置目录：$DATA"
 
 # ── 按芯片套预设档位（单一来源：adapt/*.conf 的 default_*）──────
 # 芯片默认值和节点适配表放在同一份 adapt/<soc>.conf 里，装机脚本不再写死第二套。
@@ -263,17 +281,41 @@ ensure_final_newline() {
 # 因此只追加用户那份里不存在的键整行，已存在的键一个都不碰。
 if [ -f "$DATA/socfreq.conf" ] && [ -f "$MODPATH/socfreq.conf" ]; then
   _added=0
+  # 迁移决策要看"补键之前"的原值：下面循环会把缺的 SCREEN_UNCAP=0 补进去，
+  # 补完再判断会把"两个键都没有"误判成旧的 keep 配置。
+  _had_policy=0
+  _had_uncap=0
+  _old_uncap=
+  grep -qE '^[[:space:]]*SCREEN_POLICY[[:space:]]*=' "$DATA/socfreq.conf" 2>/dev/null && _had_policy=1
+  if grep -qE '^[[:space:]]*SCREEN_UNCAP[[:space:]]*=' "$DATA/socfreq.conf" 2>/dev/null; then
+    _had_uncap=1
+    _old_uncap=$(sed -n 's/^[[:space:]]*SCREEN_UNCAP[[:space:]]*=//p' "$DATA/socfreq.conf" 2>/dev/null \
+      | head -n 1 | sed 's/#.*//' | tr -d ' \r\t')
+  fi
   ensure_final_newline "$DATA/socfreq.conf"
   while read -r _line; do
     case "$_line" in ''|\#*) continue ;; esac
     case "$_line" in *=*) ;; *) continue ;; esac
     _k=${_line%%=*}
-    # 熄屏策略是行为开关：老用户没有这个键时应保持旧行为，
-    # 不能靠升级补成 uncap。新装用户拿包内 conf，默认就是 uncap。
+    # 熄屏策略是行为开关：通用补键循环不碰它，下面按旧值单独迁移。
     [ "$_k" = SCREEN_POLICY ] && continue
     grep -q "^${_k}=" "$DATA/socfreq.conf" 2>/dev/null && continue
     printf '%s\n' "$_line" >> "$DATA/socfreq.conf" 2>/dev/null && _added=$((_added + 1))
   done < "$MODPATH/socfreq.conf"
+  # 旧配置没有 SCREEN_POLICY 时：SCREEN_UNCAP=0 会被守护映射成 keep
+  # （熄屏每 5 秒全量巡检，整夜跑）。只修这一种，补成 cap；
+  # SCREEN_UNCAP=1 或两个键都没有的，保持原来的 uncap 行为。
+  ensure_final_newline "$DATA/socfreq.conf"
+  if [ "$_had_policy" -eq 0 ]; then
+    if [ "$_had_uncap" -eq 1 ] && [ "$_old_uncap" = "0" ]; then
+      printf 'SCREEN_POLICY=cap\n' >> "$DATA/socfreq.conf" 2>/dev/null
+      ui_print "  熄屏策略补成 cap（旧配置 SCREEN_UNCAP=0 会落进 keep 全量巡检）"
+    else
+      printf 'SCREEN_POLICY=uncap\n' >> "$DATA/socfreq.conf" 2>/dev/null
+      ui_print "  熄屏策略补成 uncap（保持原来的熄屏交还行为）"
+    fi
+    _added=$((_added + 1))
+  fi
   [ "$_added" -gt 0 ] && ui_print "  配置补齐新增项：$_added 条"
   # 删掉模块目录内原件：并存两份配置时改模块目录那份不会有任何效果
   rm -f "$MODPATH/socfreq.conf" 2>/dev/null

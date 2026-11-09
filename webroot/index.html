@@ -794,7 +794,7 @@ button{min-height:44px}
     </div>
     <div class="htxt">
       <h1>Soc智能限频</h1>
-      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.1</span></div>
+      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.2 Beta5</span></div>
     </div>
   </div>
   <!-- 主题开关：太阳=浅色，月亮=深色。点一下就换，选中哪个存到本地。 -->
@@ -837,7 +837,7 @@ button{min-height:44px}
       <div class="hero-foot">
         <span>桥接 <b id="m-bridge">—</b></span>
         <span class="sep">·</span>
-        <span>守护 <b id="ver2">V2.1</b></span>
+        <span>守护 <b id="ver2">V2.2 Beta5</b></span>
       </div>
     </div>
   </div>
@@ -875,7 +875,7 @@ button{min-height:44px}
   <div class="subhd"><button class="back" onclick="go('func')">‹</button><b>CPU / GPU 封顶</b></div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-2.9 1.2V21a2 2 0 11-4 0v-.1A1.7 1.7 0 007 19.4a1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00-1.2-2.9H1a2 2 0 110-4h.1A1.7 1.7 0 002.6 7a1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H7a1.7 1.7 0 001-1.5V1a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V7a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>CPU 封顶百分比</h2>
-    <div class="hint">封顶值向下吸附到实际频点，绝不超过设定百分比；实时偏移只影响当前生效值，不改这里显示的设定值</div>
+    <div class="hint">封顶值向下吸附到实际频点，绝不超过设定百分比；<b>100% 直接使用硬件最高频，不再吸附</b>。实时偏移只影响当前生效值，不改这里显示的设定值</div>
     <div id="conf-pct"></div>
   </div>
 <div class="card">
@@ -885,28 +885,17 @@ button{min-height:44px}
       <div class="slider"><input type="range" id="gpu_pct" min="1" max="100" oninput="pv('gpu_pct')"></div>
       <div class="pct" id="gpu_pct_v">45%</div>
     </div>
-    <div class="row">
-      <div class="lbl"><b>下限锁定</b><span>被抬高就压回最低档（devfreq 一路）</span></div>
-      <label class="sw"><input type="checkbox" id="gpu_min_lock" onchange="pv('gpu_min_lock')"><i></i></label>
-    </div>
-    <div class="row">
-      <div class="lbl"><b>禁止 GPU Boost</b><span>关掉 DCVS / 触摸抬频（高通）或 boost 档位（天玑）；游戏、满血、熄屏交还时自动放开</span></div>
-      <label class="sw"><input type="checkbox" id="gpu_boost_off" onchange="pv('gpu_boost_off')"><i></i></label>
-    </div>
-  </div>
-<div class="card">
-    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 3 5 13.5h6l-1 7.5 8-10.5h-6z"/></svg>CPU 省电</h2>
-    <div class="row">
-      <div class="lbl"><b>超大核降到最低频</b><span>不关闭核心；只把最高频簇压到最低可用频点，适合需要省电的场景。游戏/满血/熄屏交还仍会放开</span></div>
-      <label class="sw"><input type="checkbox" id="big_min" onchange="pv('big_min')"><i></i></label>
-    </div>
   </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>保存</h2>
     <div class="row">
       <div class="lbl"><b>套用本机预设</b><span id="preset-hint">读取中…</span></div>
-      <button type="button" id="preset-apply" onclick="applyChipPreset()">套用</button>
+      <button type="button" id="preset-apply" onclick="applyChipPreset()">推荐</button>
+      <button type="button" id="eco-apply" onclick="applyEcoPreset()">省电</button>
     </div>
+    <div class="hint">两个预设都会落：<b>插电不封顶、发热不主动降、PSI 不放宽、调度回限频</b>。
+      「推荐」= 能效曲线最优解的封顶与阈值；「省电」= 封顶对齐最优解（低于它反而费电）+ 开低电量阶梯。
+      两种预设都只填入控件，点「保存并生效」才写入。</div>
     <div class="hint" id="preset-diff" style="display:none"></div>
     <div class="hint">保存后守护自动重算封顶值并立即生效，无需重启手机</div>
     <div class="btns">
@@ -926,9 +915,10 @@ button{min-height:44px}
   </div>
   <div class="secttl">频率与偏移</div>
   <div class="tiles">
-    <button class="tile" onclick="go('cap')"><span class="ti"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a7 9 0 0 1 4 9l-2 4h-4l-2-4a7 9 0 0 1 4-9z"/><path d="M10 14l-3 4 2.5-1.5"/><path d="M14 14l3 4-2.5-1.5"/><path d="M13.4 9A1.4 1.4 0 1 1 10.6 9A1.4 1.4 0 1 1 13.4 9Z"/><path d="M12 17v4"/></svg></span><span class="tt">CPU / GPU 封顶</span><span class="td">四档百分比 · GPU 封顶 · 下限锁定</span></button>
+    <button class="tile" onclick="go('cap')"><span class="ti"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a7 9 0 0 1 4 9l-2 4h-4l-2-4a7 9 0 0 1 4-9z"/><path d="M10 14l-3 4 2.5-1.5"/><path d="M14 14l3 4-2.5-1.5"/><path d="M13.4 9A1.4 1.4 0 1 1 10.6 9A1.4 1.4 0 1 1 13.4 9Z"/><path d="M12 17v4"/></svg></span><span class="tt">CPU / GPU 封顶</span><span class="td">四档百分比 · GPU 封顶 · 禁止 GPU Boost</span></button>
     <button class="tile" onclick="go('adapt')"><span class="ti"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 12a6 6 0 1 1 2 4.5"/><path d="M6 8v4h4"/></svg></span><span class="tt">实时偏移</span><span class="td">插电 / 低电 / 发热 / 卡顿 四组</span></button>
     <button class="tile" onclick="go('patrol')"><span class="ti"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-18 0 9 9 0 1 1 18 0Z"/><path d="M12 7v5l3 2"/></svg></span><span class="tt">巡检与宽限</span><span class="td">巡检间隔 · 游戏宽限 · 开机满血 · 调速器</span></button>
+    <button class="tile" onclick="go('boost')"><span class="ti"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></span><span class="tt">Boost 与压制</span><span class="td">CPU/GPU Boost · 动态封顶</span></button>
   </div>
   <div class="secttl">Doze 睡眠</div>
   <div class="tiles">
@@ -955,13 +945,36 @@ button{min-height:44px}
   <div class="hint" style="margin-top:10px">两档共用同一套执行层（吸附频点 / 游戏交还 / 满血 / 实时偏移），
     只换"目标百分比从哪来"。切到智能后，上面那四个百分比变成<b>天花板</b>——状态机的目标不会超过它。</div>
   <div class="kv4">
-    <div class="kv"><div class="k">空闲 idle</div><div class="v">30 / 40%</div></div>
-    <div class="kv"><div class="k">轻载 light</div><div class="v">45 / 50%</div></div>
-    <div class="kv"><div class="k">中载 medium</div><div class="v">65 / 60%</div></div>
-    <div class="kv"><div class="k">重载 heavy</div><div class="v">85 / 75%</div></div>
+    <div class="kv"><div class="k">空闲 idle</div><div class="v">天花板 ×45%</div></div>
+    <div class="kv"><div class="k">轻载 light</div><div class="v">天花板 ×65%</div></div>
+    <div class="kv"><div class="k">中载 medium</div><div class="v">天花板 ×85%</div></div>
+    <div class="kv"><div class="k">重载 heavy</div><div class="v">天花板 ×100%</div></div>
   </div>
-  <div class="hint">左为最高频簇（大核），右为其余簇。进档 8/30/60%，退档 4/25/55%，
-    且要连续两拍一致才换档——负载在阈值附近抖动时频率不会跟着跳。</div>
+  <div class="hint">负载按<b>每簇平均占用里最忙的一簇</b>算，不是 8 核求和——单核满载不会被稀释。
+    各簇按自己的 <b>CPU_PCT_*</b> 当天花板算，m=3/4 的中间档也一样。
+    进档 8/30/60%，退档 4/25/55%；升档 1 拍（5s）、降档 2 拍（10s）。
+    智能模式不再叠 PSI 向上借额度；插电仍会被充电地板抬高，省电对比请拔电。</div>
+<div class="row">
+      <div class="lbl"><b>静止降频</b><span>刷视频/阅读这类亮屏不碰的场景，占用会钉在轻载段；
+        静置一段时间后把目标再压一档，占用越过解除阈值（手指一动）立刻恢复。
+        只作用于空闲/轻载两档，重载/中载不碰；cap 模式不受影响</span></div>
+      <label class="sw"><input type="checkbox" id="still_drop" onchange="pv('still_drop')"><i></i></label>
+    </div>
+<div class="row">
+      <div class="lbl"><b>静止目标</b><span>静止时目标 = 天花板 ×比例（10-90%），四簇各按自己的天花板算</span></div>
+      <div class="slider"><input type="range" id="still_frac" min="10" max="90" oninput="pv('still_frac')"></div>
+      <div class="pct" id="still_frac_v">55%</div>
+    </div>
+<div class="row">
+      <div class="lbl"><b>静置判定</b><span>最忙簇占用落进轻载段并持续这么久才进入（10-600 秒）</span></div>
+      <div class="slider"><input type="range" id="still_settle_s" min="10" max="600" step="5" oninput="pv('still_settle_s')"></div>
+      <div class="pct" id="still_settle_s_v">60s</div>
+    </div>
+<div class="row">
+      <div class="lbl"><b>解除阈值</b><span>单拍生效：越过它立刻解除并重新计时（10-95%，必须大于轻载进档阈值 8）</span></div>
+      <div class="slider"><input type="range" id="still_exit" min="10" max="95" oninput="pv('still_exit')"></div>
+      <div class="pct" id="still_exit_v">25%</div>
+    </div>
 </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>保存</h2>
@@ -1092,6 +1105,63 @@ button{min-height:44px}
     </div>
   </div>
 </div>
+<div class="pg" id="p-boost">
+  <div class="subhd"><button class="back" onclick="go('func')">‹</button><b>Boost 与压制</b></div>
+<div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg>动态封顶</h2>
+    <div class="hint">一个开关 = 完整压制，以下一起生效（节点存在才写、值记进账本，进游戏/满血/熄屏交还时自动还原，卸载按账本恢复）：
+      ① 亮屏常态 1s 快拍，天花板在 100% / 中间档 / 风格地板三档收放——连续 2 拍贴顶才放一档，仍贴顶再回满；低载逐拍到中间再地板；
+      ② 到底且静置空闲时把下限压到硬件最低，活动立即还原；SM8750 / SM8850 还会把超大核直接放到最低频，其他芯片不套这条；
+      ③ 中和高通 walt 的输入/调度拉频源（触摸瞬间顶频率的源头，其他 SoC 自动跳过），压制期间每个 1s 快拍都补写，防止系统切前台/亮屏时把它恢复成 100；
+      ④ 各簇调速器升/降频限速（见下方二级菜单）；
+      ⑤ 存在时压低任务组 uclamp.min（缺节点自动跳过）。
+      开启期间「CPU 下限锁到底」的亮屏巡检自动让位。进游戏/熄屏自动暂停。</div>
+    <div class="row">
+      <div class="lbl"><b>动态封顶</b><span>默认关。压的是"无谓越过最优解的频率"，推荐值本身不动；开启后若卡顿明显就关掉</span></div>
+      <label class="sw"><input type="checkbox" id="suppress" onchange="pv('suppress')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>压制风格</b><span>均衡 = 中间 90%、地板 80%，连续 3 拍 <20% 逐级降；省电 = 中间 85%、地板 70%，连续 2 拍就降；贴顶先回中间，仍贴顶才回满</span></div>
+      <div class="pset" id="p-sup"></div>
+    </div>
+    <details class="more"><summary>升频 / 降频限速微调</summary>
+      <div class="row">
+        <div class="lbl"><b>升频限速</b><span>100-50000µs：数值越大升频越平滑，突发响应越钝</span></div>
+        <input type="number" id="gov_up_us" min="100" max="50000" step="100" value="1000"
+               style="flex:0 0 110px;text-align:center" oninput="pv('gov_up_us')">
+      </div>
+      <div class="row">
+        <div class="lbl"><b>降频限速</b><span>100-50000µs：数值越小负载回落后降得越快</span></div>
+        <input type="number" id="gov_down_us" min="100" max="50000" step="100" value="1000"
+               style="flex:0 0 110px;text-align:center" oninput="pv('gov_down_us')">
+      </div>
+    </details>
+    <div class="row">
+      <div class="lbl"><b>禁止 GPU Boost</b><span>一个开关同时管两件事：下限被抬高就压回硬件最低档；关掉 DCVS / 触摸抬频（高通）或 boost 档位（天玑）。游戏、满血、熄屏交还时自动放开</span></div>
+      <label class="sw"><input type="checkbox" id="gpu_boost_off" onchange="pv('gpu_boost_off')"><i></i></label>
+    </div>
+  </div>
+<div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 3 5 13.5h6l-1 7.5 8-10.5h-6z"/></svg>CPU 省电</h2>
+    <div class="row">
+      <div class="lbl"><b>超大核降到最低频</b><span>不关闭核心；只把最高频簇压到最低可用频点，适合需要省电的场景。游戏/满血/熄屏交还仍会放开</span></div>
+      <label class="sw"><input type="checkbox" id="big_min" onchange="pv('big_min')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>CPU 下限锁到底</b><span>常态把各簇最低频压到硬件最低，轻载也贴着地板跑；可能拖慢唤醒，默认关。游戏/满血/熄屏交还时还原</span></div>
+      <label class="sw"><input type="checkbox" id="cpu_min_lock" onchange="pv('cpu_min_lock');paintCpuMin(lastSt)"><i></i></label>
+    </div>
+    <div class="hint" id="cmin-stat">CPU 下限巡检：未开启</div>
+  </div>
+<div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>保存</h2>
+    <div class="hint">和「配置」页共用同一份保存动作：一次把所有页的改动都写进去并立即生效</div>
+    <div class="btns">
+      <button class="pri" onclick="saveAll()">保存并生效</button>
+      <button onclick="loadConf()">放弃修改</button>
+    </div>
+  </div>
+</div>
 <div class="pg" id="p-exempt">
   <div class="subhd"><button class="back" onclick="go('func')">‹</button><b>永久豁免</b></div>
 <div class="card">
@@ -1177,12 +1247,12 @@ button{min-height:44px}
       <div class="pct" id="boot_full_v">60s</div>
     </div>
 <div class="row">
-      <div class="lbl"><b>熄屏交还系统</b><span>开：熄屏后解除封顶并交还系统，只保留 15s 轻巡检</span></div>
+      <div class="lbl"><b>熄屏交还系统</b><span>开：熄屏后解除封顶并交还系统，只保留 30s 轻巡检</span></div>
       <label class="sw"><input type="checkbox" id="screen_uncap"
         onchange="pv('screen_uncap');if(this.checked)document.getElementById('screen_cap').checked=false"><i></i></label>
     </div>
 <div class="row">
-      <div class="lbl"><b>熄屏轻巡检</b><span>保持封顶，但只每 15s 压回被顶高的上限、不查前台；
+      <div class="lbl"><b>熄屏轻巡检</b><span>保持封顶，但只每 30s 压回被顶高的上限、不查前台；
         关着是旧行为（熄屏也每 5s 全量巡检）</span></div>
       <label class="sw"><input type="checkbox" id="screen_cap"
         onchange="pv('screen_cap');if(this.checked)document.getElementById('screen_uncap').checked=false"><i></i></label>
@@ -1227,7 +1297,10 @@ button{min-height:44px}
     <div class="hint">优先于配置页的全局百分比。<b>满血</b> = 这个应用在前台时整个交还系统
       （CPU 与 GPU 都不封顶）。CPU 四簇统一按一个百分比封顶；GPU 默认跟随全局，
       也可以单独给这个应用设一道更低的帽（例如录像时压住 GPU 发热）。
-      <b>熄屏也封顶</b> = 这个应用在前台时锁屏也不交还系统，适合挂机下载/编译。
+      <b>熄屏也封顶</b> = 这个应用在熄屏那一刻是前台时也不交还系统，想继续压着它时用。
+      <b>熄屏满血</b> = 这个应用在熄屏那一刻是前台时交还系统（亮屏仍按全局封顶）。
+      熄屏轻巡检不查前台，所以后台下载、后台音乐、闹钟这类不在前台的场景仍会保持封顶；
+      需要整晚放开时，熄屏前先把应用切到前台。
       相机类应用装机时会按机型自动设为满血（可改可删，升级不会塞回来）。</div>
     <div id="mode-rows"></div>
     <div class="btns">
@@ -1802,7 +1875,9 @@ function pv(id){
   if(el.type === 'checkbox'){ out.textContent = el.checked ? '开' : '关'; return; }
   // 单位分三类：百分比、秒、还有实时偏移这一组（℃ 和 百分点）。
   // 别一律加 s —— "75s" 这种读数会让人以为温控填错了。
-  if(id === 'gpu_pct' || /^CPU_PCT_/.test(id) || id === 'chg_pct'){
+  if(id === 'gpu_pct' || /^CPU_PCT_/.test(id) || id === 'chg_pct' ||
+     id === 'still_frac' || id === 'still_exit' ||
+     id === 'gov_up_us' || id === 'gov_down_us'){
     out.textContent = el.value + '%';
   } else if(/^th_(high|low)$/.test(id)){
     out.textContent = el.value + '℃';
@@ -1884,7 +1959,8 @@ const GOVERNOR_OPTS = [['','不干预'],['walt','walt'],['schedutil','schedutil'
   ['powersave','powersave'],['conservative','conservative'],['performance','performance']];
 /* 荣耀 / 华为内核切通用调速器会硬重启，守护不写；页面固定显示"不干预"。 */
 let GOV_LOCKED = false;
-const PK_MODE_OPTS = [['full','满血'],['keep','熄屏也封顶'],['90','90%'],['80','80%'],
+const PK_MODE_OPTS = [['full','满血'],['keep','熄屏也封顶'],['soff','熄屏满血'],
+  ['90','90%'],['80','80%'],
   ['70','70%'],['60','60%'],['50','50%'],['40','40%'],['30','30%'],
   ['split','分核…'],['custom','自定义…']];
 const PK_GPU_OPTS = [['','跟随全局'],['90','90%'],['80','80%'],['70','70%'],
@@ -2038,11 +2114,13 @@ function paintHw(){
     let approx = false;
     if(cur !== saved){
       cap = want;
+      if(cur < 100){
       const fl = s['policyfreq_' + i];
       if(fl){
         const fs = fl.split(/[ 	]+/).filter(x=>/^\d+$/.test(x)).map(Number);
         const ok = fs.filter(f=>f<=want);
         if(ok.length) cap = Math.max.apply(null, ok);
+      }
       }
       approx = true;
     }
@@ -2071,7 +2149,7 @@ function paintHw(){
       const isHz = s.gpu_unit !== 'kHz';
       let cap = (cur === saved && !(parseInt(s.gpu_dlt,10) || 0) && s.gpu_cap)
         ? (parseInt(s.gpu_cap,10) || want) : want;
-      if(s.gpufreq){
+      if(cur < 100 && s.gpufreq){
         const fs = s.gpufreq.split(/[ 	]+/).filter(x=>/^\d+$/.test(x)).map(Number);
         if(fs.length){
           const ok = fs.filter(f=>f<=want);
@@ -2326,6 +2404,23 @@ function paintAdapt(s){
   el.style.display = '';
 }
 
+/* CPU 下限巡检的自证：开关打开后光有开关看不出它是在写、被夹回还是在退避。 */
+function paintCpuMin(s){
+  const el = document.getElementById('cmin-stat');
+  if(!el) return;
+  const sw = document.getElementById('cpu_min_lock');
+  if(!sw || !sw.checked){ el.textContent = 'CPU 下限巡检：未开启'; return; }
+  if(!s || !s.state || s.state === 'unknown'){
+    el.textContent = 'CPU 下限巡检：等待守护数据…'; return;
+  }
+  const w = Number(s.cminw) || 0;
+  const f = Number(s.cminf) || 0;
+  const g = Number(s.cming) || 0;
+  el.textContent = '已写 ' + w + ' 次 · 被夹回 ' + f + ' 次'
+    + (g > 0 ? ' · ' + g + ' 簇被系统钉死（30 分钟复探一次）' : '')
+    + (s.cminpaused === '1' && g === 0 ? ' · 退避中（10 分钟后重试）' : '');
+}
+
 async function loadStatus(){
   if(busy) return;
   busy = true;
@@ -2349,7 +2444,7 @@ async function loadStatus(){
     } else if(st === 'full'){
       b.className = 'status game';
       t.textContent = (s.screen === 'deep' ? '深度空闲 · 已交还系统' : '熄屏 · 已交还系统')
-                    + '（' + (s.soff || '15') + 's 轻巡检）';
+                    + '（' + (s.soff || '30') + 's 轻巡检）';
     } else if(st === 'normal'){
       b.className = 'status on';
       t.textContent = (s.screen === 'off' && s.soff_keep === '1')
@@ -2363,6 +2458,7 @@ async function loadStatus(){
     saveBadge();       /* 这一份是刚刚从守护拿到的，下次打开先画它 */
     document.getElementById('pbadge').style.display = s.paused === '1' ? '' : 'none';
     paintAdapt(s);
+    paintCpuMin(s);
     document.getElementById('m-pid').textContent = s.pid || '—';
     /* 首页不显示"前台 / 档位"那一格：状态徽标已说明当前档位，
      * 具体应用和封到多少在应用页看得更全。
@@ -2470,6 +2566,7 @@ function presetLabel(p){
 async function loadPreset(){
   const hint = document.getElementById('preset-hint');
   const btn = document.getElementById('preset-apply');
+  const eco = document.getElementById('eco-apply');
   if(!hint || !btn) return;
   try{
     const p = parse(await api('preset_get'));
@@ -2477,15 +2574,18 @@ async function loadPreset(){
     if(p.none === '1'){
       hint.textContent = '无（' + (p.soc || '未知芯片') + ' 没有对应预设）';
       btn.disabled = true;
+      if(eco) eco.disabled = true;
       return;
     }
     const vals = presetLabel(p);
     hint.textContent = (p.title || p.soc || '推荐预设') + (vals ? '：' + vals : '');
     btn.disabled = false;
+    if(eco) eco.disabled = false;
   }catch(e){
     /* 读失败不锁按钮：点一下会重试，至少能弹出原因 */
     hint.textContent = '读取失败：' + e.message;
     btn.disabled = false;
+    if(eco) eco.disabled = false;
   }
 }
 /* 名字不能叫 applyPreset：功能页那三组档位已经有一个同名函数，
@@ -2517,6 +2617,25 @@ async function applyChipPreset(){
   set('th_high',        PRESET.th_high,'发热线', '℃');
   set('th_low',         PRESET.th_low, '恢复线', '℃');
   set('psi_gain',       PRESET.psi_gain,'PSI 借出','%');
+  /* 三条策略随预设一起落（与省电预设同一语义，电量阶梯不归推荐预设管）：
+     插电不封顶、发热不主动降、PSI 不放宽。 */
+  const setChk = (id, want, label) => {
+    const el = document.getElementById(id);
+    if(!el || !!el.checked === want) return;
+    changes.push(label + (want ? ' 开' : ' 关'));
+    el.checked = want;
+    if(typeof pv === 'function') pv(id);
+  };
+  setChk('th_cap', false, '温控闭环');
+  setChk('psi_adapt', false, 'PSI 借出');
+  setChk('chg_uncap', true, '插电放宽');
+  set('chg_pct', '100', '插电抬到', '%');
+  /* 调度随预设回限频：最优解靠 cap 守住，动态部分用户手动切智能。 */
+  const seg = document.getElementById('p-strategy');
+  if(seg && seg.value !== 'cap'){
+    if(seg.value) changes.push('调度 ' + (seg.value === 'smart' ? '智能' : seg.value) + '→限频');
+    if(typeof paintStrategy === 'function') paintStrategy('cap');
+  }
   const diff = document.getElementById('preset-diff');
   if(!changes.length){
     if(diff){ diff.style.display = ''; diff.textContent = '当前已经是这套预设，不需要再改。'; }
@@ -2533,6 +2652,73 @@ async function applyChipPreset(){
   toast('已填入预设，记得保存');
 }
 
+/* 省电预设：**对齐能效曲线最优解**（推荐值），而不是往更低压。
+ * 推荐值本身来自能效曲线分析——限频低于它，每条指令的能耗反而上升，
+ * 任务跑得更久、屏幕常亮更久，总能耗是涨的（race-to-idle 反噬）。
+ * 省电靠"不许越过最优解"与残量管理：关 PSI 借出（不再越过）、
+ * 开低电量阶梯（残量续航）、调度随预设回限频（cap 守住最优解）。
+ * 温控与充电地板不在管辖内（默认策略：发热交给系统热管理、插电不封顶）。
+ * 只填控件，保存才生效；连点两次不变。 */
+async function applyEcoPreset(){
+  if(!PRESET) await loadPreset();
+  if(!PRESET || PRESET.none === '1'){
+    toast(PRESET && PRESET.none === '1' ? '这台芯片没有推荐预设，省电预设也不可用'
+                                        : '还没读到预设，稍后再点一次', true);
+    return;
+  }
+  const changes = [];
+  const num = (v) => { const n = parseInt(v, 10); return isFinite(n) ? n : null; };
+  /* CPU/GPU：双向对齐推荐值。高于最优解收下来（常见：装完没套预设）；
+     低于最优解也抬回去——那是负优化，不是更省电。 */
+  const setExact = (id, target, label, unit) => {
+    if(target === null) return;
+    const el = document.getElementById(id);
+    if(!el) return;
+    const cur = num(el.value);
+    if(cur === null || cur === target) return;
+    changes.push(label + ' ' + cur + '→' + target + (unit || ''));
+    el.value = String(target);
+    if(typeof pv === 'function') pv(id);
+  };
+  setExact('CPU_PCT_BIG',    num(PRESET.big),    '超大核', '%');
+  setExact('CPU_PCT_MID2',   num(PRESET.mid2),   '次大核', '%');
+  setExact('CPU_PCT_MID',    num(PRESET.mid),    '中核',   '%');
+  setExact('CPU_PCT_LITTLE', num(PRESET.little), '小核',   '%');
+  setExact('gpu_pct',        num(PRESET.gpu),    'GPU',    '%');
+  const setChk = (id, want, label) => {
+    const el = document.getElementById(id);
+    if(!el || !!el.checked === want) return;
+    changes.push(label + (want ? ' 开' : ' 关'));
+    el.checked = want;
+    if(typeof pv === 'function') pv(id);
+  };
+  setChk('psi_adapt', false, 'PSI 借出');
+  setChk('batt_step', true, '低电量阶梯');
+  /* 三条策略与推荐预设同一语义：插电不封顶、发热不主动降、PSI 不放宽。 */
+  setChk('th_cap', false, '温控闭环');
+  setChk('chg_uncap', true, '插电放宽');
+  setExact('chg_pct', 100, '插电抬到', '%');
+  /* 调度随预设回限频（不再切 smart）。 */
+  const seg = document.getElementById('p-strategy');
+  if(seg && seg.value !== 'cap'){
+    if(seg.value) changes.push('调度 ' + (seg.value === 'smart' ? '智能' : seg.value) + '→限频');
+    if(typeof paintStrategy === 'function') paintStrategy('cap');
+  }
+  const diff = document.getElementById('preset-diff');
+  if(!changes.length){
+    if(diff){ diff.style.display = ''; diff.textContent = '当前已经是省电预设，不需要再改。'; }
+    toast('当前已经是省电预设');
+    return;
+  }
+  if(diff){
+    diff.style.display = '';
+    diff.textContent = '省电预设已填入，尚未保存：' + changes.join(' · ') +
+                       '。点「保存并生效」才会写入。';
+  }
+  if(typeof syncFunc === 'function') syncFunc();
+  toast('已填入省电预设，记得保存');
+}
+
 async function loadConf(){
   try{
     const c = parse(await api('conf_get'));
@@ -2543,16 +2729,20 @@ async function loadConf(){
     });
     const g = document.getElementById('gpu_pct');
     g.value = c.GPU_PCT || 45; pv('gpu_pct');
-    const m = document.getElementById('gpu_min_lock');
-    m.checked = c.GPU_MIN_LOCK !== '0'; pv('gpu_min_lock');
     const gbo = document.getElementById('gpu_boost_off');
     gbo.checked = c.GPU_BOOST_OFF !== '0'; pv('gpu_boost_off');
+    document.getElementById('suppress').checked = c.SUPPRESS === '1'; pv('suppress');
     const bm = document.getElementById('big_min');
     bm.checked = c.BIG_MIN === '1'; pv('big_min');
+    const cml = document.getElementById('cpu_min_lock');
+    cml.checked = c.CPU_MIN_LOCK === '1'; pv('cpu_min_lock');
     const iv = document.getElementById('interval');
     iv.value = c.INTERVAL || 5; pv('interval');
     const gr = document.getElementById('grace');
     gr.value = c.GAME_GRACE_SEC || 10; pv('grace');
+    /* 静止降频：新装默认开（守护默认值同为 1），老配置缺行也按开显示——
+       判据用 !== '0'，与 chg_uncap 等开关同一口径。 */
+    document.getElementById('still_drop').checked = c.STILL_DROP !== '0'; pv('still_drop');
     const bf = document.getElementById('boot_full');
     /* 0 是合法值（= 关），不能用 `c.BOOT_FULL_S || 60`：
        那样会把关掉的开关在下次载入时又显示成 60。 */
@@ -2582,6 +2772,15 @@ async function loadConf(){
       pv(id);
     };
     num('chg_pct', 'CHG_PCT', 100);
+    num('still_frac', 'STILL_FRAC', 55);
+    num('still_settle_s', 'STILL_SETTLE_S', 60);
+    num('still_exit', 'STILL_EXIT', 25);
+    /* 压制风格与限速微调：缺行按均衡/1000 显示。 */
+    const spEl = document.getElementById('p-sup');
+    if(spEl) segInto(spEl, [['bal','均衡'],['sav','省电']],
+                     ((c.SUP_STYLE || '').trim() === 'sav') ? 'sav' : 'bal', () => {});
+    num('gov_up_us', 'GOV_UP_US', 1000);
+    num('gov_down_us', 'GOV_DOWN_US', 1000);
     num('th_high', 'TH_HIGH', 75);
     num('th_low',  'TH_LOW',  68);
     num('th_max',  'TH_MAX',  25);
@@ -2612,6 +2811,7 @@ async function loadConf(){
     pv('governor');
     /* 功能页的下拉档和"现在会怎么做"那几句，都按刚填好的控件重算 */
     syncFunc();
+    paintCpuMin(lastSt);
     confLoaded = true;
     toast('已载入当前配置');
   }catch(e){ confLoaded = false; toast(e.message, true); }
@@ -2672,6 +2872,14 @@ function buildPresetSelects(){
     stg.classList.add('seg', 'fill');
     stg.value = 'cap';
     segInto(stg, [['cap', '限频'], ['smart', '智能']], 'cap', () => {});
+  }
+  /* 压制风格：两档，短标签，fill 均分。开机先画一次（go('boost') 的
+     loadConf 也会再刷），不然用户头一次进页面看到的是空档。 */
+  const sp = document.getElementById('p-sup');
+  if(sp && !sp.children.length){
+    sp.classList.add('seg', 'fill');
+    sp.value = 'bal';
+    segInto(sp, [['bal', '均衡'], ['sav', '省电']], 'bal', () => {});
   }
 }
 
@@ -2770,11 +2978,19 @@ async function saveAll(){
     const pairs = PCT_KEYS.filter(o=>!TIER_ABSENT[o.k])
                           .map(o=>[o.k, document.getElementById(o.k).value]);
     pairs.push(['GPU_PCT', document.getElementById('gpu_pct').value]);
-    pairs.push(['GPU_MIN_LOCK', document.getElementById('gpu_min_lock').checked ? '1' : '0']);
     pairs.push(['GPU_BOOST_OFF', document.getElementById('gpu_boost_off').checked ? '1' : '0']);
+    pairs.push(['SUPPRESS', document.getElementById('suppress').checked ? '1' : '0']);
+    pairs.push(['SUP_STYLE', document.getElementById('p-sup').value || 'bal']);
+    pairs.push(['GOV_UP_US', document.getElementById('gov_up_us').value]);
+    pairs.push(['GOV_DOWN_US', document.getElementById('gov_down_us').value]);
     pairs.push(['BIG_MIN', document.getElementById('big_min').checked ? '1' : '0']);
+    pairs.push(['CPU_MIN_LOCK', document.getElementById('cpu_min_lock').checked ? '1' : '0']);
     pairs.push(['INTERVAL', document.getElementById('interval').value]);
     pairs.push(['GAME_GRACE_SEC', document.getElementById('grace').value]);
+    pairs.push(['STILL_DROP', document.getElementById('still_drop').checked ? '1' : '0']);
+    pairs.push(['STILL_FRAC', document.getElementById('still_frac').value]);
+    pairs.push(['STILL_SETTLE_S', document.getElementById('still_settle_s').value]);
+    pairs.push(['STILL_EXIT', document.getElementById('still_exit').value]);
     pairs.push(['BOOT_FULL_S', document.getElementById('boot_full').value]);
     const suOn = document.getElementById('screen_uncap').checked;
     const scOn = document.getElementById('screen_cap').checked;
@@ -3270,21 +3486,23 @@ let PK_LIMIT = 80;
 
 /* 档位值四种写法：full / keep / 70 / 70:40（GPU 段可空）。 */
 function parseModeVal(v){
-  if(v === 'full') return {full:true, keep:false, cpu:'', gpu:''};
-  if(v === 'keep') return {full:false, keep:true, cpu:'keep', gpu:''};
+  if(v === 'full') return {full:true, keep:false, soff:false, cpu:'', gpu:''};
+  if(v === 'keep') return {full:false, keep:true, soff:false, cpu:'keep', gpu:''};
+  if(v === 'soff') return {full:false, keep:false, soff:true, cpu:'soff', gpu:''};
   const i = String(v).indexOf(':');
-  if(i >= 0) return {full:false, keep:false, cpu:String(v).slice(0,i).trim(),
+  if(i >= 0) return {full:false, keep:false, soff:false, cpu:String(v).slice(0,i).trim(),
                      gpu:String(v).slice(i+1).trim()};
-  return {full:false, keep:false, cpu:String(v), gpu:''};
+  return {full:false, keep:false, soff:false, cpu:String(v), gpu:''};
 }
 function joinModeVal(cpu, gpu){
-  if(cpu === 'full' || cpu === 'keep') return cpu;
+  if(cpu === 'full' || cpu === 'keep' || cpu === 'soff') return cpu;
   return gpu ? cpu + ':' + gpu : cpu;
 }
 function modeText(v){
   const p = parseModeVal(v);
   if(p.full) return '满血';
   if(p.keep) return '熄屏也封顶';
+  if(p.soff) return '熄屏满血';
   const out = [];
   if(p.cpu){
     if(p.cpu.indexOf('/') >= 0){
@@ -4082,6 +4300,9 @@ function renderMonitor(s){
   const ps = Number(s.psi || 0), th = Number(s.th || 0);
   const strat = String(s.strat || '0') === '1' ? '智能' : '限频';
   const nsmart = ['空闲', '轻载', '中载', '重载'][Number(s.smart || 0)] || '—';
+  /* 静止降频生效时把档位名换成"静止"：它压的就是轻载档，单独标出来
+     用户才知道"为什么显示轻载但频率更低"。 */
+  const nstate = String(s.still || '0') === '1' ? '静止' : nsmart;
   /* 守护不在时 status 会给 -1 之类的哨兵值，别把它当成真实读数画出来 */
   const parts = [];
   if(dlt) parts.push((dlt > 0 ? '+' : '') + dlt + '%');
@@ -4092,7 +4313,7 @@ function renderMonitor(s){
               : (st && st !== 'unknown') ? st : '未运行';
   grid.innerHTML = [
     monKV('状态', stTxt),
-    monKV('策略', strat + (strat === '智能' ? ' · ' + nsmart : '')),
+    monKV('策略', strat + (strat === '智能' ? ' · ' + nstate : '')),
     monKV('偏移', parts.length ? parts.join(' · ') : '0%'),
     monKV('温度', Number(s.temp) > 0 ? s.temp + ' ℃' : '—'),
     monKV('电量', Number(s.batt) >= 0 ? s.batt + '%' + (String(s.chg) === '1' ? ' · 充电' : '') : '—'),
@@ -4201,7 +4422,7 @@ function go(p, opts){
   const after = (fn)=>{ let done = false; const run = ()=>{ if(done) return; done = true; fn(); };
     requestAnimationFrame(()=>setTimeout(run, 0)); setTimeout(run, 40); };
   after(()=>{
-    if(p==='cap'||p==='strat'||p==='patrol'||p==='adapt'){
+    if(p==='cap'||p==='strat'||p==='patrol'||p==='adapt'||p==='boost'){
       if(!navFresh(p)){ loadConf(); markNav(p); }
     }
     if(p==='cap' && !navFresh('cap-cores')){ loadCores(); markNav('cap-cores'); }

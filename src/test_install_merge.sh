@@ -20,6 +20,7 @@ T=$(mktemp -d) || exit 1
 trap 'rm -rf "$T"' EXIT
 
 ui_print() { echo "      [ui] $1"; }
+abort() { echo "      [abort] $1"; exit 1; }
 
 pass=0; fail=0
 chk() { if [ "$1" = "$2" ]; then echo "  ok   $3"; pass=$((pass+1));
@@ -111,9 +112,11 @@ mk_case; runcase
 chk "$(sed -n 's/^GPU_PCT=//p' "$T/data/socfreq.conf")" "30" "用户改过的值一个都没被动"
 chk "$(grep -c '^SCREEN_UNCAP=' "$T/data/socfreq.conf")" "1" "新增的键被补上，且只有一行"
 chk "$(grep -c '^BOOT_FULL_S=' "$T/data/socfreq.conf")" "1" "BOOT_FULL_S 同样补齐"
-# 行为开关例外：老用户没有 SCREEN_POLICY 时不能被升级补成 uncap。
-chk "$(grep -c '^SCREEN_POLICY=' "$T/data/socfreq.conf")" "0" \
-    "升级不补 SCREEN_POLICY（老用户保持 keep）"
+# 两个旧键都没有：补成 uncap，保持原来"熄屏交还"的映射，不改行为。
+chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "uncap" \
+    "两个熄屏键都没有时补成 uncap（保持原行为）"
+chk "$(grep -c '^SCREEN_POLICY=' "$T/data/socfreq.conf")" "1" \
+    "SCREEN_POLICY 只补一行"
 chk "$([ -f "$T/mod/socfreq.conf" ] && echo y || echo n)" "n" \
     "补完删掉模块目录那份（两份配置并存就必然有一份是死的）"
 
@@ -139,7 +142,7 @@ while read -r _l; do
   case "$_l" in ''|\#*) continue ;; esac
   case "$_l" in *=*) ;; *) continue ;; esac
   _k=${_l%%=*}
-  # SCREEN_POLICY 是行为开关，约定不往老用户配置里补，单独跳过。
+  # SCREEN_POLICY 由专门迁移段补，不参与通用补键检查。
   [ "$_k" = SCREEN_POLICY ] && continue
   # 拼字符串写成 _missing="$(_missing $_k)" 是错的：$() 是"执行命令"，
   # _missing 为空时等于执行一条空命令名，报 command not found，
@@ -276,7 +279,7 @@ chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "66" "芯片默认不动 MID"
 chk "$(_g "$T/data/socfreq.conf" GPU_PCT)" "45" "8E 芯片默认的 GPU_PCT 是 45"
 chk "$(_g "$T/data/socfreq.conf" TH_HIGH)" "75" "8E 芯片默认 TH_HIGH=75"
 chk "$(_g "$T/data/socfreq.conf" TH_LOW)" "68" "8E 芯片默认 TH_LOW=68"
-chk "$(_g "$T/data/socfreq.conf" PSI_GAIN)" "10" "8E 芯片默认 PSI_GAIN=10"
+chk "$(_g "$T/data/socfreq.conf" PSI_GAIN)" "5" "8E 芯片默认 PSI_GAIN=5"
 chk "$(grep -Ec 'CPU_PCT_BIG=.*pz|\.pz' "$T/data/socfreq.conf" || true)" "0" "临时文件没混进配置"
 chk "$([ -f "$T/data/socfreq.conf.pz" ] && echo y || echo n)" "n" "预设用完把 .pz 清掉了"
 # ro.soc.model 拿不到时要退到 ro.board.platform（部分 ROM 不填前者）
@@ -475,8 +478,8 @@ chk "$(grep -c '^white=com.not.installed$' "$T/data/dsleep.conf")" "0" \
     "没装的包不写"
 chk "$(grep -c '^white=com.tencent.mm$' "$T/data/dsleep.conf")" "1" \
     "只写一条，不把注释里的示例也当条目"
-chk "$(grep -c '^enable=0' "$T/data/dsleep.conf")" "1" \
-    "新建的 dsleep.conf 仍是默认关闭"
+chk "$(grep -c '^enable=1' "$T/data/dsleep.conf")" "1" \
+    "新建的 dsleep.conf 默认开启"
 chk "$([ -f "$T/data/builtin_white.base.txt" ] && echo y)" "y" "留下豁免清单的升级基准"
 
 echo "== 场景 17：重复安装不重复加 =="
@@ -511,6 +514,49 @@ chk "$(grep -c '^white=org.telegram.messenger$' "$T/data/dsleep.conf")" "0" \
     "上游移除的豁免被撤下"
 chk "$(grep -c '^white=com.tencent.mobileqq$' "$T/data/dsleep.conf")" "1" \
     "同一份清单里保留的项不受影响"
+
+echo "== 场景 21：数据目录位置被同名文件占用 =="
+# 少数用户 /data/adb/soc_freqcap 被残留文件或悬空软链占着，mkdir 静默失败，
+# 最后在写标记文件时才报 "nonexistent directory"。装机段应先移开再重建。
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/mod"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+printf 'stale\n' > "$T/data"
+mk_case; runcase
+chk "$([ -d "$T/data/run" ] && echo y)" "y" "同名文件被移开后重建了数据目录"
+chk "$(ls -d "$T"/data.bad.* 2>/dev/null | wc -l | tr -d ' ')" "1" \
+    "原文件保留为 .bad 备份，没有直接删掉"
+
+echo "== 场景 22：旧配置 SCREEN_UNCAP=0 且无 SCREEN_POLICY → 补 cap =="
+# 这是真正会落进 keep（熄屏 5s 全量巡检）的存量配置；升级时必须只修这一种。
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
+sed -e '/^SCREEN_POLICY=/d' -e 's/^SCREEN_UNCAP=.*/SCREEN_UNCAP=0/' "$MOD/socfreq.conf" \
+    > "$T/data/socfreq.conf"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+mk_case; runcase
+chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "cap" \
+    "SCREEN_UNCAP=0 的旧配置补成 cap，不再落 keep"
+chk "$(grep -c '^SCREEN_POLICY=' "$T/data/socfreq.conf")" "1" "只补一行"
+
+echo "== 场景 23：旧配置 SCREEN_UNCAP=1 且无 SCREEN_POLICY → 保持 uncap =="
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
+sed -e '/^SCREEN_POLICY=/d' -e 's/^SCREEN_UNCAP=.*/SCREEN_UNCAP=1/' "$MOD/socfreq.conf" \
+    > "$T/data/socfreq.conf"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+mk_case; runcase
+chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "uncap" \
+    "SCREEN_UNCAP=1 的旧配置保持 uncap，不改行为"
+
+echo "== 场景 24：已有 SCREEN_POLICY=keep → 一个字符都不动 =="
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
+sed 's/^SCREEN_POLICY=.*/SCREEN_POLICY=keep/' "$MOD/socfreq.conf" > "$T/data/socfreq.conf"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+mk_case; runcase
+chk "$(grep -c '^SCREEN_POLICY=' "$T/data/socfreq.conf")" "1" "没有补第二行"
+chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "keep" "显式 keep 不被改写"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "装机迁移段台架：全部通过 ($pass)"; else echo "装机迁移段台架：$fail 项失败 / $pass 项通过"; fi

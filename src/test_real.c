@@ -488,6 +488,7 @@ int sf_test_main(void) {
             "com.dual.cpufollow=:40\n"
             "com.keep.one=keep\n"
             "com.keep.upper=KEEP\n"
+            "com.soff.one=soff\n"
             "com.dual.bad1=0:40\n"
             "com.dual.bad2=70:101\n"
             "com.dual.bad3=:\n"
@@ -504,11 +505,11 @@ int sf_test_main(void) {
       n = load_app_modes_from(fp);
       char nb[16];
       snprintf(nb, sizeof nb, "实到 %d 条", n);
-      /* 合法条目恰好 15 条：camera / minimap / Nap / dup.one(合并成一条) /
+      /* 合法条目恰好 16 条：camera / minimap / Nap / dup.one(合并成一条) /
        * trailing / learn.one / learn.two / crlf.one / dual.both /
-       * dual.gpufollow / dual.cpufollow / keep.one / keep.upper /
+       * dual.gpufollow / dual.cpufollow / keep.one / keep.upper / soff.one /
        * split.both / split.gpu */
-      sf_check(n == 15, "只收合法条目（注释/空行/越界/坏值/无点/带空格都跳过）", nb);
+      sf_check(n == 16, "只收合法条目（注释/空行/越界/坏值/无点/带空格都跳过）", nb);
       /* 学习写回来的那条带来源标记（值后面跟 " #learn"）。截不掉就是整行被
        * 当成坏值丢弃——表现是页面上明明列着一条档位，核心上却没戴帽，
        * 这是最难查的一种静默失效。 */
@@ -562,6 +563,8 @@ int sf_test_main(void) {
                  "keep → MODE_KEEP（熄屏不交还）", NULL);
         sf_check(mode_lookup("com.keep.upper", &pct, NULL, NULL, &gpuv) && pct == MODE_KEEP,
                  "KEEP 大小写都认", NULL);
+        sf_check(mode_lookup("com.soff.one", &pct, NULL, NULL, &gpuv) && pct == MODE_SOFF,
+                 "soff → MODE_SOFF（熄屏交还）", NULL);
         /* big/little：只覆盖 BIG/LITTLE，pct=0 表示中间档跟随全局 */
         int bv = -1, lv = -1;
         sf_check(mode_lookup("com.split.both", &pct, &bv, &lv, &gpuv) &&
@@ -582,7 +585,7 @@ int sf_test_main(void) {
        * mtime 没变，这条断言就变成"看运气"。utimensat 失败要直接报红，
        * 不能悄悄跳过：跳过的用例和没写的用例是同一回事。 */
       n = load_app_modes_from(fp);
-      sf_check(n == 15 && g_nmode == 15, "mtime 未变时走缓存、表内容不变", NULL);
+      sf_check(n == 16 && g_nmode == 16, "mtime 未变时走缓存、表内容不变", NULL);
       {
         struct stat st0;
         stat(fp, &st0);
@@ -595,7 +598,7 @@ int sf_test_main(void) {
         snprintf(ub, sizeof ub, "utimensat rc=%d", urc);
         sf_check(urc == 0, "能把 mtime 往前推（热重载断言的前提）", ub);
         n = load_app_modes_from(fp);
-        sf_check(n == 16, "文件变了就重载（热生效，不用重启守护）", NULL);
+        sf_check(n == 17, "文件变了就重载（热生效，不用重启守护）", NULL);
         sf_check(mode_lookup_cpu("com.append.two", &pct) && pct == 55, "新条目命中", NULL);
       }
       remove(fp);
@@ -1337,6 +1340,78 @@ int sf_test_main(void) {
     } else {
       sf_check(0, "能造出大中央目录测试包", "fopen 失败");
     }
+  }
+
+  /* 智能模式：按各簇自己的天花板取比例，而不是写死 65/60。 */
+  {
+    sf_check(smart_pct_of(0, 50) == 22 && smart_pct_of(1, 50) == 32 &&
+             smart_pct_of(2, 50) == 42 && smart_pct_of(3, 50) == 50,
+             "智能目标 = 天花板 × 45/65/85/100%", NULL);
+    sf_check(smart_pct_of(2, 1) == 1 && smart_pct_of(0, 100) == 45,
+             "天花板极小时仍至少 1%，100% 上限按比例", NULL);
+    sf_check(smart_target(0, 8) == 1 && smart_target(0, 30) == 2 &&
+             smart_target(0, 60) == 3,
+             "智能升档阈值 8/30/60", NULL);
+    sf_check(smart_target(1, 4) == 0 && smart_target(1, 5) == 1 &&
+             smart_target(2, 24) == 1 && smart_target(3, 54) == 2,
+             "退档迟滞：light 4%、medium 25%、heavy 55%", NULL);
+    int csum[3] = {100, 60, 0}, ccnt[3] = {2, 6, 0};
+    sf_check(cluster_max_load(csum, ccnt, 3) == 50,
+             "逐簇取最忙：两颗大核里一颗满载=50%", NULL);
+    csum[1] = 600;
+    sf_check(cluster_max_load(csum, ccnt, 3) == 100,
+             "六颗小核全忙=100%，空簇不参与", NULL);
+    /* 动态封顶：三档天花板（最优解 / 中间 / 地板）。 */
+    g_sup_level = 0; sf_check(sup_pct() == 100, "封顶档 0 = 最优解本身", NULL);
+    cfg.sup_style = 0; g_sup_level = SUP_MID_LV;
+    sf_check(sup_pct() == 90, "均衡中间档 = 90%", NULL);
+    g_sup_level = SUP_FLOOR_LV;
+    sf_check(sup_pct() == 80, "均衡风格地板 = 80%", NULL);
+    cfg.sup_style = 1; g_sup_level = SUP_MID_LV;
+    sf_check(sup_pct() == 85, "省电中间档 = 85%", NULL);
+    g_sup_level = SUP_FLOOR_LV;
+    sf_check(sup_pct() == 70, "省电风格地板 = 70%", NULL);
+    cfg.sup_style = 0; g_sup_level = 0;
+    /* 工作点参数行解析：tier/参数/数值，非法 tier 与非数字值拒绝。 */
+    {
+      int gt; char gp[48]; long gv;
+      sf_check(gov_parse_line("gov_big_hispeed_freq=1689600", &gt, gp, sizeof gp, &gv) == 1 &&
+               gt == 0 && !strcmp(gp, "hispeed_freq") && gv == 1689600,
+               "gov 行解析：big 档 hispeed", NULL);
+      sf_check(gov_parse_line("gov_little_up_rate_limit_us=1000", &gt, gp, sizeof gp, &gv) == 1 &&
+               gt == 3 && !strcmp(gp, "up_rate_limit_us") && gv == 1000,
+               "gov 行解析：little 档限速", NULL);
+      sf_check(gov_parse_line("gov_x925_hispeed_freq=1", &gt, gp, sizeof gp, &gv) == 0 &&
+               gov_parse_line("gov_big_target_loads=85:1344000", &gt, gp, sizeof gp, &gv) == 0 &&
+               gov_parse_line("#gov_big_hispeed_freq=1", &gt, gp, sizeof gp, &gv) == 0,
+               "未知 tier / 非数字值（target_loads 暂不支持）/ 注释行拒绝", NULL);
+    }
+    /* 静止降频：目标比例 + 进/保持占用段。 */
+    sf_check(smart_still_pct(46, 55) == 25 && smart_still_pct(51, 55) == 28 &&
+             smart_still_pct(65, 55) == 35,
+             "静止目标 = 天花板 ×55% 向下取整", NULL);
+    sf_check(smart_still_pct(1, 10) == 1 && smart_still_pct(0, 55) == 1,
+             "天花板极小时静止目标仍至少 1%", NULL);
+    sf_check(still_in_band(20, 25, 1) == 1 && still_in_band(24, 25, 0) == 1,
+             "静止占用段：轻载段内、档位不高于轻载", NULL);
+    sf_check(still_in_band(25, 25, 1) == 0 && still_in_band(5, 25, 1) == 0 &&
+             still_in_band(20, 25, 2) == 0,
+             "越过解除阈值/空闲段/中载都不算静止占用段", NULL);
+    struct adapt a;
+    memset(&a, 0, sizeof a);
+    int save_strategy = cfg.strategy, save_step = cfg.ad.th_step;
+    int save_down = cfg.ad.down_max;
+    cfg.strategy = 1;
+    cfg.ad.th_step = 5;
+    cfg.ad.down_max = 30;
+    a.psi_steps = 2;
+    a.delta = 10;
+    sf_check(effective_delta(&a) == 0, "智能模式不叠 PSI 向上借额度", NULL);
+    a.th_steps = 1;
+    sf_check(effective_delta(&a) == -5, "智能模式仍保留温控收紧", NULL);
+    cfg.strategy = save_strategy;
+    cfg.ad.th_step = save_step;
+    cfg.ad.down_max = save_down;
   }
 
   printf("\n%s\n", sf_fails ? "有失败项" : "全部通过");

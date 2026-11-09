@@ -97,7 +97,7 @@ conf_read() {
 }
 
 # 可写的键。区间在 cfg_set 里按键名分支，键增删时这里必须同步。
-KEYS='STRATEGY INTERVAL GAME_GRACE_SEC CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT GPU_MIN_LOCK GPU_BOOST_OFF BIG_MIN SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT'
+KEYS='STRATEGY INTERVAL GAME_GRACE_SEC STILL_DROP STILL_FRAC STILL_SETTLE_S STILL_EXIT SUP_STYLE SUPPRESS GOV_UP_US GOV_DOWN_US CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT GPU_MIN_LOCK GPU_BOOST_OFF BIG_MIN CPU_MIN_LOCK SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT'
 
 is_key() {
   for k in $KEYS; do [ "$1" = "$k" ] && return 0; done
@@ -211,7 +211,7 @@ st_status() {
   _st=""
   for _f in "$STATUS" "$ROOT/run/status"; do
     [ -f "$_f" ] || continue
-    _st=$(grep -E '^(state|screen|soff|soff_keep|game_pkg|reason|fg|app_mode|app_big|app_little|app_gpu|pid|dlt|batt|bcut|stall|psib|avg10|temp|chg|psi|th|psifrz|strat|smart|tick|fgprobe|gminw)=' "$_f" 2>/dev/null)
+    _st=$(grep -E '^(state|screen|soff|soff_keep|game_pkg|reason|fg|app_mode|app_big|app_little|app_gpu|pid|dlt|batt|bcut|stall|psib|avg10|temp|chg|psi|th|psifrz|strat|smart|still|sup|tick|fgprobe|gminw|cminw|cminf|cminpaused|cming)=' "$_f" 2>/dev/null)
     [ -n "$_st" ] && break
   done
   if [ -n "$_st" ]; then
@@ -220,7 +220,7 @@ st_status() {
     # 状态文件还没生成时也要给出可解析的字段。
     # 前端拿到缺字段的对象能显示"未运行"，拿到空串只会白屏。
     # 实时偏移那几项给 -1：读不到不等于 0，页面据此不显示"温控降了 0 档"这种假话。
-    printf 'state=unknown\nscreen=on\nsoff=15\nsoff_keep=0\ngame_pkg=-\nreason=-\nfg=-\napp_mode=\napp_big=0\napp_little=0\napp_gpu=\npid=\ndlt=-1\nbatt=-1\nbcut=0\nstall=-1\npsib=-1\navg10=-1\ntemp=-1\nchg=-1\npsi=-1\nth=-1\npsifrz=0\n'
+    printf 'state=unknown\nscreen=on\nsoff=30\nsoff_keep=0\ngame_pkg=-\nreason=-\nfg=-\napp_mode=\napp_big=0\napp_little=0\napp_gpu=\npid=\ndlt=-1\nbatt=-1\nbcut=0\nstall=-1\npsib=-1\navg10=-1\ntemp=-1\nchg=-1\npsi=-1\nth=-1\npsifrz=0\ncminw=0\ncminf=0\ncminpaused=0\n'
   fi
 }
 
@@ -374,6 +374,8 @@ cfg_set() {
     case "$_v" in ''|/sys/*) ;; *) die "BAD_PATH" ;; esac
   elif [ "$_k" = BATT_CURRENT_UNIT ]; then
     case "$_v" in ua|ma) ;; *) die "BAD_UNIT" ;; esac
+  elif [ "$_k" = SUP_STYLE ]; then
+    case "$_v" in bal|sav) ;; *) die "BAD_SUPSTYLE" ;; esac
   else
     is_key "$_k" || die "BAD_KEY"
     is_uint "$_v" || die "NOT_NUM"
@@ -385,6 +387,7 @@ cfg_set() {
       GPU_MIN_LOCK)   is_switch "$_v" || die "RANGE" ;;
       GPU_BOOST_OFF)  is_switch "$_v" || die "RANGE" ;;
       BIG_MIN)        is_switch "$_v" || die "RANGE" ;;
+      CPU_MIN_LOCK)   is_switch "$_v" || die "RANGE" ;;
       SCREEN_UNCAP)   is_switch "$_v" || die "RANGE" ;;
       SOFF_INTERVAL)  [ "$_v" -ge 5 ] && [ "$_v" -le 300 ] || die "RANGE" ;;
       IDLE_CURRENT_MA) [ "$_v" -ge 20 ] && [ "$_v" -le 2000 ] || die "RANGE" ;;
@@ -394,6 +397,15 @@ cfg_set() {
       # 开机满血窗口：0=关，上限 600s。再长就失去"开机提速"的意义，
       # 且会盖过厂商开机阶段的热管理。区间和守护的 clampi(0,600) 对齐。
       BOOT_FULL_S)    [ "$_v" -ge 0 ] && [ "$_v" -le 600 ] || die "RANGE" ;;
+      # 静止降频。STILL_EXIT 下限 10 > 轻载进档阈值 8，与守护 clampi 对齐：
+      # 低于 8 的值静止永远进不去，在写入侧直接挡住。
+      STILL_DROP)     is_switch "$_v" || die "RANGE" ;;
+      STILL_FRAC)     [ "$_v" -ge 10 ] && [ "$_v" -le 90 ] || die "RANGE" ;;
+      STILL_SETTLE_S) [ "$_v" -ge 10 ] && [ "$_v" -le 600 ] || die "RANGE" ;;
+      STILL_EXIT)     [ "$_v" -ge 10 ] && [ "$_v" -le 95 ] || die "RANGE" ;;
+      SUPPRESS)       is_switch "$_v" || die "RANGE" ;;
+      GOV_UP_US)      [ "$_v" -ge 100 ] && [ "$_v" -le 50000 ] || die "RANGE" ;;
+      GOV_DOWN_US)    [ "$_v" -ge 100 ] && [ "$_v" -le 50000 ] || die "RANGE" ;;
       # 实时偏移。区间一律和守护 load_cfg 里的 clampi 对齐 ——
       # 两边不一致时，页面能填进一个守护会静默改掉的数。
       PSI_ADAPT|TH_CAP|CHG_UNCAP)  is_switch "$_v" || die "RANGE" ;;
@@ -572,6 +584,13 @@ preset_apply() {
   _add TH_HIGH          "$(_preset_val default_th_high)"
   _add TH_LOW           "$(_preset_val default_th_low)"
   _add PSI_GAIN         "$(_preset_val default_psi_gain)"
+  # 四条策略随预设一起落（与 WebUI 的两个预设按钮同一语义）：
+  # 插电不封顶、发热不主动降、PSI 不放宽、调度回限频。电量阶梯不归预设管。
+  _add TH_CAP           0
+  _add PSI_ADAPT        0
+  _add CHG_UNCAP        1
+  _add CHG_PCT          100
+  _add STRATEGY         cap
   [ -n "$_args" ] || die "NO_VALUES"
   # shellcheck disable=SC2086
   cmd_conf_set_many $_args
@@ -925,7 +944,7 @@ list_del() {
 # 容忍坏行 —— 两边判据要一致，包名沿用上面的 is_package，数字区间同界。
 is_mode_val() {
   case "${1:-}" in
-    full|FULL|keep|KEEP) return 0 ;;
+    full|FULL|keep|KEEP|soff|SOFF) return 0 ;;
     */*)
       # big/little[:gpu]：两段 CPU 都必须给，1~100；GPU 段可空。
       _mc=${1%%:*}
@@ -1464,8 +1483,8 @@ _ds_conf_init() {
   [ -f "$DS_CONF" ] && return 0
   {
     printf '%s\n' '# 深度睡眠配置'
-    printf '%s\n' '# enable=1 打开；0 关闭。关闭只停止干预，不会保留任何系统改动。'
-    printf '%s\n' 'enable=0'
+    printf '%s\n' '# enable=1 打开；0 关闭。新装默认开，升级保留原值。'
+    printf '%s\n' 'enable=1'
     printf '%s\n' '# 每行一条 white=包名，名单里的应用深睡时也允许被唤醒（等同系统电量设置里的「无限制」）。'
     printf '%s\n' '# white=com.tencent.mm'
   } | write_atomic "$DS_CONF"

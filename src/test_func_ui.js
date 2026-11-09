@@ -304,7 +304,12 @@ ok(/\.seg\.fill button\{[^}]*flex:1 1 0/.test(html),
     'CPU_PCT_BIG': mk('46'), 'CPU_PCT_MID2': mk('64'),
     'CPU_PCT_MID': mk('66'), 'CPU_PCT_LITTLE': mk('46'),
     'gpu_pct': mk('45'), 'th_high': mk('70'), 'th_low': mk('64'),
-    'psi_gain': mk('10'),
+    'psi_gain': mk('10'), 'th_max': mk('15'),
+    'psi_adapt': { checked: true }, 'chg_uncap': { checked: true },
+    'th_cap': { checked: true }, 'chg_pct': mk('85'),
+    'suppress': { checked: false },
+    'p-sup': { value: 'bal' }, 'gov_up_us': mk('1000'), 'gov_down_us': mk('1000'),
+    'batt_step': { checked: false }, 'p-strategy': { value: 'cap' },
     'preset-diff': { style: { display: 'none' }, textContent: '' },
   };
   const ctx = {
@@ -312,17 +317,21 @@ ok(/\.seg\.fill button\{[^}]*flex:1 1 0/.test(html),
     toast: (m) => toasts.push(m),
     loadConf: async () => { calls.push('loadConf'); },
     pv: () => {},
+    paintStrategy: (v) => { ctl['p-strategy'].value = v; },
     document: { getElementById: (id) => ctl[id] || null },
     console,
   };
   vm.createContext(ctx);
   if (src) vm.runInContext(src, ctx);
-  vm.runInContext("PRESET = {none:'0', title:'测试', big:'80', mid:'67', little:'75', gpu:'35', th_high:'75', th_low:'68', psi_gain:'10'};", ctx);
+  vm.runInContext("PRESET = {none:'0', title:'测试', big:'80', mid2:'72', mid:'67', little:'75', gpu:'35', th_high:'75', th_low:'68', psi_gain:'10'};", ctx);
   if (src && typeof ctx.applyChipPreset === 'function') {
     ctx.applyChipPreset();
     ok(ctl['CPU_PCT_BIG'].value === '80' && ctl['gpu_pct'].value === '35' &&
        ctl['th_high'].value === '75' && ctl['th_low'].value === '68',
        '套用后只改控件，不直接写配置', 'big=' + ctl['CPU_PCT_BIG'].value);
+    ok(ctl['th_cap'].checked === false && ctl['psi_adapt'].checked === false &&
+       ctl['chg_uncap'].checked === true && ctl['chg_pct'].value === '100',
+       '推荐预设随落三条策略：插电不封顶/发热不主动降/PSI 不放宽');
     ok(calls.length === 0, '没有任何后端写入调用（必须按保存才落盘）',
        calls.join(','));
     ok(ctl['preset-diff'].style.display === '' &&
@@ -331,6 +340,50 @@ ok(/\.seg\.fill button\{[^}]*flex:1 1 0/.test(html),
        'diff 写明改了哪些值和"尚未保存"', ctl['preset-diff'].textContent);
   } else {
     ok(false, 'applyChipPreset 能从页面里抠出来执行');
+  }
+  if (src && typeof ctx.applyEcoPreset === 'function') {
+    ctx.applyEcoPreset();
+    ok(ctl['CPU_PCT_BIG'].value === '80' && ctl['CPU_PCT_LITTLE'].value === '75' &&
+       ctl['CPU_PCT_MID2'].value === '72' && ctl['CPU_PCT_MID'].value === '67' &&
+       ctl['gpu_pct'].value === '35',
+       '省电预设把封顶双向对齐到能效最优解（低于推荐也抬回）',
+       [ctl['CPU_PCT_BIG'].value, ctl['CPU_PCT_LITTLE'].value, ctl['gpu_pct'].value].join('/'));
+    ok(ctl['th_cap'].checked === false && ctl['psi_adapt'].checked === false &&
+       ctl['chg_uncap'].checked === true && ctl['chg_pct'].value === '100' &&
+       ctl['p-strategy'].value === 'cap',
+       '省电预设与推荐同策略：发热不主动降、PSI 不放宽、插电不封顶、调度回限频');
+    ok(ctl['psi_adapt'].checked === false && ctl['batt_step'].checked === true &&
+       ctl['p-strategy'].value === 'cap',
+       '省电预设关 PSI 借出、开低电量阶梯、调度回限频');
+    ok(calls.length === 0, '省电预设也不直接写盘（必须按保存才落盘）', calls.join(','));
+    ok(/省电预设已填入/.test(ctl['preset-diff'].textContent) &&
+       /尚未保存/.test(ctl['preset-diff'].textContent),
+       '省电预设的 diff 写明改了哪些值和"尚未保存"', ctl['preset-diff'].textContent);
+    const before = [ctl['CPU_PCT_BIG'].value, ctl['psi_adapt'].checked, ctl['p-strategy'].value].join('/');
+    ctx.applyEcoPreset();
+    ok([ctl['CPU_PCT_BIG'].value, ctl['psi_adapt'].checked, ctl['p-strategy'].value].join('/') === before &&
+       /已经是省电预设/.test(ctl['preset-diff'].textContent),
+       '连点两次省电预设结果不变（幂等）', ctl['preset-diff'].textContent);
+    /* 策略强制：把调度/温控/充电改乱后再点，预设拉回策略值。 */
+    ctl['th_cap'].checked = true;
+    ctl['chg_uncap'].checked = false;
+    ctl['chg_pct'].value = '85';
+    ctl['p-strategy'].value = 'smart';
+    ctl['preset-diff'].textContent = '';
+    ctx.applyEcoPreset();
+    ok(ctl['th_cap'].checked === false && ctl['chg_uncap'].checked === true &&
+       ctl['chg_pct'].value === '100' && ctl['p-strategy'].value === 'cap' &&
+       /插电抬到 85→100%/.test(ctl['preset-diff'].textContent) &&
+       /调度 智能→限频/.test(ctl['preset-diff'].textContent),
+       '策略被改乱后省电预设拉回：插电/发热/PSI/调度', ctl['preset-diff'].textContent);
+    /* 策略值还没载入（undefined）时也不该凭空写一条调度 diff。 */
+    ctl['p-strategy'].value = undefined;
+    ctl['preset-diff'].textContent = '';
+    ctx.applyEcoPreset();
+    ok(ctl['p-strategy'].value === 'cap' && !/调度/.test(ctl['preset-diff'].textContent),
+       '策略值未载入时仍回限频，但不凭空记一条 diff', ctl['preset-diff'].textContent);
+  } else {
+    ok(false, 'applyEcoPreset 能从页面里抠出来执行');
   }
 }
 
