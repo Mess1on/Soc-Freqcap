@@ -2,7 +2,7 @@
 
 Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏自动交还系统；附带 WebUI 与深度睡眠。
 
-作者：梦笙Mess1on & Ktwo　　版本：V2.2 Beta5　　适用：KernelSU / Magisk / APatch · arm64-v8a
+作者：梦笙Mess1on & Ktwo　　版本：V2.2　　适用：KernelSU / Magisk / APatch · arm64-v8a
 
 ## 核心特性
 
@@ -40,7 +40,7 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 模块**只负责报版本号，不下载、不安装**——新版统一放网盘，地址写在
 `update.json` 的 `zipUrl`，并同步置顶在 [CHANGELOG.md](CHANGELOG.md)。
 
-当前下载地址：[https://pan.quark.cn/s/b6eb4bf3e9d0](https://pan.quark.cn/s/b6eb4bf3e9d0)。
+当前下载地址：[https://pan.quark.cn/s/89e180d9cfc9](https://pan.quark.cn/s/89e180d9cfc9)。
 点管理器里的「更新」会下载失败，这是预期行为：GitHub 只放版本号，安装包在夸克网盘，
 复制上面的地址下载 zip 后再手动安装。
 
@@ -67,7 +67,6 @@ WebUI：管理器模块页 → 打开 WebUI。首页徽标显示「常态限频�
 | `CPU_PCT_MID` / `CPU_PCT_MID2` | 66 / 64 | 中间两档（4 簇以上机型用） |
 | `GPU_PCT` | 45 | GPU 封顶百分比 |
 | `STRATEGY` | cap | `cap` 固定百分比封顶；`smart` 四档智能调度，百分比只当天花板 |
-| `STILL_DROP` / `STILL_FRAC` / `STILL_SETTLE_S` / `STILL_EXIT` | 1 / 55 / 60 / 25 | 静止降频（仅智能模式）：亮屏轻载静置后把目标压到天花板 ×55%，占用越过解除阈值立刻恢复 |
 | `SCREEN_POLICY` | cap（新装）/ 升级按旧键迁移 | 熄屏保持封顶+轻巡检；`uncap` 交还系统、`keep` 全量巡检；缺键时 `SCREEN_UNCAP=0` 补 cap、其余补 uncap |
 | `INTERVAL` | 5 | 巡检间隔（秒） |
 
@@ -88,12 +87,6 @@ WebUI：管理器模块页 → 打开 WebUI。首页徽标显示「常态限频�
 负载按每簇平均占用取最忙的一簇（单核满载不会被 8 核稀释），升档 1 拍（5s）、降档 2 拍（10s）。
 智能模式不叠 PSI 向上借额度，温控/电量收紧仍然保留。
 插电时充电地板仍会把目标抬高，省电对比请拔电。游戏、满血、熄屏交还三条路径两种策略完全一样。
-
-**静止降频**：刷视频、阅读这类亮屏不碰屏幕的场景，解码+渲染会把最忙簇的占用钉在轻载段，
-状态机长期停在 light 档——静止观看用不到那个频率。最忙簇占用持续落在轻载段
-`STILL_SETTLE_S` 秒后，目标额外压到天花板 `STILL_FRAC%`（默认 ×55%）；
-占用越过 `STILL_EXIT`（手指一动就会）或升到中载立刻恢复并重新计时。
-只作用于空闲/轻载两档，cap 模式不受影响。详见[配置文档](docs/configuration.md)。
 
 ## 文档
 

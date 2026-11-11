@@ -56,7 +56,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.2 Beta5"
+#define SF_VERSION "2.2"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。
@@ -114,14 +114,6 @@ struct cfg {
      smart 下 CPU_PCT_* 退化成"天花板"——状态机的目标不会超过它。 */
   int strategy;
   int grace;           /* 游戏退出宽限秒 */
-  /* 静止降频（智能模式）：亮屏轻载静置 STILL_SETTLE_S 秒后，把目标额外压到
-     天花板的 STILL_FRAC%。最忙簇占用越过 STILL_EXIT 或升到中载即解除。
-     针对刷视频/阅读这类不碰屏幕的场景——解码+渲染会把占用钉在轻载段，
-     状态机长期停在 light 档，静止观看其实用不到那个频率。 */
-  int still_drop;      /* 1 = 开 */
-  int still_frac;      /* 静止目标 = 天花板 × still_frac/100 */
-  int still_settle_s;  /* 进入需要连续静置的秒数 */
-  int still_exit;      /* 解除阈值（单拍生效），须大于轻载进档阈值 8 */
   /* 动态封顶（「Boost 与压制」页，默认关）：一个开关 = 完整压制——
      亮屏常态 1s 快拍两档天花板（最优解 / 风格地板）、低载静置压下限、
      walt 拉频源中和、升频限速；交权/关闭按账本还原。 */
@@ -168,6 +160,8 @@ static int g_screen_off;
 static char g_scr_path[192];  /* 亮屏信号文件；空 = 没有可用文件 */
 static int g_scr_invert;      /* 1 = blank 语义（0=亮）；0 = 亮度（>0=亮） */
 static int g_scr_bad;         /* 信号与 dumpsys 不符的次数；连续 3 次就停用 */
+static int g_scr_fallback;    /* 1 = 已降级为 dumpsys，配置重载不再重新启用坏节点 */
+static char g_scr_cfg_seen[192]; /* 上次 SCREEN_STATE_PATH，区分"配置没变" */
 static int g_scr_check;       /* 兜底校验计数 */
 static int g_soff_th;         /* 熄屏温控节拍：每 4 拍采一次 */
 /* P0b：熄屏深睡。g_deep 只影响周期和电流判定；亮屏信号每轮仍读。 */
@@ -1018,7 +1012,6 @@ struct smart_state {
   int  pending;
   int  pend_n;
   long switches;
-  int  still;          /* 静止降频生效中（只作用于 idle/light 两档） */
 };
 static struct smart_state g_sm;
 
@@ -1098,72 +1091,11 @@ static int smart_pct_of(int state, int ceil) {
   return v < 1 ? 1 : v;
 }
 
-/* 静止降频的目标：天花板 × frac%（与 smart_pct_of 同一套取整口径）。
- * 纯函数，单测直接喂数。 */
-static int smart_still_pct(int ceil, int frac) {
-  if (ceil < 1) ceil = 1;
-  if (ceil > 100) ceil = 100;
-  if (frac < 1) frac = 1;
-  if (frac > 100) frac = 100;
-  int v = ceil * frac / 100;
-  return v < 1 ? 1 : v;
-}
-
-/* 纯函数：静止的进/保持占用段。占用要落在 [8, exit) 且档位不高于轻载。
- * exit 必须大于轻载进档阈值 8，否则这一段永远为空、静止永远不进。 */
-static int still_in_band(int busy, int exit_pct, int state) {
-  return busy >= 8 && busy < exit_pct && state <= 1;
-}
-
 static int smart_pct(int tierkey) {
-  int v = smart_pct_of(g_sm.state, cfg.pct[tierkey]);
-  /* 静止降频只在 idle/light 两档往下压：中载/重载是真实负载，不碰。
-     取 min，温控/电量收紧照常叠在更小的一边。 */
-  if (g_sm.still && g_sm.state <= 1) {
-    int s = smart_still_pct(cfg.pct[tierkey], cfg.still_frac);
-    if (s < v) v = s;
-  }
-  return v;
+  return smart_pct_of(g_sm.state, cfg.pct[tierkey]);
 }
 
-/* 静止降频的时点状态：最忙簇落进轻载段的起点时刻；0 = 不在段内。 */
-static long g_still_light_since;
-
-/* 每拍推进一次静止状态。返回 1 = 标志翻转，调用处要重算封顶。
- * 进入靠时长（亮屏轻载静置 STILL_SETTLE_S 秒），解除靠单拍
- * （占用越过 STILL_EXIT——手指一动就会——或升到中载/退出常态）。
- * 解除快、进入慢，两把尺子不重叠，不会在阈值附近抖。 */
-static int still_tick(int busy) {
-  long now_s = mono_sec();
-  if (!cfg.still_drop || busy < 0 || strcmp(g_state, "normal") != 0) {
-    g_still_light_since = 0;
-    if (g_sm.still) { g_sm.still = 0; return 1; }
-    return 0;
-  }
-  if (!still_in_band(busy, cfg.still_exit, g_sm.state)) {
-    g_still_light_since = 0;
-    if (g_sm.still) {
-      g_sm.still = 0;
-      /* 占用跌破 8 掉进空闲段时不打日志：空闲档(×45%)本来就比静止更低，
-         这里是"换了个更省的状态"，不是用户唤醒。 */
-      if (busy >= cfg.still_exit)
-        log("静止解除：占用 %d%% ≥ %d%%", busy, cfg.still_exit);
-      return 1;
-    }
-    return 0;
-  }
-  if (!g_still_light_since) {
-    g_still_light_since = now_s ? now_s : 1;
-    return 0;
-  }
-  if (g_sm.still || now_s - g_still_light_since < cfg.still_settle_s) return 0;
-  g_sm.still = 1;
-  log("静止降频：轻载静置 %d s，目标压到天花板 ×%d%%（占用 %d%% 越过 %d%% 解除）",
-      cfg.still_settle_s, cfg.still_frac, busy, cfg.still_exit);
-  return 1;
-}
-
-/* 每拍推进一次。返回 1 = 档位或静止标志变了，调用处要重算封顶。 */
+/* 每拍推进一次。返回 1 = 档位变了，调用处要重算封顶。 */
 static int smart_tick(void) {
   int busy = cpu_busy_pct();
   int want = smart_target(g_sm.state, busy);
@@ -1182,12 +1114,10 @@ static int smart_tick(void) {
       changed = 1;
     }
   }
-  /* 静止标志先推进再打日志：换档那一行里的目标要带上静止钳制。 */
-  int still_changed = still_tick(busy);
   if (changed)
     log("智能模式：负载 %d%% → 档位 %d（大核 %d%% / 其余 %d%%）", busy,
         g_sm.state, smart_pct(0), smart_pct(3));
-  return changed || still_changed;
+  return changed;
 }
 
 /* 按簇阶梯分档：最高档 big，次高 mid2，中间 mid，最低 little */
@@ -1801,6 +1731,13 @@ static void suppress_boost_restore(void) {
     boost_restore_path(g_cpu_boost_nodes[i]);
 }
 
+/* 动态封顶的三档：0=最优解，1=风格中间档，2=风格地板。 */
+#define SUP_OPT     0
+#define SUP_MID_LV  1
+#define SUP_FLOOR_LV 2
+static int g_sup_level;     /* 0=最优解，1=风格中间档，2=风格地板 */
+static int sup_profile_level(void);
+
 /* 任务组的 uclamp.min：把前台/系统的"最低性能请求"压到 0。
  * 这不是频率上限，而是调度器选频时的下限；和只压 max_freq 是两件事。
  * 节点不存在（cgroup v2 / 厂商换了布局）就跳过，不猜路径。 */
@@ -1828,12 +1765,266 @@ static void suppress_uclamp_restore(void) {
     boost_restore_path(g_sup_uclamp_nodes[i]);
 }
 
+/* 字符串账本：uclamp.max 回读是 "max"/"50.00"，cpuset 是 "0-5"，
+ * 数值 journal 记不了。统一记 "<path> <value> <mode>"，还原时原样写回。 */
+static int str_journal_has(const char *file, const char *path) {
+  FILE *f = fopen(file, "r");
+  if (!f) return 0;
+  char ln[640], p[512], v[64];
+  int mode, hit = 0;
+  while (fgets(ln, sizeof ln, f)) {
+    if (sscanf(ln, "%511s %63s %o", p, v, &mode) != 3) continue;
+    if (!strcmp(p, path)) { hit = 1; break; }
+  }
+  fclose(f);
+  return hit;
+}
+
+static int str_journal_add(const char *file, const char *path, const char *val,
+                           int mode) {
+  FILE *f = fopen(file, "a");
+  if (!f) return -1;
+  fprintf(f, "%s %s %o\n", path, val, mode);
+  fclose(f);
+  return 0;
+}
+
+static int str_write_journaled(const char *file, const char *path,
+                               const char *val) {
+  if (access(path, F_OK)) return -1;
+  if (!str_journal_has(file, path)) {
+    char cur[64] = {0};
+    if (read_file(path, cur, sizeof cur) || !cur[0]) return -1;
+    if (str_journal_add(file, path, cur, read_mode(path))) return -1;
+  }
+  char now[64] = {0};
+  if (!read_file(path, now, sizeof now) && !strcmp(now, val)) return 0;
+  chmod(path, 0644);
+  return write_str(path, val);
+}
+
+static void str_restore_all(const char *file, const char *tag) {
+  if (access(file, F_OK)) return;
+  FILE *f = fopen(file, "r");
+  if (!f) return;
+  char ln[640], path[512], val[64];
+  int mode, failed = 0, count = 0;
+  while (fgets(ln, sizeof ln, f)) {
+    if (sscanf(ln, "%511s %63s %o", path, val, &mode) != 3) continue;
+    if (access(path, F_OK)) { failed = 1; continue; }
+    chmod(path, 0644);
+    char now[64] = {0};
+    if (write_str(path, val) || read_file(path, now, sizeof now) ||
+        strcmp(now, val))
+      failed = 1;
+    chmod(path, (mode_t)mode);
+    count++;
+  }
+  fclose(f);
+  if (failed) {
+    log("WARN %s 未完全还原，保留账本下次重试", tag);
+    return;
+  }
+  unlink(file);
+  log("%s 已还原 %d 个节点", tag, count);
+}
+
+/* 任务组 uclamp.max：动态封顶的第二层，只压上限、不抬下限。
+ * 0/1/2 档对应性能/均衡/省电三组参数（top-app / foreground / dex2oat）。
+ * 本机回读是 "max"/"50.00"（百分比），也有内核回 0-1024 整数；
+ * 按回读自动选刻度，"max"/小数/<=100 按百分比写，>100 按 0-1024 换算。 */
+#define UCLAMP_JOURNAL RUN_DIR "/uclamp.saved"
+static const struct {
+  const char *path;
+  int optimal;
+  int mid;
+  int floor;
+} g_sup_umax_nodes[] = {
+    { "/dev/cpuctl/top-app/cpu.uclamp.max", 85, 70, 60 },
+    { "/dev/cpuctl/foreground/cpu.uclamp.max", 65, 50, 40 },
+    { "/dev/cpuctl/dex2oat/cpu.uclamp.max", 45, 30, 20 },
+};
+
+static int uclamp_scale_of_text(const char *b) {
+  if (!b || !b[0]) return 0;
+  if (!strcmp(b, "max")) return 100;
+  char *end;
+  double v = strtod(b, &end);
+  if (end == b) return 0;
+  return v > 100.0 ? 1024 : 100;
+}
+
+static int uclamp_max_scale(const char *path) {
+  char b[64] = {0};
+  if (read_file(path, b, sizeof b)) return 0;
+  trim(b);
+  return uclamp_scale_of_text(b);
+}
+
+static int uclamp_val_eq(const char *a, const char *b) {
+  if (!strcmp(a, b)) return 1;
+  char *ea, *eb;
+  double da = strtod(a, &ea), db = strtod(b, &eb);
+  if (ea == a || eb == b) return 0;
+  double d = da > db ? da - db : db - da;
+  return d < 0.01;
+}
+
+static int uclamp_max_write(const char *path, const char *val) {
+  if (access(path, F_OK)) return -1;
+  if (!str_journal_has(UCLAMP_JOURNAL, path)) {
+    char cur[64] = {0};
+    if (read_file(path, cur, sizeof cur) || !cur[0]) return -1;
+    if (str_journal_add(UCLAMP_JOURNAL, path, cur, read_mode(path))) return -1;
+  }
+  char now[64] = {0};
+  if (!read_file(path, now, sizeof now) && uclamp_val_eq(now, val)) return 0;
+  chmod(path, 0644);
+  return write_str(path, val);
+}
+
+static void suppress_uclamp_max_apply(void) {
+  static int scale_mem[sizeof g_sup_umax_nodes / sizeof *g_sup_umax_nodes];
+  static long log_at = -600;
+  int n = 0;
+  for (size_t i = 0; i < sizeof g_sup_umax_nodes / sizeof *g_sup_umax_nodes; i++) {
+    const char *p = g_sup_umax_nodes[i].path;
+    if (access(p, F_OK)) continue;
+    if (!scale_mem[i]) scale_mem[i] = uclamp_max_scale(p);
+    int scale = scale_mem[i];
+    if (!scale) continue;
+    int prof = sup_profile_level();
+    int pct = prof == SUP_FLOOR_LV ? g_sup_umax_nodes[i].floor
+            : prof == SUP_MID_LV   ? g_sup_umax_nodes[i].mid
+                                   : g_sup_umax_nodes[i].optimal;
+    char want[24];
+    if (scale == 100) snprintf(want, sizeof want, "%d", pct);
+    else snprintf(want, sizeof want, "%ld", (pct * 1024L + 50) / 100);
+    if (!uclamp_max_write(p, want)) n++;
+  }
+  if (n) {
+    long now = mono_sec();
+    if (now - log_at >= 600) {
+      log_at = now;
+      log("动态封顶：uclamp 上限已压（%d 个节点）", n);
+    }
+  }
+}
+
+static void suppress_uclamp_max_restore(void) {
+  str_restore_all(UCLAMP_JOURNAL, "uclamp.max");
+}
+
+/* ── cpuset 前后台分区（随动态封顶的中间/地板档）──────────────────
+ * 只写 <group>/cpus 掩码，不搬任务、不碰 core_ctl/migt/metis。
+ * 数据来自 adapt/<soc>.conf 的 cpuset_<group>_lv1/lv2 行；没有数据的
+ * 芯片完全不动。原掩码单独记在 cpuset.saved（字符串账本），
+ * 关压制/交权/插电暂停/进程退出/卸载都按原样写回。 */
+#define CPUSET_JOURNAL RUN_DIR "/cpuset.saved"
+#define CPUSET_GROUPS  4
+static const char *g_cpuset_dirs[CPUSET_GROUPS] = {
+    "top-app", "foreground", "background", "system-background",
+};
+static char g_cpuset_mask[3][CPUSET_GROUPS][64];
+static unsigned g_cpuset_seen[3];
+
+static int cpuset_group_idx(const char *s) {
+  if (!strcmp(s, "top")) return 0;
+  if (!strcmp(s, "fg")) return 1;
+  if (!strcmp(s, "bg")) return 2;
+  if (!strcmp(s, "sysbg")) return 3;
+  return -1;
+}
+
+/* 只接受 0-7 / 0-1,5-6 这类 CPU 列表；数据文件写错就整行忽略。 */
+static int cpuset_mask_valid(const char *s) {
+  if (!s || !*s) return 0;
+  const char *p = s;
+  while (*p) {
+    char *end;
+    long a = strtol(p, &end, 10);
+    if (end == p || a < 0 || a > 1023) return 0;
+    p = end;
+    if (*p == '-') {
+      p++;
+      long b = strtol(p, &end, 10);
+      if (end == p || b < a || b > 1023) return 0;
+      p = end;
+    }
+    if (*p == ',') {
+      p++;
+      if (!*p) return 0;
+      continue;
+    }
+    if (*p) return 0;
+  }
+  return 1;
+}
+
+/* cpuset_<top|fg|bg|sysbg>_lv1/lv2=<mask> */
+static int cpuset_parse_line(const char *line, int *level, int *group,
+                             char *mask, size_t n) {
+  if (!line || strncmp(line, "cpuset_", 7)) return 0;
+  const char *p = line + 7;
+  const char *sep = strstr(p, "_lv");
+  if (!sep || sep == p || (sep[3] != '0' && sep[3] != '1' && sep[3] != '2') ||
+      sep[4] != '=')
+    return 0;
+  char g[16];
+  size_t gl = (size_t)(sep - p);
+  if (gl >= sizeof g) return 0;
+  memcpy(g, p, gl);
+  g[gl] = 0;
+  int gi = cpuset_group_idx(g);
+  if (gi < 0) return 0;
+  const char *v = sep + 5;
+  if (!cpuset_mask_valid(v)) return 0;
+  snprintf(mask, n, "%s", v);
+  *level = sep[3] - '0';
+  *group = gi;
+  return 1;
+}
+
+static int cpuset_write_journaled(const char *path, const char *mask) {
+  if (!cpuset_mask_valid(mask)) return -1;
+  return str_write_journaled(CPUSET_JOURNAL, path, mask);
+}
+
+static int cpuset_apply_level(int level) {
+  static long log_at = -600;
+  if (level < 0 || level > 2) return 0;
+  int n = 0;
+  for (int g = 0; g < CPUSET_GROUPS; g++) {
+    if (!(g_cpuset_seen[level] & (1u << g))) continue;
+    char path[160];
+    snprintf(path, sizeof path, "/dev/cpuset/%s/cpus", g_cpuset_dirs[g]);
+    if (access(path, F_OK)) continue;
+    if (!cpuset_write_journaled(path, g_cpuset_mask[level][g])) n++;
+  }
+  if (n) {
+    long now = mono_sec();
+    if (now - log_at >= 600) {
+      log_at = now;
+      log("动态封顶：cpuset 分区已应用（%d 个节点）", n);
+    }
+  }
+  return n;
+}
+
+static void cpuset_restore_all(void) {
+  str_restore_all(CPUSET_JOURNAL, "cpuset");
+}
+
 /* ------------------------------------------------------------------ */
 /* 调速器                                                             */
 /* ------------------------------------------------------------------ */
 
 static struct policy g_pol[MAX_POLICY];
 static int g_npol;
+/* 未去重的原始 policy 列表：hispeed 数据按 cluster 序号写，
+ * SM8650 这种有两个同频簇的机型不会因为去重丢掉一条。 */
+static struct policy g_polraw[MAX_POLICY];
+static int g_nraw;
 
 /* 厂商调速器一律不碰：hmbird / scx 这类自有调度会把写权限从调度器
  * 手里夺走，和"游戏态把权限交还系统"冲突。 */
@@ -1852,7 +2043,7 @@ static int gov_param_path(int i, const char *param, char *out, size_t cap) {
   char gov[32] = {0};
   char gp[256];
   snprintf(gp, sizeof gp, "%s/scaling_governor", g_pol[i].dir);
-  if (!read_file(gp, gov, sizeof gov)) return 0;
+  if (read_file(gp, gov, sizeof gov)) return 0;
   trim(gov);
   if (!gov[0] || is_vendor_gov(gov)) return 0;
   snprintf(out, cap, "%s/%s/%s", g_pol[i].dir, gov, param);
@@ -1887,35 +2078,42 @@ static void suppress_smooth_restore(void) {
   }
 }
 
-/* ── 逐芯片调速器工作点参数（gov_<tier>_<节点名>=数字）────────────
+/* ── 逐芯片调速器工作点参数（gov_[lv1_|lv2_]<tier>_<节点名>=数字）──
  * 数据在 adapt/<soc>.conf：**有 gov_ 行的芯片才调节**，没有就完全不
- * 碰这一层（参数错了是负优化，宁缺毋滥）。参数名 = 调速器 tunables
- * 的节点名（walt: hispeed_freq / adaptive_low_freq / hispeed_load /
- * up_down_rate_limit_us…），值必须是纯数字；target_loads 这类带空格
- * 的表暂不支持（journal 是数值型）。应用：<policy>/<调速器>/<节点>
- * （个别内核放 policy 根下也兜底），厂商自有调速器（hmbird/scx）
- * 不碰。值记进账本，交权/关闭还原。
- * 种子：sm8750 的 hispeed 两行是真机运行实测——walt 的 hispeed 是
- * "负载冲过 hispeed_load 时直接落到的频点"，本机官方默认 0（关闭），
- * 压到 1689600/960000 = 突发先落到高效频点、配合升频限速削掉冲顶。
- * 是否长期最优需 A/B。 */
+ * 碰这一层（参数错了是负优化，宁缺毋滥）。不带 lv 前缀 = 0 档兼容
+ * 旧数据；lv1/lv2 分别对应动态封顶的中间/地板档。参数名 = 调速器
+ * tunables 的节点名（walt: hispeed_freq / hispeed_load / …），值
+ * 必须是纯数字；target_loads 这类带空格的表暂不支持（journal 是
+ * 数值型）。应用：<policy>/<调速器>/<节点>（个别内核放 policy 根下
+ * 也兜底），厂商自有调速器（hmbird/scx）不碰。hispeed_freq 高于
+ * 当前档封顶时整簇跳过。值记进账本，换档/交权/关闭还原。 */
 #define GOV_TIER_N     4
+#define GOV_LEVELS     3
 #define GOV_KV_MAX     12
 #define GOV_PARAM_MAX  48
 struct gov_kv { char param[GOV_PARAM_MAX]; long val; };
-static struct gov_kv g_govkv[GOV_TIER_N][GOV_KV_MAX];
-static int g_govkn[GOV_TIER_N];
+static struct gov_kv g_govkv[GOV_LEVELS][GOV_TIER_N][GOV_KV_MAX];
+static int g_govkn[GOV_LEVELS][GOV_TIER_N];
+/* 按 cluster 序号（policy 号升序）的写法：gov_lv1_cl0_hispeed_freq=…
+ * SM8650 这种两个簇同频、会被 tier 去重吃掉的机型靠这一层。 */
+static struct gov_kv g_govcl[GOV_LEVELS][MAX_POLICY][GOV_KV_MAX];
+static int g_govcln[GOV_LEVELS][MAX_POLICY];
 static int g_gov_have;
-static char g_gov_applied[24][128];
+static char g_gov_applied[128][128];
 static int  g_gov_applied_n;
 
-/* 纯函数：解析一行 gov_<tier>_<param>=<数字>。
+/* 纯函数：解析一行 gov_[lv1_|lv2_]<tier>_<param>=<数字>。
+ * 不带 lv 前缀 = 0 档（旧数据兼容）。
  * 返回 1 成功；0 = 不是 gov 行 / tier 不认识 / 参数名非法 / 值非纯数字。 */
-static int gov_parse_line(const char *line, int *tier, char *param,
+static int gov_parse_line(const char *line, int *level, int *tier, char *param,
                           size_t pn, long *val) {
   static const char *const tiers[GOV_TIER_N] = { "big", "mid2", "mid", "little" };
   if (!line || strncmp(line, "gov_", 4)) return 0;
   const char *rest = line + 4;
+  int lv = 0;
+  if (!strncmp(rest, "lv0_", 4)) { lv = 0; rest += 4; }
+  else if (!strncmp(rest, "lv1_", 4)) { lv = 1; rest += 4; }
+  else if (!strncmp(rest, "lv2_", 4)) { lv = 2; rest += 4; }
   for (int t = 0; t < GOV_TIER_N; t++) {
     size_t tl = strlen(tiers[t]);
     if (strncmp(rest, tiers[t], tl) || rest[tl] != '_') continue;
@@ -1938,10 +2136,47 @@ static int gov_parse_line(const char *line, int *tier, char *param,
     memcpy(tmp, v, ni); tmp[ni] = 0;
     memcpy(param, p, pl); param[pl] = 0;
     *val = strtol(tmp, NULL, 10);
+    *level = lv;
     *tier = t;
     return 1;
   }
   return 0;
+}
+
+/* 纯函数：gov_[lv0_|lv1_|lv2_]cl<N>_<param>=<数字>。
+ * cluster 序号按 policy 号升序（和 detect_policies_raw 的顺序一致）。 */
+static int gov_cl_parse_line(const char *line, int *level, int *cl, char *param,
+                             size_t pn, long *val) {
+  if (!line || strncmp(line, "gov_", 4)) return 0;
+  const char *rest = line + 4;
+  int lv = 0;
+  if (!strncmp(rest, "lv0_", 4)) { lv = 0; rest += 4; }
+  else if (!strncmp(rest, "lv1_", 4)) { lv = 1; rest += 4; }
+  else if (!strncmp(rest, "lv2_", 4)) { lv = 2; rest += 4; }
+  if (strncmp(rest, "cl", 2)) return 0;
+  char *end;
+  long idx = strtol(rest + 2, &end, 10);
+  if (end == rest + 2 || idx < 0 || idx >= MAX_POLICY || *end != '_') return 0;
+  const char *p = end + 1;
+  const char *eq = strchr(p, '=');
+  if (!eq || eq == p) return 0;
+  size_t pl = (size_t)(eq - p);
+  if (pl >= pn) return 0;
+  for (size_t c = 0; c < pl; c++)
+    if (!isalnum((unsigned char)p[c]) && p[c] != '_') return 0;
+  const char *v = eq + 1;
+  while (*v == ' ' || *v == '\t') v++;
+  if (!isdigit((unsigned char)*v)) return 0;
+  char num[24]; size_t ni = 0;
+  while (isdigit((unsigned char)v[ni]) && ni < sizeof num - 1) ni++;
+  while (v[ni] == ' ' || v[ni] == '\t' || v[ni] == '\r' || v[ni] == '\n') ni++;
+  if (v[ni] != 0) return 0;
+  memcpy(num, v, ni); num[ni] = 0;
+  memcpy(param, p, pl); param[pl] = 0;
+  *val = strtol(num, NULL, 10);
+  *level = lv;
+  *cl = (int)idx;
+  return 1;
 }
 
 /* 从 adapt/<小写soc>.conf 读 gov_ 行。文件不存在 = 该芯片没数据。 */
@@ -1951,48 +2186,110 @@ static void suppress_gov_load(void) {
   for (char *c = soc; *c; c++) *c = (char)tolower((unsigned char)*c);
   snprintf(path, sizeof path, SF_MODDIR "/adapt/%s.conf", soc);
   FILE *f = fopen(path, "r");
+  if (!f && strlen(soc) > 1 && soc[strlen(soc) - 1] == 'p') {
+    /* SM8750P / SM8850P 这类地区后缀：没有独立文件就吃基础型号的数据。 */
+    soc[strlen(soc) - 1] = 0;
+    snprintf(path, sizeof path, SF_MODDIR "/adapt/%s.conf", soc);
+    f = fopen(path, "r");
+  }
   if (!f) {
     log("调速器工作点：%s 无适配数据，不调节", soc);
     return;
   }
   char line[512];
+  int cpuset_groups = 0;
   while (fgets(line, sizeof line, f)) {
     char *h = strchr(line, '#');
     if (h) *h = 0;
+    trim(line);   /* CRLF 文件：cpuset 掩码会把行尾 \r 当成非法字符 */
+    int lv, group; char mask[64];
+    if (cpuset_parse_line(line, &lv, &group, mask, sizeof mask)) {
+      snprintf(g_cpuset_mask[lv][group], sizeof g_cpuset_mask[lv][group],
+               "%s", mask);
+      g_cpuset_seen[lv] |= 1u << group;
+      cpuset_groups++;
+      continue;
+    }
+    int cl; char cparam[GOV_PARAM_MAX]; long cval;
+    if (gov_cl_parse_line(line, &lv, &cl, cparam, sizeof cparam, &cval)) {
+      int dup = 0;
+      for (int k = 0; k < g_govcln[lv][cl]; k++)
+        if (!strcmp(g_govcl[lv][cl][k].param, cparam)) dup = 1;
+      if (dup || g_govcln[lv][cl] >= GOV_KV_MAX) continue;
+      snprintf(g_govcl[lv][cl][g_govcln[lv][cl]].param, GOV_PARAM_MAX, "%s",
+               cparam);
+      g_govcl[lv][cl][g_govcln[lv][cl]].val = cval;
+      g_govcln[lv][cl]++;
+      g_gov_have = 1;
+      continue;
+    }
     int tier; char param[GOV_PARAM_MAX]; long val;
-    if (!gov_parse_line(line, &tier, param, sizeof param, &val)) continue;
+    if (!gov_parse_line(line, &lv, &tier, param, sizeof param, &val)) continue;
     int dup = 0;
-    for (int k = 0; k < g_govkn[tier]; k++)
-      if (!strcmp(g_govkv[tier][k].param, param)) dup = 1;
-    if (dup || g_govkn[tier] >= GOV_KV_MAX) continue;
-    snprintf(g_govkv[tier][g_govkn[tier]].param, GOV_PARAM_MAX, "%s", param);
-    g_govkv[tier][g_govkn[tier]].val = val;
-    g_govkn[tier]++;
+    for (int k = 0; k < g_govkn[lv][tier]; k++)
+      if (!strcmp(g_govkv[lv][tier][k].param, param)) dup = 1;
+    if (dup || g_govkn[lv][tier] >= GOV_KV_MAX) continue;
+    snprintf(g_govkv[lv][tier][g_govkn[lv][tier]].param, GOV_PARAM_MAX, "%s", param);
+    g_govkv[lv][tier][g_govkn[lv][tier]].val = val;
+    g_govkn[lv][tier]++;
     g_gov_have = 1;
   }
   fclose(f);
   if (g_gov_have) {
     int total = 0;
-    for (int t = 0; t < GOV_TIER_N; t++) total += g_govkn[t];
-    log("调速器工作点：%s 适配含 %d 组参数（随动态封顶生效）", soc, total);
+    for (int lv = 0; lv < GOV_LEVELS; lv++) {
+      for (int t = 0; t < GOV_TIER_N; t++) total += g_govkn[lv][t];
+      for (int c = 0; c < MAX_POLICY; c++) total += g_govcln[lv][c];
+    }
+    log("调速器工作点：%s 适配含 %d 组参数（随动态封顶档位生效）", soc, total);
   }
+  if (cpuset_groups)
+    log("cpuset 分区：%s 适配含 %d 个掩码（随动态封顶档位生效）",
+        soc, cpuset_groups);
+}
+
+static long sup_cap_for(const struct policy *p);
+
+/* hispeed_ratio = 千分比：把对位 JSON 的 hispeed/该模式上限，
+ * 落到我们当前档的封顶上。绝对值在高封顶机型上会高于我们的档位
+ * 封顶而被整簇跳过，比例写法不会。ratio=0 表示写 0（关闭）。 */
+static long hispeed_from_ratio(long cap, long ratio) {
+  if (ratio <= 0) return 0;
+  if (cap <= 0) return -1;
+  return cap * ratio / 1000;
 }
 
 static void suppress_gov_apply(void) {
   if (!cfg.suppress || !g_gov_have) return;
+  int lv = sup_profile_level();
+  if (lv < 0) lv = 0;
+  if (lv >= GOV_LEVELS) lv = GOV_LEVELS - 1;
   int n = 0;
   for (int i = 0; i < g_npol; i++) {
-    if (g_pol[i].tier < 0 || g_pol[i].tier >= GOV_TIER_N) continue;
+    int tier = g_pol[i].tier;
+    if (tier < 0 || tier >= GOV_TIER_N) continue;
     char gov[32] = {0};
     char gp[256];
     snprintf(gp, sizeof gp, "%s/scaling_governor", g_pol[i].dir);
-    if (!read_file(gp, gov, sizeof gov)) continue;
+    if (read_file(gp, gov, sizeof gov)) continue;
     trim(gov);
     if (!gov[0] || is_vendor_gov(gov)) continue;
-    for (int k = 0; k < g_govkn[g_pol[i].tier]; k++) {
+    /* hispeed 高于本档封顶等于没写：跳过整簇，避免把无效工作点
+       当成"已生效"记进账本。 */
+    long cur_cap = sup_cap_for(&g_pol[i]);
+    int skip_tier = 0;
+    for (int k = 0; k < g_govkn[lv][tier]; k++) {
+      if (!strcmp(g_govkv[lv][tier][k].param, "hispeed_freq") &&
+          cur_cap > 0 && g_govkv[lv][tier][k].val >= cur_cap) {
+        skip_tier = 1;
+        break;
+      }
+    }
+    if (skip_tier) continue;
+    for (int k = 0; k < g_govkn[lv][tier]; k++) {
       char path[320];
-      const char *param = g_govkv[g_pol[i].tier][k].param;
-      long val = g_govkv[g_pol[i].tier][k].val;
+      const char *param = g_govkv[lv][tier][k].param;
+      long val = g_govkv[lv][tier][k].val;
       snprintf(path, sizeof path, "%s/%s/%s", g_pol[i].dir, gov, param);
       if (access(path, F_OK))
         snprintf(path, sizeof path, "%s/%s", g_pol[i].dir, param);
@@ -2000,7 +2297,74 @@ static void suppress_gov_apply(void) {
       if (read_num(path) == val) continue;    /* 已是目标值 */
       if (!write_journaled(NODES_JOURNAL, path, val)) {
         n++;
-        if (g_gov_applied_n < 24) {
+        if (g_gov_applied_n < 128) {
+          snprintf(g_gov_applied[g_gov_applied_n], 128, "%s", path);
+          g_gov_applied_n++;
+        }
+      }
+    }
+  }
+  /* cluster 写法：直接对原始 policy 列表下单，同频簇也不会丢。 */
+  for (int i = 0; i < g_nraw; i++) {
+    if (!g_govcln[lv][i]) continue;
+    struct policy *rp = &g_polraw[i];
+    char gov[32] = {0};
+    char gp[256];
+    snprintf(gp, sizeof gp, "%s/scaling_governor", rp->dir);
+    if (read_file(gp, gov, sizeof gov)) continue;
+    trim(gov);
+    if (!gov[0] || is_vendor_gov(gov)) continue;
+    struct policy *rep = NULL;
+    long cur_cap = 0;
+    for (int j = 0; j < g_npol; j++)
+      if (g_pol[j].hw_max == rp->hw_max) {
+        rep = &g_pol[j];
+        cur_cap = sup_cap_for(rep);
+        break;
+      }
+    char sp[320];
+    long cur_max = 0, cur_min = 0;
+    snprintf(sp, sizeof sp, "%s/scaling_max_freq", rp->dir);
+    cur_max = read_num(sp);
+    snprintf(sp, sizeof sp, "%s/scaling_min_freq", rp->dir);
+    cur_min = read_num(sp);
+    int skip = 0;
+    for (int k = 0; k < g_govcln[lv][i]; k++) {
+      const char *param = g_govcl[lv][i][k].param;
+      long val = g_govcl[lv][i][k].val;
+      if (!strcmp(param, "hispeed_freq") &&
+          ((cur_cap > 0 && val >= cur_cap) ||
+           (cur_min > 0 && val < cur_min))) {
+        skip = 1;
+        break;
+      }
+    }
+    if (skip) continue;
+    for (int k = 0; k < g_govcln[lv][i]; k++) {
+      char path[320];
+      const char *param = g_govcl[lv][i][k].param;
+      long val = g_govcl[lv][i][k].val;
+      const char *node = param;
+      if (!strcmp(param, "hispeed_ratio")) {
+        node = "hispeed_freq";
+        long base = cur_max > 0 ? cur_max : cur_cap;
+        long r = hispeed_from_ratio(base, val);
+        if (r < 0) continue;
+        if (val > 0) {
+          if (!rep) continue;
+          r = snap_freq(rep, r);
+          if (r <= rep->hw_min) continue;  /* 落到硬件最低以下：跳过 */
+          if (cur_min > 0 && r < cur_min) continue; /* 低于当前下限：跳过 */
+        }
+        val = r;
+      }
+      snprintf(path, sizeof path, "%s/%s/%s", rp->dir, gov, node);
+      if (access(path, F_OK)) snprintf(path, sizeof path, "%s/%s", rp->dir, node);
+      if (access(path, F_OK)) continue;
+      if (read_num(path) == val) continue;
+      if (!write_journaled(NODES_JOURNAL, path, val)) {
+        n++;
+        if (g_gov_applied_n < 128) {
           snprintf(g_gov_applied[g_gov_applied_n], 128, "%s", path);
           g_gov_applied_n++;
         }
@@ -2013,6 +2377,34 @@ static void suppress_gov_apply(void) {
 static void suppress_gov_restore(void) {
   for (int i = 0; i < g_gov_applied_n; i++) boost_restore_path(g_gov_applied[i]);
   g_gov_applied_n = 0;
+}
+
+/* 档位附加层：uclamp.max + cpuset + 分级 hispeed 一起随 g_sup_level 换。
+ * 换档先还原上一档再写新档；0 档（最优解）不额外限制。 */
+static int g_sup_extra_level = -1;
+
+static void suppress_extra_restore(void) {
+  suppress_uclamp_max_restore();
+  cpuset_restore_all();
+  suppress_gov_restore();
+  g_sup_extra_level = -1;
+}
+
+static void suppress_extra_apply(void) {
+  if (!cfg.suppress) {
+    if (g_sup_extra_level >= 0) suppress_extra_restore();
+    return;
+  }
+  int prof = sup_profile_level();
+  if (g_sup_extra_level != prof) {
+    suppress_uclamp_max_restore();
+    cpuset_restore_all();
+    suppress_gov_restore();
+    g_sup_extra_level = prof;
+  }
+  suppress_uclamp_max_apply();
+  cpuset_apply_level(prof);
+  suppress_gov_apply();
 }
 
 /* 荣耀/华为/三星的 cpufreq 只认自家调度策略：把 scaling_governor 切成
@@ -2653,10 +3045,6 @@ static int sup_floor(void)      { return cfg.sup_style ? 70 : 80; }
 static int sup_mid(void)        { return cfg.sup_style ? 85 : 90; }
 static int sup_fall_ticks(void) { return cfg.sup_style ? 2 : 3; }
 
-#define SUP_OPT    0
-#define SUP_MID_LV 1
-#define SUP_FLOOR_LV 2
-static int g_sup_level;     /* 0=最优解，1=风格中间档，2=风格地板 */
 static int g_sup_fall_n;    /* 连续低载计数 */
 static int g_sup_up_n;      /* 连续贴顶计数：2 拍才放一档，滤掉滑动抖动 */
 static int g_sup_min_n;     /* 到底后连续空闲计数 */
@@ -2685,6 +3073,14 @@ static int sup_pct(void) {
   if (g_sup_level == SUP_FLOOR_LV) return sup_floor();
   if (g_sup_level == SUP_MID_LV) return sup_mid();
   return 100;
+}
+
+/* 附加层（uclamp.max / cpuset / hispeed）用哪一档：
+ * bal 按 0/1/2；sav 把 0 档也压到均衡组，1/2 档用省电组。
+ * 这样选“省电风格”时，活跃的 0 档不会还挂着性能组的 85/65/45 和 fg 0-6。 */
+static int sup_profile_level(void) {
+  if (!cfg.sup_style) return g_sup_level;
+  return g_sup_level <= SUP_OPT ? SUP_MID_LV : SUP_FLOOR_LV;
 }
 
 static long sup_cap_for(const struct policy *p) {
@@ -2732,6 +3128,7 @@ static void sup_exit(void) {
   suppress_smooth_restore();
   suppress_gov_restore();
   suppress_uclamp_restore();
+  suppress_extra_restore();
   for (int i = 0; i < g_npol; i++) {
     char path[256];
     long want = g_pol[i].cap;
@@ -2853,6 +3250,9 @@ static void suppress_tick(void) {
       g_sup_stuck[i] = 0;                    /* 下限被谁放宽了：解除退避 */
     }
   }
+  /* 档位换了就换 uclamp.max / cpuset / hispeed；同一档内幂等补写，
+     抵消厂商切前台、亮屏时对这些节点的改写。 */
+  suppress_extra_apply();
 }
 
 /* ------------------------------------------------------------------ */
@@ -2955,6 +3355,19 @@ int idle_step(long *ema, int *hold, long ma, int valid,
  * PJZ110/Android 17 上 fb0/blank 不存在，实测 backlight 0/1127 与
  * dumpsys power 的 Dozing/Awake 完全一致。 */
 static void screen_state_init(void) {
+  char want[192];
+  snprintf(want, sizeof want, "%s", cfg.screen_state_path);
+  /* 已经因为假归零降级过，且用户没改 SCREEN_STATE_PATH：保持 dumpsys 兜底。
+     否则每次保存配置都会重新拾起三星那个一直读 0 的 panel 节点。 */
+  if (g_scr_fallback && !strcmp(want, g_scr_cfg_seen)) {
+    g_scr_path[0] = 0;
+    g_scr_invert = 0;
+    g_scr_check = 0;
+    log("亮屏信号继续使用 dumpsys 兜底（配置未变）");
+    return;
+  }
+  snprintf(g_scr_cfg_seen, sizeof g_scr_cfg_seen, "%s", want);
+  g_scr_fallback = 0;
   g_scr_path[0] = 0;
   g_scr_invert = 0;
   g_scr_bad = 0;
@@ -2965,6 +3378,24 @@ static void screen_state_init(void) {
       g_scr_invert = strstr(g_scr_path, "blank") ? 1 : 0;
     } else {
       log("WARN 亮屏信号 %s 不存在，改为自动挑选", cfg.screen_state_path);
+    }
+  }
+  /* 优先已知可用的节点：三星 One UI 的 panel0-backlight 才是真值，
+     某些 ROM 的 panel/brightness 亮屏仍读 0。 */
+  if (!g_scr_path[0]) {
+    static const char *const pref[] = {
+        "/sys/class/backlight/panel0-backlight/brightness",
+        "/sys/class/backlight/panel0-backlight/actual_brightness",
+        "/sys/class/leds/lcd-backlight/brightness",
+        "/sys/class/backlight/panel/brightness",
+        "/sys/class/backlight/panel/actual_brightness",
+        NULL
+    };
+    for (int i = 0; pref[i]; i++) {
+      if (access(pref[i], F_OK)) continue;
+      snprintf(g_scr_path, sizeof g_scr_path, "%s", pref[i]);
+      g_scr_invert = 0;
+      break;
     }
   }
   if (!g_scr_path[0] && !access("/sys/class/graphics/fb0/blank", F_OK)) {
@@ -2991,8 +3422,10 @@ static void screen_state_init(void) {
   if (g_scr_path[0])
     log("亮屏信号: %s（%s）", g_scr_path,
         g_scr_invert ? "blank 0=亮" : "亮度>0=亮");
-  else
+  else {
+    g_scr_fallback = 1;
     log("WARN 没有可用的亮屏信号，改用 dumpsys power 兜底");
+  }
 }
 
 static int screen_sig_read(void) {
@@ -3010,7 +3443,8 @@ static int screen_is_off_now(int force_check) {
       log("WARN 亮屏信号说灭但系统仍 Awake（%d/3）", g_scr_bad);
       if (g_scr_bad >= 3 && g_scr_path[0]) {
         g_scr_path[0] = 0;
-        log("停用亮屏信号，改用 dumpsys power 兜底");
+        g_scr_fallback = 1;
+        log("停用亮屏信号，改用 dumpsys power 兜底（重载配置也不再启用）");
       }
       return 0;
     }
@@ -3143,13 +3577,14 @@ static void apply_normal(int force) {
     if (cfg.suppress && !g_sup_chg_pause) {
       suppress_boost_apply();
       suppress_smooth_apply();
-      suppress_gov_apply();
       suppress_uclamp_apply();
+      suppress_extra_apply();
     } else {
       suppress_boost_restore();
       suppress_smooth_restore();
       suppress_gov_restore();
       suppress_uclamp_restore();
+      suppress_extra_restore();
     }
     gpu_min_to_floor();
     apply_gpu_cap(1);
@@ -3264,6 +3699,8 @@ static void hand_back_full(const char *why) {
   /* 工作点参数：交权后系统可能切换调速器，这里一并还原。 */
   suppress_gov_restore();
   suppress_uclamp_restore();
+  /* uclamp.max / cpuset / 分级 hispeed 也属于动态封顶，交权时一起还。 */
+  suppress_extra_restore();
   /* 动态封顶的下限与标志一并清理（天花板由上面的满频写入处理）。 */
   sup_cancel();
   /* CPU 下限是常态省电项：交权（游戏/满血/熄屏解除）时还给系统原值。 */
@@ -3418,10 +3855,6 @@ static void enter_screen_off(void) {
   g_idle_ema = 0;
   g_idle_hold = 0;
   g_soff_th = 0;
-  /* 静止是亮屏轻载的产物：熄屏路径自己管自己，带着旧标志醒来
-     会让亮屏第一拍的目标偏低。 */
-  g_sm.still = 0;
-  g_still_light_since = 0;
   /* 动态封顶同步收口：保持封顶的路径把天花板交还生效封顶；
      交还路径随后 hand_back_full 自己写满频。 */
   if (keep) sup_exit();
@@ -3477,8 +3910,6 @@ static void leave_screen_off(void) {
   g_idle_hold = 0;
   g_soff_keep = 0;
   g_soff_th = 0;
-  g_sm.still = 0;
-  g_still_light_since = 0;
   sup_exit();
   g_soff_pkg[0] = 0;
   log("亮屏，恢复常态巡检");
@@ -3566,8 +3997,6 @@ static void load_cfg(void) {
   cfg.idle_current_ma = 250;
   cfg.idle_hold_cycle = 2;
   cfg.strategy = 0;
-  cfg.still_drop = 1;  cfg.still_frac = 55;  cfg.still_settle_s = 60;
-  cfg.still_exit = 25;
   cfg.suppress = 0;
   cfg.sup_style = 0;  cfg.gov_up_us = 1000;  cfg.gov_down_us = 1000;  cfg.idle_interval = 30;
   cfg.wake_delta_ma = 150;
@@ -3647,16 +4076,6 @@ static void load_cfg(void) {
     cfg.boot_full_s = clampi(atoi(v), 0, 600, 60);
   if (cfg_get("GAME_GRACE_SEC", v) == 0)
     cfg.grace = clampi(atoi(v), cfg.interval, 300, 10);
-  /* 静止降频。STILL_EXIT 的下限 10 > 轻载进档阈值 8：低于它静止永远进不去，
-     与其让用户配出一个静默无效的值，不如在读取时挡住。 */
-  if (cfg_get("STILL_DROP", v) == 0)
-    cfg.still_drop = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
-  if (cfg_get("STILL_FRAC", v) == 0)
-    cfg.still_frac = clampi(atoi(v), 10, 90, 55);
-  if (cfg_get("STILL_SETTLE_S", v) == 0)
-    cfg.still_settle_s = clampi(atoi(v), 10, 600, 60);
-  if (cfg_get("STILL_EXIT", v) == 0)
-    cfg.still_exit = clampi(atoi(v), 10, 95, 25);
   if (cfg_get("SUPPRESS", v) == 0)
     cfg.suppress = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("SUP_STYLE", v) == 0)
@@ -3808,14 +4227,14 @@ static void publish_status(void) {
              "state=%s\nscreen=%s\nsoff=%d\nsoff_keep=%d\ngame_pkg=%s\nreason=%s\n"
              "fg=%s\napp_mode=%s\napp_big=%d\napp_little=%d\napp_gpu=%s\n"
              "pid=%d\nver=%s\nntier=%d\n"
-             "strat=%d\nsmart=%d\nstill=%d\nsup=%d\ntick=%ld\nfgprobe=%ld\ngminw=%ld\n"
+             "strat=%d\nsmart=%d\nsup=%d\ntick=%ld\nfgprobe=%ld\ngminw=%ld\n"
              "cminw=%ld\ncminf=%d\ncminpaused=%d\ncming=%d\n",
           g_state, g_deep ? "deep" : (g_screen_off ? "off" : "on"),
           g_deep ? cfg.idle_interval : cfg.soff_interval, g_soff_keep,
           g_game[0] ? g_game : "-", g_reason,
           g_fg[0] ? g_fg : "-", mode, g_app_big, g_app_little, gmode,
           getpid(), SF_VERSION, ntier,
-          cfg.strategy, g_sm.state, g_sm.still,
+          cfg.strategy, g_sm.state,
           cfg.suppress ? sup_pct() : 0,
           g_tick_n, g_fg_probe_n, g_gmin_writes,
           g_min_writes, g_min_fails, cmin_paused, cmin_give);
@@ -3862,6 +4281,8 @@ static void cleanup(void) {
   /* 顺序：先还原数值，再收权限。反了会写不进需要放开才能写的节点 */
   if (g_gpu.mtk) mtk_restore_row();
   journal_restore(NODES_JOURNAL);
+  cpuset_restore_all();             /* 字符串账本：cpuset 原掩码 */
+  suppress_uclamp_max_restore();    /* 字符串账本：uclamp.max 原值 */
   perms_restore();
   unlink(STATE_FILE);
   unlink(STATUS_FILE);
@@ -4170,8 +4591,6 @@ int main(int argc, char **argv) {
         while (fgets(ln, sizeof ln, sf)) {
           if (!strncmp(ln, "smart=", 6))
             g_sm.state = clampi(atoi(ln + 6), 0, 3, 0);
-          else if (!strncmp(ln, "still=", 6))
-            g_sm.still = atoi(ln + 6) ? 1 : 0;
         }
         fclose(sf);
       }
@@ -4474,6 +4893,11 @@ int main(int argc, char **argv) {
 
   load_cfg();
   g_npol = detect_policies(g_pol);
+  g_nraw = detect_policies_raw(g_polraw);
+  if (!g_nraw) {
+    memcpy(g_polraw, g_pol, sizeof g_pol);
+    g_nraw = g_npol;
+  }
   for (int i = 0; i < g_npol; i++) { g_pol[i].last_cap = 0; g_pol[i].last_got = 0; }
   if (!g_npol) {
     log("WARN 未探测到 cpufreq policy，本模块不工作");
@@ -4490,6 +4914,8 @@ int main(int argc, char **argv) {
    * 反过来先把被模块改过的当前值 snapshot 进去，原始调速器就永久丢了。
    */
   journal_restore(NODES_JOURNAL);
+  cpuset_restore_all();             /* 上次被 kill -9 时留下的 cpuset 原掩码 */
+  suppress_uclamp_max_restore();    /* 上次被 kill -9 时留下的 uclamp.max 原值 */
   perms_restore();
   restore_governors();
   if (access(GOV_JOURNAL, F_OK))
@@ -4656,8 +5082,17 @@ int main(int argc, char **argv) {
     /* 前台包名无条件记下来（命中名单与否都要）。
      * 只在游戏态记的话，页面上"把当前前台设为满血"在相机、地图这些
      * 最需要它的场景里永远是空的。 */
+    int fg_changed = fg[0] && strcmp(fg, g_fg) != 0;
     if (fg[0]) snprintf(g_fg, sizeof g_fg, "%s", fg);
     else g_fg[0] = 0;
+    /* 切应用/冷启动时系统会重新写 input_boost_ms 和抬高 GPU 底频；
+       检测到前台变化就立刻补写，不等下一拍，缩短拉频窗口。 */
+    if (fg_changed && cfg.suppress && !g_sup_chg_pause && !game) {
+      suppress_boost_apply();
+      suppress_uclamp_apply();
+      suppress_extra_apply();
+      boost_off_apply();
+    }
 
     /* 满血窗口：开机后前 N 秒、或（可选）熄屏期间。
      * 顺序有讲究——先算 boot 再算 screen，screen 那条带 dumpsys 开销，
@@ -4818,8 +5253,8 @@ int main(int argc, char **argv) {
           /* 充电期间交还过 boost/uclamp；拔电立刻补回，不能等下一次状态变化 */
           suppress_boost_apply();
           suppress_smooth_apply();
-          suppress_gov_apply();
           suppress_uclamp_apply();
+          suppress_extra_apply();
           g_sup_reapply_at = mono_sec();
         }
         for (int k = 0; k < cfg.interval && !g_stop; k++) {

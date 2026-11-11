@@ -341,49 +341,41 @@ ok(/\.seg\.fill button\{[^}]*flex:1 1 0/.test(html),
   } else {
     ok(false, 'applyChipPreset 能从页面里抠出来执行');
   }
-  if (src && typeof ctx.applyEcoPreset === 'function') {
-    ctx.applyEcoPreset();
-    ok(ctl['CPU_PCT_BIG'].value === '80' && ctl['CPU_PCT_LITTLE'].value === '75' &&
-       ctl['CPU_PCT_MID2'].value === '72' && ctl['CPU_PCT_MID'].value === '67' &&
-       ctl['gpu_pct'].value === '35',
-       '省电预设把封顶双向对齐到能效最优解（低于推荐也抬回）',
-       [ctl['CPU_PCT_BIG'].value, ctl['CPU_PCT_LITTLE'].value, ctl['gpu_pct'].value].join('/'));
+  if (src && typeof ctx.applySmoothPreset === 'function') {
+    ctx.applySmoothPreset();
+    ok(ctl['CPU_PCT_BIG'].value === '90' && ctl['CPU_PCT_LITTLE'].value === '85' &&
+       ctl['CPU_PCT_MID2'].value === '82' && ctl['CPU_PCT_MID'].value === '77',
+       '偏流畅 = 推荐每簇 +10%（80→90 / 75→85 / 72→82 / 67→77）',
+       [ctl['CPU_PCT_BIG'].value, ctl['CPU_PCT_LITTLE'].value].join('/'));
+    ok(ctl['gpu_pct'].value === '35',
+       '偏流畅不动 GPU（仍是推荐预设填入的 35%）', ctl['gpu_pct'].value);
     ok(ctl['th_cap'].checked === false && ctl['psi_adapt'].checked === false &&
        ctl['chg_uncap'].checked === true && ctl['chg_pct'].value === '100' &&
        ctl['p-strategy'].value === 'cap',
-       '省电预设与推荐同策略：发热不主动降、PSI 不放宽、插电不封顶、调度回限频');
-    ok(ctl['psi_adapt'].checked === false && ctl['batt_step'].checked === true &&
-       ctl['p-strategy'].value === 'cap',
-       '省电预设关 PSI 借出、开低电量阶梯、调度回限频');
-    ok(calls.length === 0, '省电预设也不直接写盘（必须按保存才落盘）', calls.join(','));
-    ok(/省电预设已填入/.test(ctl['preset-diff'].textContent) &&
-       /尚未保存/.test(ctl['preset-diff'].textContent),
-       '省电预设的 diff 写明改了哪些值和"尚未保存"', ctl['preset-diff'].textContent);
-    const before = [ctl['CPU_PCT_BIG'].value, ctl['psi_adapt'].checked, ctl['p-strategy'].value].join('/');
-    ctx.applyEcoPreset();
-    ok([ctl['CPU_PCT_BIG'].value, ctl['psi_adapt'].checked, ctl['p-strategy'].value].join('/') === before &&
-       /已经是省电预设/.test(ctl['preset-diff'].textContent),
-       '连点两次省电预设结果不变（幂等）', ctl['preset-diff'].textContent);
-    /* 策略强制：把调度/温控/充电改乱后再点，预设拉回策略值。 */
-    ctl['th_cap'].checked = true;
-    ctl['chg_uncap'].checked = false;
-    ctl['chg_pct'].value = '85';
-    ctl['p-strategy'].value = 'smart';
+       '偏流畅不碰温控/PSI/充电/调度');
+    ok(calls.length === 0, '偏流畅也不直接写盘（必须按保存才落盘）', calls.join(','));
+    ok(/偏流畅预设已填入/.test(ctl['preset-diff'].textContent) &&
+       /尚未保存/.test(ctl['preset-diff'].textContent) &&
+       /超大核 80→90%/.test(ctl['preset-diff'].textContent) &&
+       !/GPU \d+→/.test(ctl['preset-diff'].textContent),
+       '偏流畅 diff 只列 CPU，不动 GPU', ctl['preset-diff'].textContent);
+    const before = [ctl['CPU_PCT_BIG'].value, ctl['gpu_pct'].value,
+                    ctl['psi_adapt'].checked, ctl['p-strategy'].value].join('/');
+    ctx.applySmoothPreset();
+    ok([ctl['CPU_PCT_BIG'].value, ctl['gpu_pct'].value,
+        ctl['psi_adapt'].checked, ctl['p-strategy'].value].join('/') === before &&
+       /已经是偏流畅预设/.test(ctl['preset-diff'].textContent),
+       '连点两次偏流畅结果不变（幂等）', ctl['preset-diff'].textContent);
+    /* 推荐预设没有的档位（例如 2 簇机的 mid/mid2）不写入。 */
+    vm.runInContext("PRESET = {none:'0', big:'80', little:'75', gpu:'35'};", ctx);
+    ctl['CPU_PCT_MID'].value = '66';
+    ctl['CPU_PCT_MID2'].value = '64';
     ctl['preset-diff'].textContent = '';
-    ctx.applyEcoPreset();
-    ok(ctl['th_cap'].checked === false && ctl['chg_uncap'].checked === true &&
-       ctl['chg_pct'].value === '100' && ctl['p-strategy'].value === 'cap' &&
-       /插电抬到 85→100%/.test(ctl['preset-diff'].textContent) &&
-       /调度 智能→限频/.test(ctl['preset-diff'].textContent),
-       '策略被改乱后省电预设拉回：插电/发热/PSI/调度', ctl['preset-diff'].textContent);
-    /* 策略值还没载入（undefined）时也不该凭空写一条调度 diff。 */
-    ctl['p-strategy'].value = undefined;
-    ctl['preset-diff'].textContent = '';
-    ctx.applyEcoPreset();
-    ok(ctl['p-strategy'].value === 'cap' && !/调度/.test(ctl['preset-diff'].textContent),
-       '策略值未载入时仍回限频，但不凭空记一条 diff', ctl['preset-diff'].textContent);
+    ctx.applySmoothPreset();
+    ok(ctl['CPU_PCT_MID'].value === '66' && ctl['CPU_PCT_MID2'].value === '64',
+       '缺档位时不改中间档', ctl['preset-diff'].textContent);
   } else {
-    ok(false, 'applyEcoPreset 能从页面里抠出来执行');
+    ok(false, 'applySmoothPreset 能从页面里抠出来执行');
   }
 }
 

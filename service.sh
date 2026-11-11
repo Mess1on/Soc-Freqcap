@@ -2,6 +2,17 @@
 # Soc智能限频 · 启动入口
 MODDIR=${0%/*}
 DAEMON="$MODDIR/socfreqd"
+
+# KernelSU / APatch 开机早期 PATH 可能不完整：先补齐系统 bin。
+# 不补的话 getprop / sleep / date / stat 会 not found，等待循环和看门狗会空转。
+PATH=/system/bin:/system/xbin:/vendor/bin:/odm/bin:/data/adb/ksu/bin:/data/adb/magisk${PATH:+:$PATH}
+export PATH
+GETPROP=/system/bin/getprop
+[ -x "$GETPROP" ] || GETPROP=getprop
+SLEEP=/system/bin/sleep
+[ -x "$SLEEP" ] || SLEEP=sleep
+PIDOF=/system/bin/pidof
+[ -x "$PIDOF" ] || PIDOF=pidof
 # 管理器已经标记卸载（remove）：即使 service.sh 还被调到，也绝不拉起守护。
 # 否则卸载到重启之间会继续写频率节点，看起来像"删了还在限频"。
 [ -f "$MODDIR/remove" ] && exit 0
@@ -101,6 +112,10 @@ ds_alive() {
 
 ds_start() {
   [ -f "$DS_SH" ] || return 0
+  # 外部墓碑已接管冻结/Doze：本模块不再拉起深睡进程，避免抢白名单。
+  if [ -d "/data/adb/modules/NoActive" ] || [ -d "/data/adb/modules/noactive" ]; then
+    return 0
+  fi
   # 总开关是关的就不常驻；用户在页面上打开时 api.sh 会立刻拉起。
   [ -f "$DATA/dsleep.conf" ] || return 0
   _e=$(awk '
@@ -130,11 +145,25 @@ ds_start() {
   # 等开机完成，让厂商调度先跑起来，本模块再接管。
   # 守护写 sysfs 前必须先拿到原始值快照，否则还原的是已被自己改过的值。
   i=0
-  while [ "$(getprop sys.boot_completed)" != "1" ] && [ "$i" -lt 150 ]; do
-    sleep 2
+  while [ "$("$GETPROP" sys.boot_completed 2>/dev/null)" != "1" ] && [ "$i" -lt 150 ]; do
+    "$SLEEP" 2
     i=$((i + 1))
   done
-  sleep 5
+  "$SLEEP" 5
+
+  # 深睡关闭时，永久豁免/push/IM 仍要落到系统 Doze 白名单。
+  # 旧迁移撤掉了微信/QQ，white= 只在 ds_enter 里加；不补这一步，
+  # 熄屏后通知会被系统 Doze 压到维护窗口甚至直接丢。
+  if [ -f "$DATA/dsleep.conf" ] && [ -f "$DS_SH" ]; then
+    _ds_en=$(awk '
+      /^[[:space:]]*enable[[:space:]]*=/ {
+        v=$0; sub(/^[^=]*=/, "", v); sub(/#.*/, "", v);
+        gsub(/[[:space:]]/, "", v); print v; exit
+      }' "$DATA/dsleep.conf" 2>/dev/null)
+    if [ "$_ds_en" != "1" ]; then
+      sh "$DS_SH" --keep >/dev/null 2>&1
+    fi
+  fi
 
   # ── 开机满血窗口 ────────────────────────────────────────────
   # 只写"到第几秒结束"的时间戳，用 /proc/uptime 口径而不用墙钟
@@ -176,15 +205,18 @@ ds_start() {
       if alive; then
         PID=$(cat "$LOCK" 2>/dev/null)
         case "$PID" in ''|*[!0-9]*) ;; *) kill -9 "$PID" 2>/dev/null ;; esac
-        sleep 1
+        "$SLEEP" 1
       fi
-      # 只清空、不删除：删了会换 inode，旧守护若还没退干净（D 状态/kill -9 失败）
-      # 仍锁着旧文件，新守护再建同名文件就是两把锁 → 两个守护同时巡检。
-      [ -f "$LOCK" ] && : > "$LOCK" 2>/dev/null
-      nohup "$DAEMON" start >/dev/null 2>&1 </dev/null &
+      # 锁文件/心跳失真时，pidof 再兜一层：已有 socfreqd 就绝不重复 fork。
+      if ! "$PIDOF" socfreqd >/dev/null 2>&1; then
+        # 只清空、不删除：删了会换 inode，旧守护若还没退干净（D 状态/kill -9 失败）
+        # 仍锁着旧文件，新守护再建同名文件就是两把锁 → 两个守护同时巡检。
+        [ -f "$LOCK" ] && : > "$LOCK" 2>/dev/null
+        nohup "$DAEMON" start >/dev/null 2>&1 </dev/null &
+      fi
     fi
     [ ! -f "$PAUSE" ] && ds_start
-    sleep 60
+    "$SLEEP" 60
   done
 ) &
 exit 0

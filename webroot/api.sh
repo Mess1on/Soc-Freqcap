@@ -97,7 +97,7 @@ conf_read() {
 }
 
 # 可写的键。区间在 cfg_set 里按键名分支，键增删时这里必须同步。
-KEYS='STRATEGY INTERVAL GAME_GRACE_SEC STILL_DROP STILL_FRAC STILL_SETTLE_S STILL_EXIT SUP_STYLE SUPPRESS GOV_UP_US GOV_DOWN_US CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT GPU_MIN_LOCK GPU_BOOST_OFF BIG_MIN CPU_MIN_LOCK SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT'
+KEYS='STRATEGY INTERVAL GAME_GRACE_SEC SUP_STYLE SUPPRESS GOV_UP_US GOV_DOWN_US CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT GPU_MIN_LOCK GPU_BOOST_OFF BIG_MIN CPU_MIN_LOCK SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT'
 
 is_key() {
   for k in $KEYS; do [ "$1" = "$k" ] && return 0; done
@@ -397,12 +397,6 @@ cfg_set() {
       # 开机满血窗口：0=关，上限 600s。再长就失去"开机提速"的意义，
       # 且会盖过厂商开机阶段的热管理。区间和守护的 clampi(0,600) 对齐。
       BOOT_FULL_S)    [ "$_v" -ge 0 ] && [ "$_v" -le 600 ] || die "RANGE" ;;
-      # 静止降频。STILL_EXIT 下限 10 > 轻载进档阈值 8，与守护 clampi 对齐：
-      # 低于 8 的值静止永远进不去，在写入侧直接挡住。
-      STILL_DROP)     is_switch "$_v" || die "RANGE" ;;
-      STILL_FRAC)     [ "$_v" -ge 10 ] && [ "$_v" -le 90 ] || die "RANGE" ;;
-      STILL_SETTLE_S) [ "$_v" -ge 10 ] && [ "$_v" -le 600 ] || die "RANGE" ;;
-      STILL_EXIT)     [ "$_v" -ge 10 ] && [ "$_v" -le 95 ] || die "RANGE" ;;
       SUPPRESS)       is_switch "$_v" || die "RANGE" ;;
       GOV_UP_US)      [ "$_v" -ge 100 ] && [ "$_v" -le 50000 ] || die "RANGE" ;;
       GOV_DOWN_US)    [ "$_v" -ge 100 ] && [ "$_v" -le 50000 ] || die "RANGE" ;;
@@ -1542,6 +1536,10 @@ _ds_state_val() {
 
 _ds_start() {
   [ -f "$DS_SH" ] || return 0
+  # 外部墓碑接管时不再拉起深睡进程。
+  if [ -d "/data/adb/modules/NoActive" ] || [ -d "/data/adb/modules/noactive" ]; then
+    return 0
+  fi
   # 关着就不常驻：打开开关时 cmd_ds_set 会立刻拉起。
   [ "$(_ds_enable)" = "1" ] || return 0
   [ "$(_ds_alive)" = "1" ] && return 0
@@ -1647,6 +1645,15 @@ cmd_ds_set() {
       _ds_start
     else
       _ds_stop
+      # 关深睡后把永久豁免/push/IM 补进系统 Doze 白名单，
+      # 避免"关了深睡反而通知被压"。
+      if [ -f "$DS_SH" ]; then
+        if command -v setsid >/dev/null 2>&1; then
+          setsid sh "$DS_SH" --keep >/dev/null 2>&1 < /dev/null &
+        else
+          nohup sh "$DS_SH" --keep >/dev/null 2>&1 < /dev/null &
+        fi
+      fi
     fi
   fi
   printf 'OK %s=%s\n' "$_k" "$_v"
@@ -1662,6 +1669,9 @@ cmd_ds_white_add() {
   fi
   ensure_final_newline "$DS_CONF"
   printf 'white=%s\n' "$_p" >> "$DS_CONF" || die "WRITE" 5
+  # "永久豁免"要立刻落到系统 Doze 白名单；不能等 ds_enter，
+  # 否则深睡关闭时名单只写模块配置，系统照样压通知。
+  timeout 2 dumpsys deviceidle whitelist "+$_p" >/dev/null 2>&1
   printf 'OK %s\n' "$_p"
 }
 

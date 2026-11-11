@@ -1371,32 +1371,90 @@ int sf_test_main(void) {
     sf_check(sup_pct() == 85, "省电中间档 = 85%", NULL);
     g_sup_level = SUP_FLOOR_LV;
     sf_check(sup_pct() == 70, "省电风格地板 = 70%", NULL);
+    /* 附加层 profile：bal 0/1/2；sav 0 档也进均衡组，1/2 进省电组。 */
     cfg.sup_style = 0; g_sup_level = 0;
-    /* 工作点参数行解析：tier/参数/数值，非法 tier 与非数字值拒绝。 */
+    sf_check(sup_profile_level() == 0, "bal 0 档 profile=0", NULL);
+    g_sup_level = 1; sf_check(sup_profile_level() == 1, "bal 中间档 profile=1", NULL);
+    g_sup_level = 2; sf_check(sup_profile_level() == 2, "bal 地板档 profile=2", NULL);
+    cfg.sup_style = 1; g_sup_level = 0;
+    sf_check(sup_profile_level() == 1, "sav 0 档也走均衡组 profile=1", NULL);
+    g_sup_level = 1; sf_check(sup_profile_level() == 2, "sav 中间档 profile=2", NULL);
+    g_sup_level = 2; sf_check(sup_profile_level() == 2, "sav 地板档 profile=2", NULL);
+    cfg.sup_style = 0; g_sup_level = 0;
+    /* 工作点参数行解析：level/tier/参数/数值，非法 level/tier 与非数字值拒绝。 */
     {
-      int gt; char gp[48]; long gv;
-      sf_check(gov_parse_line("gov_big_hispeed_freq=1689600", &gt, gp, sizeof gp, &gv) == 1 &&
-               gt == 0 && !strcmp(gp, "hispeed_freq") && gv == 1689600,
-               "gov 行解析：big 档 hispeed", NULL);
-      sf_check(gov_parse_line("gov_little_up_rate_limit_us=1000", &gt, gp, sizeof gp, &gv) == 1 &&
-               gt == 3 && !strcmp(gp, "up_rate_limit_us") && gv == 1000,
-               "gov 行解析：little 档限速", NULL);
-      sf_check(gov_parse_line("gov_x925_hispeed_freq=1", &gt, gp, sizeof gp, &gv) == 0 &&
-               gov_parse_line("gov_big_target_loads=85:1344000", &gt, gp, sizeof gp, &gv) == 0 &&
-               gov_parse_line("#gov_big_hispeed_freq=1", &gt, gp, sizeof gp, &gv) == 0,
-               "未知 tier / 非数字值（target_loads 暂不支持）/ 注释行拒绝", NULL);
+      int gl, gt; char gp[48]; long gv;
+      sf_check(gov_parse_line("gov_big_hispeed_freq=1689600", &gl, &gt, gp, sizeof gp, &gv) == 1 &&
+               gl == 0 && gt == 0 && !strcmp(gp, "hispeed_freq") && gv == 1689600,
+               "gov 行解析：旧 0 档 big hispeed", NULL);
+      sf_check(gov_parse_line("gov_lv1_big_hispeed_freq=1958400", &gl, &gt, gp, sizeof gp, &gv) == 1 &&
+               gl == 1 && gt == 0 && !strcmp(gp, "hispeed_freq") && gv == 1958400,
+               "gov 行解析：lv1 超大核 hispeed", NULL);
+      sf_check(gov_parse_line("gov_lv2_little_hispeed_load=90", &gl, &gt, gp, sizeof gp, &gv) == 1 &&
+               gl == 2 && gt == 3 && !strcmp(gp, "hispeed_load") && gv == 90,
+               "gov 行解析：lv2 大核 hispeed_load", NULL);
+      sf_check(gov_parse_line("gov_lv3_big_hispeed_freq=1", &gl, &gt, gp, sizeof gp, &gv) == 0 &&
+               gov_parse_line("gov_x925_hispeed_freq=1", &gl, &gt, gp, sizeof gp, &gv) == 0 &&
+               gov_parse_line("gov_big_target_loads=85:1344000", &gl, &gt, gp, sizeof gp, &gv) == 0 &&
+               gov_parse_line("#gov_big_hispeed_freq=1", &gl, &gt, gp, sizeof gp, &gv) == 0,
+               "未知 level/tier / 非数字值（target_loads 暂不支持）/ 注释行拒绝", NULL);
     }
-    /* 静止降频：目标比例 + 进/保持占用段。 */
-    sf_check(smart_still_pct(46, 55) == 25 && smart_still_pct(51, 55) == 28 &&
-             smart_still_pct(65, 55) == 35,
-             "静止目标 = 天花板 ×55% 向下取整", NULL);
-    sf_check(smart_still_pct(1, 10) == 1 && smart_still_pct(0, 55) == 1,
-             "天花板极小时静止目标仍至少 1%", NULL);
-    sf_check(still_in_band(20, 25, 1) == 1 && still_in_band(24, 25, 0) == 1,
-             "静止占用段：轻载段内、档位不高于轻载", NULL);
-    sf_check(still_in_band(25, 25, 1) == 0 && still_in_band(5, 25, 1) == 0 &&
-             still_in_band(20, 25, 2) == 0,
-             "越过解除阈值/空闲段/中载都不算静止占用段", NULL);
+    /* cluster 写法：同频簇不去重，SM8650 也能每个簇下单。 */
+    {
+      int gl, gc; char cp[48]; long gv;
+      sf_check(gov_cl_parse_line("gov_lv1_cl0_hispeed_freq=1785600", &gl, &gc,
+                                 cp, sizeof cp, &gv) == 1 &&
+               gl == 1 && gc == 0 && !strcmp(cp, "hispeed_freq") && gv == 1785600,
+               "gov cluster 行解析：lv1 cl0 hispeed", NULL);
+      sf_check(gov_cl_parse_line("gov_lv2_cl3_hispeed_load=85", &gl, &gc,
+                                 cp, sizeof cp, &gv) == 1 &&
+               gl == 2 && gc == 3 && !strcmp(cp, "hispeed_load") && gv == 85,
+               "gov cluster 行解析：lv2 cl3 load", NULL);
+      sf_check(gov_cl_parse_line("gov_lv1_cl16_hispeed_freq=1", &gl, &gc,
+                                 cp, sizeof cp, &gv) == 0 &&
+               gov_cl_parse_line("gov_lv3_cl0_hispeed_freq=1", &gl, &gc,
+                                 cp, sizeof cp, &gv) == 0 &&
+               gov_cl_parse_line("gov_lv1_clX_hispeed_freq=1", &gl, &gc,
+                                 cp, sizeof cp, &gv) == 0,
+               "gov cluster：越界序号 / 未知 level / 非数字序号拒绝", NULL);
+    }
+    /* cpuset 行解析：组名/档位/掩码，非法行整行拒绝。 */
+    {
+      int lv, g; char m[64];
+      sf_check(cpuset_parse_line("cpuset_fg_lv1=0-5", &lv, &g, m, sizeof m) == 1 &&
+               lv == 1 && g == 1 && !strcmp(m, "0-5"),
+               "cpuset 行解析：前台 lv1", NULL);
+      sf_check(cpuset_parse_line("cpuset_sysbg_lv2=0-1,5-6", &lv, &g, m, sizeof m) == 1 &&
+               lv == 2 && g == 3 && !strcmp(m, "0-1,5-6"),
+               "cpuset 行解析：非连续列表", NULL);
+      sf_check(cpuset_mask_valid("0-7\r\n") == 0,
+               "cpuset 裸掩码带 CRLF 时不合法（调用方必须先 trim）", NULL);
+      sf_check(cpuset_parse_line("cpuset_fg_lv3=0-5", &lv, &g, m, sizeof m) == 0 &&
+               cpuset_parse_line("cpuset_xx_lv1=0-5", &lv, &g, m, sizeof m) == 0 &&
+               cpuset_parse_line("cpuset_fg_lv1=0-", &lv, &g, m, sizeof m) == 0 &&
+               cpuset_parse_line("cpuset_fg_lv1=abc", &lv, &g, m, sizeof m) == 0,
+               "cpuset 非法档位/组名/掩码拒绝", NULL);
+    }
+    sf_check(g_sup_umax_nodes[0].optimal == 85 && g_sup_umax_nodes[0].mid == 70 &&
+             g_sup_umax_nodes[0].floor == 60 &&
+             g_sup_umax_nodes[1].optimal == 65 && g_sup_umax_nodes[1].mid == 50 &&
+             g_sup_umax_nodes[1].floor == 40 &&
+             g_sup_umax_nodes[2].optimal == 45 && g_sup_umax_nodes[2].mid == 30 &&
+             g_sup_umax_nodes[2].floor == 20,
+             "uclamp.max 三档 = 85/65/45、70/50/30、60/40/20", NULL);
+    sf_check(uclamp_scale_of_text("max") == 100 &&
+             uclamp_scale_of_text("50.00") == 100 &&
+             uclamp_scale_of_text("1024") == 1024 &&
+             uclamp_scale_of_text("870") == 1024 &&
+             uclamp_scale_of_text("abc") == 0,
+             "uclamp.max 刻度：max/小数按百分比，>100 按 0-1024，非法值跳过", NULL);
+    sf_check(uclamp_val_eq("70.00", "70") && uclamp_val_eq("max", "max") &&
+             !uclamp_val_eq("max", "60") && !uclamp_val_eq("70.00", "60"),
+             "uclamp.max 回读比较：70.00 等于 70，max 不等于数字", NULL);
+    sf_check(hispeed_from_ratio(2000000, 744) == 1488000 &&
+             hispeed_from_ratio(2000000, 0) == 0 &&
+             hispeed_from_ratio(0, 744) == -1,
+             "hispeed 千分比换算：cap×ratio/1000，0 关闭，无 cap 跳过", NULL);
     struct adapt a;
     memset(&a, 0, sizeof a);
     int save_strategy = cfg.strategy, save_step = cfg.ad.th_step;

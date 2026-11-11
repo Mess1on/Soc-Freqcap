@@ -1058,6 +1058,33 @@ ds_policy_migrate_v3() {
 
 # ============================ 进入 / 退出 =====================================
 
+# 深睡关闭时也要把"永久豁免 + push 基包 + IM"落到系统 Doze 白名单。
+# 旧迁移会把微信/QQ 从系统白名单撤掉，而 white= 只在 ds_enter 里加；
+# 深睡一关，两者都不生效，熄屏后通知就会被 Doze 压掉或延迟。
+# NoActive 接管时完全不碰，避免抢它的 Doze 控制权。
+ds_keep_doze() {
+    local installed pkgs p
+    [ -f "$DSLEEP_CONF" ] || return 0
+    if [ -d "/data/adb/modules/NoActive" ] || [ -d "/data/adb/modules/noactive" ]; then
+        return 0
+    fi
+    ds_conf_load
+    installed="$(pm list packages 2>/dev/null | sed 's/^package://' | tr -d '\r')"
+    [ -n "$installed" ] || return 0
+    pkgs=""
+    pkgs="$pkgs $(echo "$DS_WHITE" | tr ',' ' ')"
+    # push=com.tencent.mm:push -> 取冒号前的包名
+    for p in $(echo "$DS_PUSH" | tr ',' ' '); do pkgs="$pkgs ${p%%:*}"; done
+    # 迁移撤掉的 IM：深睡关闭时把整包放回系统白名单，否则通知会被压。
+    pkgs="$pkgs com.tencent.mm com.tencent.mobileqq com.tencent.tim com.tencent.wework com.alibaba.android.rimet"
+    for p in $pkgs; do
+        [ -n "$p" ] || continue
+        printf '%s\n' "$installed" | grep -qx -- "$p" || continue
+        timeout 2 dumpsys deviceidle whitelist "+$p" >/dev/null 2>&1
+    done
+    log_ds "永久豁免已同步到系统 Doze 白名单（深睡关闭也生效）"
+}
+
 ds_enter() {
     local old_white pkg n=0 sms
     old_white=""
@@ -1487,6 +1514,17 @@ ds_main() {
     echo $$ > "$PIDFILE" 2>/dev/null
     trap 'ds_shutdown' 0 1 2 3 15
     ds_conf_load
+    # 外部墓碑（NoActive）接管冻结/Doze 时，本模块不再做任何策略迁移。
+    # 必须在 ds_policy_migrate 之前拦，否则开机就会去增删系统白名单。
+    if [ -d "/data/adb/modules/NoActive" ] || [ -d "/data/adb/modules/noactive" ]; then
+        log_ds "检测到 NoActive 墓碑，深睡不接管 Doze"
+        exit 0
+    fi
+    # 深睡开关关闭时只做退出清理（冻结/appops 账本），绝不改 Doze 白名单。
+    if [ "$ds_enabled" != "1" ]; then
+        log_ds "深睡开关关闭，跳过 Doze 策略迁移"
+        exit 0
+    fi
     ds_policy_migrate
     ds_conf_load
     ds_policy_migrate_v3
@@ -1522,4 +1560,12 @@ ds_main() {
     done
 }
 
-case "${0##*/}" in deep_sleep.sh) ds_main ;; esac
+case "${0##*/}" in
+    deep_sleep.sh)
+        if [ "${1:-}" = "--keep" ]; then
+            ds_keep_doze
+            exit 0
+        fi
+        ds_main
+        ;;
+esac

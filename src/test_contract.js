@@ -462,7 +462,7 @@ console.log('\n== P0.5 巡检瘦身 ==');
      '看门狗按心跳 mtime 判过期（不只看 pid）');
   ok(/SOFF_INTERVAL/.test(svc) && /IDLE_INTERVAL/.test(svc) && /_v=\$\(\(_v \+ 60\)\)/.test(svc),
      '阈值按配置里的最长睡眠现算（固定 90s 会误杀合法的 300s 长睡）');
-  ok(/sleep 60/.test(svc) && /kill -9 "\$PID"/.test(svc),
+  ok(/"\$SLEEP" 60/.test(svc) && /kill -9 "\$PID"/.test(svc),
      '看门狗 60s 一轮；心跳过期但进程还在时先杀掉再拉起');
 }
 
@@ -768,6 +768,47 @@ const svc = fs.readFileSync(path.join(MODDIR, 'service.sh'), 'utf8');
 ok(/^\s*\(\s*$/m.test(svc) || /\(\s*\n\s*while true; do/.test(svc), '看门狗放在子 shell 里');
 ok(/while true; do[\s\S]*?\n\s*done\s*\n\)\s*&/.test(svc), '看门狗后台运行（ & ）');
 ok(/\n\s*exit 0\s*$/.test(svc.trimEnd()), 'service.sh 以 exit 0 结束');
+ok(/^PATH=\/system\/bin:/m.test(svc) &&
+   /GETPROP=\/system\/bin\/getprop/.test(svc) &&
+   /"\$GETPROP" sys\.boot_completed/.test(svc) &&
+   !/\$\(getprop sys\.boot_completed\)/.test(svc) &&
+   /"\$SLEEP" 60/.test(svc),
+   '开机等待和看门狗用绝对 getprop/sleep，早期 PATH 不完整不会空转');
+ok(/PIDOF=\/system\/bin\/pidof/.test(svc) && /"\$PIDOF" socfreqd/.test(svc),
+   '看门狗拉起前 pidof 预检，已有守护不重复 fork');
+/* 三星背光节点：优先 panel0，假归零降级后重载配置不能又启用坏节点。 */
+ok(/panel0-backlight\/brightness/.test(csrc) &&
+   /g_scr_fallback/.test(csrc) &&
+   /继续使用 dumpsys 兜底/.test(csrc) &&
+   /重载配置也不再启用/.test(csrc),
+   '背光信号优先 panel0；dumpsys 兜底状态跨配置重载保留');
+/* 深睡：NoActive/关闭必须在策略迁移之前拦截。 */
+{
+  const deepSrc = fs.readFileSync(MOD0 + '/scripts/deep_sleep.sh', 'utf8');
+  const mainAt = deepSrc.indexOf('ds_main()');
+  const guardAt = deepSrc.indexOf('NoActive', mainAt);
+  const disAt = deepSrc.indexOf('"$ds_enabled" != "1"', mainAt);
+  const migAt = deepSrc.indexOf('    ds_policy_migrate\n', mainAt);
+  ok(mainAt > 0 && guardAt > mainAt && disAt > mainAt && migAt > mainAt &&
+     guardAt < migAt && disAt < migAt &&
+     /NoActive[\s\S]{0,120}exit 0/.test(deepSrc) &&
+     /ds_enabled" != "1"[\s\S]{0,120}exit 0/.test(deepSrc),
+     '深睡脚本在 NoActive/关闭时先退出，不执行 Doze 白名单迁移');
+  ok(/ds_keep_doze\(\)/.test(deepSrc) &&
+     /\$\{1:-\}" = "--keep"/.test(deepSrc) &&
+     /永久豁免已同步到系统 Doze 白名单/.test(deepSrc) &&
+     /dumpsys deviceidle whitelist "\+\$p"/.test(deepSrc),
+     '深睡关闭也能把 white/push/IM 同步进系统 Doze 白名单');
+  ok(/"\$DS_SH" --keep/.test(svc) &&
+     /dumpsys deviceidle whitelist "\+\$_p"/.test(apiSrc),
+     '开机和 WebUI 添加豁免都会立即同步系统 Doze 白名单');
+}
+/* 保存前的大小核倒挂提醒。 */
+ok(/function validateFreqCapBeforeSave\(littleKHz, bigKHz\)/.test(html) &&
+   /littleKHz <= bigKHz/.test(html) &&
+   /window\.confirm\(/.test(html) &&
+   /cpuCapKHz\('CPU_PCT_LITTLE'/.test(html),
+   '保存 CPU 封顶前检查大小核频率倒挂，确认后才允许保存');
 // 剥掉注释再判，否则注释里提到 while 会被误判成裸 while。
 // 子 shell 里的 while 前面有缩进且上一行是单独的 "("，裸的则顶格。
 const svcCode = stripSh(svc);
@@ -2181,6 +2222,10 @@ const uninSrc  = fs.readFileSync(MOD0 + '/uninstall.sh', 'utf8');
   // 而且一句日志都不会有——比数值不还原还难查。
   ok(/perms\.saved/.test(uninSrc), 'uninstall.sh 兜底读了 perms.saved');
   ok(/govs\.saved/.test(uninSrc),  'uninstall.sh 兜底读了 govs.saved');
+  ok(/cpuset\.saved/.test(uninSrc) && /restore_cpuset/.test(uninSrc),
+     'uninstall.sh 兜底读了 cpuset.saved（掩码不是数值，单开一路）');
+  ok(/uclamp\.saved/.test(uninSrc) && /restore_uclamp/.test(uninSrc),
+     'uninstall.sh 兜底读了 uclamp.saved（原值可能是 max/50.00）');
   /* 账本被清/守护从未跑起来时，至少把 CPU 上限放回硬件最高；
      深睡脚本缺失时，按快照直接还原 Doze 常量与临时白名单。 */
   ok(/_had_journal=0/.test(uninSrc) && /cpuinfo_max_freq/.test(uninSrc) &&
@@ -2466,9 +2511,9 @@ console.log('\n== 分应用档位 ==');
        /origWhen/.test(ds2) && /暂不进入深睡/.test(ds2) &&
        /暂不进入系统 Doze/.test(ds2),
        '闹钟前 30 分钟不进入，7:30 收口也让路（防止早上闹钟不响）');
-    ok(/深睡不再冻结任何进程/.test(html) && /网络白名单/.test(html)
-       && /写进下面的名单/.test(html),
-       '睡眠页说明：不再冻结、white= 就是网络白名单、要完全放行写进名单');
+    ok(/深睡不再冻结任何进程/.test(html) && /系统 Doze 白名单/.test(html)
+       && /微信\/QQ/.test(html) && /深睡关闭时也会立即写进/.test(html),
+       '睡眠页说明：不再冻结；深睡关闭也把 white/push/IM 写进系统 Doze 白名单');
     ok(!/满 20 秒先冻结|7 分 30 秒再让系统|立刻解冻还原/.test(html),
        '睡眠页不再出现过时的冻结/7:30/解冻文案');
     ok(/builtin_white\) builtin_white ;;/.test(apiSrc) &&
@@ -2859,12 +2904,12 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
       ok(dups.length === 0, '页面脚本没有重名函数（否则后一个会静默覆盖前一个）',
          [...new Set(dups)].join(','));
     }
-    ok(/async function applyEcoPreset[\s\S]{0,4200}?setChk\('psi_adapt', false/.test(html) &&
-       /onclick="applyEcoPreset\(\)"/.test(html) && /id="eco-apply"/.test(html) &&
-       /setExact\('CPU_PCT_BIG', *num\(PRESET\.big\)/.test(html) &&
-       !/Math\.max\(20, cur\)/.test(html) &&
-       /paintStrategy\('cap'\)/.test(html),
-       '省电预设=对齐能效最优解（双向、不碰温控/充电）、调度回限频，只填控件');
+    const smoothSrc = (html.match(/async function applySmoothPreset[\s\S]*?(?=async function loadConf)/) || [''])[0];
+    ok(/async function applySmoothPreset[\s\S]{0,4000}?Math\.min\(100, b \+ 10\)/.test(html) &&
+       /onclick="applySmoothPreset\(\)"/.test(html) && /id="smooth-apply"/.test(html) &&
+       !/setCpu\('gpu_pct'/.test(smoothSrc) && !/setChk\('psi_adapt'/.test(smoothSrc) &&
+       !/paintStrategy\('cap'\)/.test(smoothSrc),
+       '偏流畅=推荐每个 CPU 簇 +10%，GPU/温控/PSI/调度不动，只填控件');
     ok(/async function applyChipPreset[\s\S]{0,1800}set\('CPU_PCT_BIG'/.test(html) &&
        /onclick="applyChipPreset\(\)"/.test(html) &&
        !/onclick="applyPreset\(\)"/.test(html) &&
@@ -3600,10 +3645,46 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /now - g_min_give_at < 1800/.test(csrc) && /cming=%d/.test(csrc),
      '下限锁：累计 9 次被夹回判定系统钉死，放弃该簇 30 分钟复探，status 报 cming');
   /* 工作点参数层：adapt 逐芯片 gov_ 数据 + 通用应用/还原。 */
-  ok(/gov_big_hispeed_freq=1689600/.test(fs.readFileSync(MOD0 + '/adapt/sm8750.conf', 'utf8')) &&
-     !/gov_little_hispeed_freq/.test(fs.readFileSync(MOD0 + '/adapt/sm8750.conf', 'utf8')),
-     'sm8750 种子：p6 hispeed（系统不管理的簇）；p0 hispeed 被系统动态管理，不种');
-  ok(/static int gov_parse_line\(const char \*line, int \*tier, char \*param,/.test(csrc) &&
+  {
+    const sm8750 = fs.readFileSync(MOD0 + '/adapt/sm8750.conf', 'utf8');
+    ok(/gov_lv1_cl1_hispeed_ratio=803/.test(sm8750) &&
+       /gov_lv1_cl0_hispeed_ratio=744/.test(sm8750) &&
+       /gov_lv2_cl1_hispeed_ratio=716/.test(sm8750) &&
+       /gov_lv2_cl0_hispeed_ratio=763/.test(sm8750) &&
+       !/gov_lv0_/.test(sm8750) &&
+       !/gov_big_hispeed_freq=1689600/.test(sm8750),
+       'sm8750 hispeed 用千分比：均衡 744/803‰、省电 763/716‰，0 档不改');
+    ok(/cpuset_fg_lv0=0-6/.test(sm8750) && /cpuset_fg_lv1=0-5/.test(sm8750) &&
+       /cpuset_fg_lv2=0-5/.test(sm8750) &&
+       /cpuset_bg_lv0=0-5/.test(sm8750) && /cpuset_bg_lv1=0-3/.test(sm8750) &&
+       /cpuset_bg_lv2=0-2/.test(sm8750),
+       'sm8750 cpuset：前台 0-6/0-5/0-5、后台 0-5/0-3/0-2');
+    const sm8550 = fs.readFileSync(MOD0 + '/adapt/sm8550.conf', 'utf8');
+    const sm8650 = fs.readFileSync(MOD0 + '/adapt/sm8650.conf', 'utf8');
+    const mt6989 = fs.readFileSync(MOD0 + '/adapt/mt6989.conf', 'utf8');
+    ok(/gov_lv1_cl2_hispeed_ratio=542/.test(sm8550) &&
+       /gov_lv2_cl1_hispeed_ratio=550/.test(sm8550) &&
+       /cpuset_sysbg_lv0=0-2/.test(sm8550),
+       'sm8550：三簇 hispeed 与 cpuset 补齐');
+    ok(/gov_lv1_cl3_hispeed_ratio=524/.test(sm8650) &&
+       /gov_lv2_cl2_hispeed_ratio=427/.test(sm8650) &&
+       /cpuset_sysbg_lv1=0-1,5-6/.test(sm8650),
+       'sm8650：两个同频簇用 clN 写法不丢数据');
+    ok(/gov_lv1_cl2_hispeed_ratio=583/.test(mt6989) &&
+       /gov_lv2_cl0_hispeed_ratio=0/.test(mt6989) &&
+       /cpuset_bg_lv0=0-3/.test(mt6989),
+       'mt6989：三簇 hispeed 与 cpuset 补齐');
+    ok(/static int gov_cl_parse_line\(const char \*line, int \*level, int \*cl,/.test(csrc) &&
+       /static struct policy g_polraw\[MAX_POLICY\]/.test(csrc) &&
+       /g_nraw = detect_policies_raw\(g_polraw\)/.test(csrc) &&
+       /for \(int i = 0; i < g_nraw; i\+\+\)/.test(csrc) &&
+       /static long hispeed_from_ratio\(long cap, long ratio\)/.test(csrc) &&
+       /hispeed_ratio/.test(csrc),
+       'cluster 写法：原始 policy 列表 + 每簇下单，同频簇不去重；hispeed 按千分比换算');
+    ok(/strlen\(soc\) > 1 && soc\[strlen\(soc\) - 1\] == 'p'/.test(csrc),
+       'P 后缀（SM8750P / SM8850P / SM8550P / SM8650P）回落基础型号数据');
+  }
+  ok(/static int gov_parse_line\(const char \*line, int \*level, int \*tier, char \*param,/.test(csrc) &&
      /static void suppress_gov_load\(void\)/.test(csrc) &&
      /static void suppress_gov_apply\(void\)/.test(csrc) &&
      /static void suppress_gov_restore\(void\)/.test(csrc) &&
@@ -3612,34 +3693,57 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      (csrc.match(/suppress_gov_apply\(\);/g) || []).length >= 2 &&
      !/cfg\.cpu_boost_off/.test(csrc),
      '工作点层：adapt/<soc>.conf 逐芯片 gov_ 数据，无数据的芯片不调节；周期补应用');
+  /* 动态封顶第三层：uclamp.max + cpuset + 分级 hispeed。 */
+  ok(/g_sup_umax_nodes\[\] = \{[\s\S]{0,300}?uclamp\.max[\s\S]{0,200}?85, 70, 60/.test(csrc) &&
+     /g_sup_umax_nodes\[1\]\.optimal == 65/.test(fs.readFileSync(MOD0 + '/src/test_real.c', 'utf8')) &&
+     /static void suppress_uclamp_max_apply\(void\)/.test(csrc) &&
+     /static void suppress_uclamp_max_restore\(void\)/.test(csrc) &&
+     /UCLAMP_JOURNAL RUN_DIR "\/uclamp\.saved"/.test(csrc) &&
+     /static int uclamp_scale_of_text\(const char \*b\)/.test(csrc) &&
+     /static int uclamp_val_eq\(const char \*a, const char \*b\)/.test(csrc) &&
+     /uclamp 上限已压/.test(csrc),
+     '动态封顶：0/1/2 档压 uclamp.max（85/65/45、70/50/30、60/40/20），max/百分比/0-1024 自适应');
+  ok(/static int cpuset_parse_line\(const char \*line, int \*level, int \*group,/.test(csrc) &&
+     /CPUSET_JOURNAL RUN_DIR "\/cpuset\.saved"/.test(csrc) &&
+     /static int cpuset_apply_level\(int level\)/.test(csrc) &&
+     /static void cpuset_restore_all\(void\)/.test(csrc) &&
+     /cpuset_restore_all\(\);/.test(csrc) &&
+     /cpuset_apply_level\(prof\)/.test(csrc) &&
+     /\/dev\/cpuset\/%s\/cpus/.test(csrc) &&
+     !/cgroup\.procs|\/tasks/.test((csrc.match(/static int cpuset_apply_level[\s\S]*?static void cpuset_restore_all/) || [''])[0]),
+     'cpuset：只写 cpus 掩码、字符串账本、随档位应用/还原，不搬任务');
+  ok(/static void suppress_extra_restore\(void\)/.test(csrc) &&
+     /static void suppress_extra_apply\(void\)/.test(csrc) &&
+     /suppress_extra_apply\(\);/.test(csrc) &&
+     /suppress_extra_restore\(\);/.test(csrc) &&
+     /g_sup_extra_level != prof/.test(csrc) &&
+     /static int sup_profile_level\(void\)/.test(csrc) &&
+     /g_sup_level <= SUP_OPT \? SUP_MID_LV : SUP_FLOOR_LV/.test(csrc) &&
+     /cpuset_apply_level\(prof\)/.test(csrc),
+     'uclamp.max/cpuset/hispeed 随 profile 换档；sav 的 0 档也走均衡组');
+  ok(/g_sup_umax_nodes\[0\]\.optimal == 85/.test(fs.readFileSync(MOD0 + '/src/test_real.c', 'utf8')) &&
+     /g_sup_umax_nodes\[0\]\.floor == 60/.test(fs.readFileSync(MOD0 + '/src/test_real.c', 'utf8')) &&
+     /cpuset_sysbg_lv2=0-1,5-6/.test(fs.readFileSync(MOD0 + '/src/test_real.c', 'utf8')),
+     '自检覆盖 uclamp.max 参数与 cpuset 非连续掩码解析');
+  ok(/uclamp\.max/.test(DOC) && /cpuset/.test(DOC) && /hispeed/.test(DOC) &&
+     /85\/65\/45/.test(DOC) && /70\/50\/30/.test(DOC) && /60\/40\/20/.test(DOC),
+     '文档同步 uclamp.max / cpuset / 分级 hispeed 的参数与还原语义');
+  ok(/uclamp\.max/.test(html) && /cpuset/.test(html) && /hispeed/.test(html) &&
+     /刻度自适应/.test(html),
+     '页面动态封顶文案同步三层附加限制');
   ok(/g_sup_chg_pause/.test(csrc) && /动态封顶：充电中暂停/.test(csrc) &&
      /g_sup_stuck\[i\] = got;/.test(csrc) &&
      /nows - g_sup_stuck_at\[i\] < 600/.test(csrc),
      '压制边界：插电暂停（插电不封顶）+ 内核钳制 600s 退避不空转');
+  ok(/int fg_changed = fg\[0\] && strcmp\(fg, g_fg\) != 0;[\s\S]{0,260}?suppress_boost_apply\(\);/.test(csrc),
+     '切前台立即补写 boost/uclamp/限速，缩短冷启动拉频窗口');
   ok(/if \(cfg\.suppress && !a\.chg_on\) \{[\s\S]{0,700}suppress_tick\(\);/.test(csrc),
      '亮屏常态尾部切 1s 快拍（插电暂停）');
-  /* 静止降频：目标钳制、status/export 两处发布、配置键与页面行齐全。 */
-  ok(/static int smart_still_pct\(int ceil, int frac\)/.test(csrc) &&
-     /if \(g_sm\.still && g_sm\.state <= 1\)/.test(csrc) &&
-     /still_in_band\(busy, cfg\.still_exit, g_sm\.state\)/.test(csrc),
-     '静止目标只在 idle/light 档往下钳，进/保持按占用段判定');
-  ok(/"strat=%d\\nsmart=%d\\nstill=%d\\n/.test(csrc) &&
-     /strncmp\(ln, "still=", 6\)/.test(csrc),
-     'status 发布 still= 且 export 回读，页面显示与守护一致');
-  ok(/STILL_DROP/.test(csrc) && /STILL_FRAC/.test(csrc) &&
-     /STILL_SETTLE_S/.test(csrc) && /STILL_EXIT/.test(csrc) &&
-     /cfg\.still_exit = clampi\(atoi\(v\), 10, 95, 25\)/.test(csrc),
-     '四个 STILL_* 键进 load_cfg，解除阈值下限 10（> 轻载进档阈值 8）');
-  ok(/STILL_DROP STILL_FRAC STILL_SETTLE_S STILL_EXIT/.test(apiSrc) &&
-     /STILL_EXIT\)[^;\n]{0,60}-le 95/.test(apiSrc),
-     'api.sh 白名单与区间校验同步');
-  ok(/id="still_drop"/.test(html) && /id="still_frac"/.test(html) &&
-     /id="still_settle_s"/.test(html) && /id="still_exit"/.test(html) &&
-     /pairs\.push\(\['STILL_DROP'/.test(html) &&
-     /pairs\.push\(\['STILL_FRAC'/.test(html) &&
-     /pairs\.push\(\['STILL_SETTLE_S'/.test(html) &&
-     /pairs\.push\(\['STILL_EXIT'/.test(html),
-     '页面四个静止控件与保存配对齐全');
+  /* 静止降频已移除：源码/API/页面/配置不得再有残留。 */
+  ok(!/STILL_|still_drop|still_frac|still_settle|still_exit|smart_still_pct|still_in_band|g_sm\.still/.test(csrc) &&
+     !/STILL_/.test(apiSrc) && !/STILL_|still_drop|静止降频/.test(html) &&
+     !/STILL_/.test(conf),
+     '静止降频已彻底移除（源码/API/页面/配置无残留）');
 }
 
 /* ── 拉起守护的那条路不能被调用者吊住 ─────────────────────────────
@@ -3959,11 +4063,11 @@ console.log('\n== restart 不吊住调用者 ==');
   /* 版本：module.prop / 页面模块版本 / README / 守护二进制一起改；
      页面 #ver2 在 status 回来后会用守护的 SF_VERSION 覆盖，两边必须一致。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2.2 Beta5$/m.test(mp) && /^versionCode=20205$/m.test(mp),
-     'module.prop 是 V2.2 Beta5 / 20205');
-  ok(/SF_VERSION "2\.2 Beta5"/.test(csrc), '守护源码里的版本号同步到 2.2 Beta5');
-  ok(/id="ver">V2.2 Beta5</.test(html) && /id="ver2">V2.2 Beta5</.test(html),
-     '页面：模块版本与守护版本都是 V2.2 Beta5');
+  ok(/^version=V2\.2$/m.test(mp) && /^versionCode=20213$/m.test(mp),
+     'module.prop 是 V2.2 / 20213');
+  ok(/SF_VERSION "2\.2"/.test(csrc), '守护源码里的版本号同步到 2.2');
+  ok(/id="ver">V2\.2</.test(html) && /id="ver2">V2\.2</.test(html),
+     '页面：模块版本与守护版本都是 V2.2');
   ok(/\.sub\{[^}]*white-space:normal/.test(html),
      '标题副行允许换行，窄屏不会把版本号省略成 "…"');
   ok(/<html lang="zh-CN" data-style="glass">/.test(html),
@@ -3976,8 +4080,8 @@ console.log('\n== restart 不吊住调用者 ==');
      /\[data-style="glass"\] \.tabbar\{/.test(html) &&
      !/自适配动态限频|powerd/.test(html),
      '两套规则并存：玻璃只在 data-style=glass 下生效，注释不点名其它模块');
-  ok(/版本：V2.2 Beta5/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
-     'README 标题行同步到 V2.2 Beta5');
+  ok(/版本：V2\.2/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
+     'README 标题行同步到 V2.2');
   {
     /* 管理器按 update.json 的 versionCode 提示更新，和 module.prop 漂移会
        出现"提示了但装不上"或"明明有新版却不提示"，两边必须同源。 */

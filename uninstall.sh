@@ -15,7 +15,8 @@ DATA=/data/adb/soc_freqcap
 # 最后兜一层"CPU 上限 = 硬件最高"。
 _had_journal=0
 for _b in "$DATA" "$MODDIR"; do
-  [ -f "$_b/run/nodes.saved" ] && _had_journal=1
+  { [ -f "$_b/run/nodes.saved" ] || [ -f "$_b/run/cpuset.saved" ] ||
+    [ -f "$_b/run/uclamp.saved" ]; } && _had_journal=1
 done
 
 # 停掉所有还会写节点的进程。
@@ -145,10 +146,53 @@ restore_govs() {
   if [ "$_rf" = 0 ]; then rm -f "$G"; else echo "  保留账本：$G"; fi
 }
 
+# cpuset 兜底：cpuset.saved 每行 "<path> <mask> <mode>"，掩码不是纯数字，
+# 不能走 restore_from；这里只写回掩码并还原权限。
+restore_cpuset() {
+  C="$1/run/cpuset.saved"
+  [ -f "$C" ] || return 0
+  _rf=0
+  while read -r NODE MASK MODE; do
+    [ -e "$NODE" ] || continue
+    case "$MASK" in ''|*[!0-9,-]*) continue ;; esac
+    chmod 0644 "$NODE" 2>/dev/null
+    echo "$MASK" > "$NODE" 2>/dev/null
+    _now=$(cat "$NODE" 2>/dev/null | tr -d ' \r\n')
+    [ "$_now" = "$MASK" ] || {
+      _rf=1
+      echo "  cpuset 未还原：$NODE（期望 $MASK，实际 ${_now:-读不到}）"
+    }
+    case "$MODE" in ''|*[!0-7]*) MODE=644 ;; esac
+    chmod "$MODE" "$NODE" 2>/dev/null
+  done < "$C"
+  if [ "$_rf" = 0 ]; then rm -f "$C"; else echo "  保留账本：$C"; fi
+}
+
+# uclamp.max 兜底：原值可能是 max / 50.00 / 1024，按字符串原样写回。
+restore_uclamp() {
+  U="$1/run/uclamp.saved"
+  [ -f "$U" ] || return 0
+  _rf=0
+  while read -r NODE VAL MODE; do
+    [ -e "$NODE" ] || continue
+    [ -n "$VAL" ] || continue
+    chmod 0644 "$NODE" 2>/dev/null
+    echo "$VAL" > "$NODE" 2>/dev/null
+    _now=$(cat "$NODE" 2>/dev/null | tr -d ' \r\n')
+    [ "$_now" = "$VAL" ] || {
+      _rf=1
+      echo "  uclamp.max 未还原：$NODE（期望 $VAL，实际 ${_now:-读不到}）"
+    }
+    case "$MODE" in ''|*[!0-7]*) MODE=644 ;; esac
+    chmod "$MODE" "$NODE" 2>/dev/null
+  done < "$U"
+  if [ "$_rf" = 0 ]; then rm -f "$U"; else echo "  保留账本：$U"; fi
+}
+
 # 两处都要兜：账本现在在 $DATA/run，旧版本写在 $MODDIR/run，
 # 从旧版本直升时账本可能仍留在模块目录里，只兜一处等于留一半。
 #
-# 传进去的是父目录，三个 restore_* 内部自行拼 "$1/run/xxx.saved"；
+# 传进去的是父目录，restore_* 内部自行拼 "$1/run/xxx.saved"；
 # 路径拼错会让函数开头的 `[ -f ... ] || return 0` 静默返回，
 # 数值完全不还原，而卸载输出照样打"已恢复启动前状态"。
 for BASE in "$DATA" "$MODDIR"; do
@@ -156,6 +200,8 @@ for BASE in "$DATA" "$MODDIR"; do
   restore_from "$BASE"
   restore_perms "$BASE"
   restore_govs "$BASE"
+  restore_cpuset "$BASE"
+  restore_uclamp "$BASE"
 done
 
 # 账本不在：守护可能从未成功启动，但节点也可能被早期版本写过。
@@ -212,7 +258,9 @@ stop_procs KILL
 # /data/local/tmp 再删数据目录；否则卸载后就再也找不回原始值。
 _rem=0
 for _j in "$DATA/run/nodes.saved" "$DATA/run/perms.saved" "$DATA/run/govs.saved" \
-          "$MODDIR/run/nodes.saved" "$MODDIR/run/perms.saved" "$MODDIR/run/govs.saved"; do
+          "$DATA/run/cpuset.saved" "$DATA/run/uclamp.saved" \
+          "$MODDIR/run/nodes.saved" "$MODDIR/run/perms.saved" "$MODDIR/run/govs.saved" \
+          "$MODDIR/run/cpuset.saved" "$MODDIR/run/uclamp.saved"; do
   [ -f "$_j" ] && _rem=1
 done
 if [ "$_rem" = 1 ]; then
