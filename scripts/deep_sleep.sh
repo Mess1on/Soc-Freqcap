@@ -60,11 +60,15 @@ DS_EVENT_FIFO=$CONF_DIR/run/ds_event.fifo
 # 深睡只做 Doze，不碰 CPU 频率/调度。
 # nice= 不碰；push= 只放行指定进程（pkg[:proc]）并注入 Doze 白名单。
 DS_OPS_LEDGER=$CONF_DIR/run/ops.saved
+# 白名单应用的 appops 账本：格式 pkg|op|old。
+DS_APP_OPS_LEDGER=$CONF_DIR/run/ds_appops.saved
 DS_LOCK_DIR=$CONF_DIR/run/dsleep.lock.d
 # 只有维护轮才读 dumpsys（一次就是一次 system_server 往返）。计数器是累计量，
 # 隔多久读都不丢增量：唤醒榜 15 分钟、媒体 5 分钟足够，退出时还会结算一次。
 WAKE_SAMPLE_INTERVAL=${DS_WAKE_INTERVAL:-900}
 MEDIA_CHECK_INTERVAL=${DS_MEDIA_INTERVAL:-300}
+# 深睡期间每 5 分钟确认一次白名单还在：ColorOS 等 ROM 可能清掉系统白名单。
+WHITE_RECHECK_INTERVAL=300
 # 闹钟守卫：时钟类应用有这么多秒内要响的闹钟时，不进入深睡（已经在里面就退出）。
 # 只让路闹钟前半小时，不是"有闹钟就永不深睡"。
 ALARM_GUARD_SEC=1800
@@ -110,6 +114,7 @@ ds_scr_bad=0
 ds_scr_checked=0
 ds_scr_hold=0
 ds_last_media=0
+ds_last_white_check=0
 ds_last_wake=0
 
 # 双榜单：ds_cur_list 自上次拔电/开机累计；ds_run_list 每次进入深睡清零。
@@ -438,6 +443,8 @@ ds_white_add() {
     local pkg="$1" old="$2"
     case ",$old," in *",$pkg,"*) return 0;; esac
     timeout 2 dumpsys deviceidle whitelist "+$pkg" >/dev/null 2>&1
+    # 部分 ROM 只认 cmd 这一路；两条都发，幂等。
+    timeout 2 cmd deviceidle whitelist "+$pkg" >/dev/null 2>&1
     ds_added="$ds_added $pkg"
 }
 
@@ -446,6 +453,7 @@ ds_white_del() {
     local pkg="$1"
     case ",$DS_WHITE," in *",$pkg,"*) return 0 ;; esac
     timeout 2 dumpsys deviceidle whitelist "-$pkg" >/dev/null 2>&1
+    timeout 2 cmd deviceidle whitelist "-$pkg" >/dev/null 2>&1
 }
 
 # ============================ 快照 ============================================
@@ -955,6 +963,49 @@ ds_ops_restore_if_any() {
     fi
 }
 
+# 白名单应用的后台限制：ColorOS/OPPO 的「睡眠待机」可能不认 AOSP Doze
+# 白名单，但 appops 的 RUN_IN_BACKGROUND / RUN_ANY_IN_BACKGROUND 是系统
+# 真正执行后台限制的地方。只对 white=/push= 的包从 deny 改成 allow，
+# 退出时按账本还原；默认就是 allow 的包不动（不写账本）。
+ds_appops_get() {
+    cmd appops get "$1" "$2" 2>/dev/null < /dev/null \
+        | awk -v o="$2" '$1 == o":" { sub(/;.*/, "", $2); print $2; exit }'
+}
+
+ds_appops_allow() {
+    local pkg="$1" op="$2" old
+    old="$(ds_appops_get "$pkg" "$op")"
+    [ -n "$old" ] || return 0          # 无显式条目 = 默认 allow
+    [ "$old" = "allow" ] && return 0
+    grep -qxF "$pkg|$op|$old" "$DS_APP_OPS_LEDGER" 2>/dev/null \
+        || printf '%s|%s|%s\n' "$pkg" "$op" "$old" >> "$DS_APP_OPS_LEDGER"
+    cmd appops set "$pkg" "$op" allow >/dev/null 2>&1 < /dev/null
+}
+
+ds_appops_boost() {
+    ds_appops_allow "$1" RUN_IN_BACKGROUND
+    ds_appops_allow "$1" RUN_ANY_IN_BACKGROUND
+}
+
+ds_appops_restore_if_any() {
+    local pkg op old now keep=""
+    [ -f "$DS_APP_OPS_LEDGER" ] || return 0
+    while IFS='|' read -r pkg op old; do
+        [ -n "$pkg" ] && [ -n "$op" ] || continue
+        case "$old" in allow|deny|ignore|default) ;; *) old=default ;; esac
+        cmd appops set "$pkg" "$op" "$old" >/dev/null 2>&1 < /dev/null
+        now="$(ds_appops_get "$pkg" "$op")"
+        [ "$now" = "$old" ] || keep="$keep$pkg|$op|$old
+"
+    done < "$DS_APP_OPS_LEDGER"
+    if [ -n "$keep" ]; then
+        printf '%s' "$keep" | atomic_write "$DS_APP_OPS_LEDGER" 0644
+    else
+        rm -f "$DS_APP_OPS_LEDGER" 2>/dev/null
+        log_ds "白名单后台限制已按账本还原"
+    fi
+}
+
 # ============================ 策略迁移 ========================================
 # V1.6 之前内置把微信/QQ/企业微信/钉钉整包放进 white=：整包不冻结、
 # 不进唤醒锁管控，还进了 Doze 白名单。这里做一次性迁移：IM 保活（nice=），
@@ -1081,6 +1132,7 @@ ds_keep_doze() {
         [ -n "$p" ] || continue
         printf '%s\n' "$installed" | grep -qx -- "$p" || continue
         timeout 2 dumpsys deviceidle whitelist "+$p" >/dev/null 2>&1
+        timeout 2 cmd deviceidle whitelist "+$p" >/dev/null 2>&1
     done
     log_ds "永久豁免已同步到系统 Doze 白名单（深睡关闭也生效）"
 }
@@ -1097,6 +1149,7 @@ ds_enter() {
         [ -n "$pkg" ] || continue
         n=$((n+1)); [ "$n" -gt "$MAX_WHITE" ] && break
         ds_white_seen="$ds_white_seen $pkg"
+        ds_appops_boost "$pkg"
         [ "$DS_DOZE_ENABLED" = "1" ] || continue
         ds_white_add "$pkg" "$old_white"
     done
@@ -1108,6 +1161,7 @@ ds_enter() {
             [ -n "$pkg" ] || continue
             case " $ds_added " in *" $pkg "*) continue ;; esac
             ds_white_add "$pkg" "$old_white"
+            ds_appops_boost "$pkg"
         done
         # 默认短信应用不在名单里也要临时加白：否则 SMS 广播会被压到出 Doze 才发。
         # 退出时按 ds_added 撤掉；用户名单里的那条不会被撤。
@@ -1127,6 +1181,18 @@ ds_enter() {
             ds_white_add "$pkg" "$old_white"
             log_ds "媒体应用 $pkg 已临时加白"
         done
+        # 校验一次：有些 ROM 会拒绝 whitelist 写入，或只对主用户生效。
+        # 这行日志能直接区分“模块没加”和“系统没认”。
+        {
+            _snapv="$(ds_white_snapshot)"
+            _miss=""
+            _check="$DS_WHITE $(ds_push_pkg_list | tr ',' ' ') $ds_added"
+            for pkg in $_check; do
+                [ -n "$pkg" ] || continue
+                case ",$_snapv," in *",$pkg,"*) ;; *) _miss="$_miss $pkg" ;; esac
+            done
+            [ -n "$_miss" ] && log_ds "深睡白名单未生效（系统拒绝或非主用户）：$_miss"
+        }
     fi
     ds_snap_write
     # 深睡只做 Doze：冻结（墓碑）已移除，这里不再建冻结组、不再扫候选、不再冻进程。
@@ -1140,6 +1206,7 @@ ds_enter() {
     ds_alarm_wait=0
     ds_event_ok=1
     ds_last_media=$(now)
+    ds_last_white_check=$(now)
     ds_last_wake=$(now)
     ds_run_list=""
     ds_cur_base="$(ds_wakes_collect)"
@@ -1154,6 +1221,7 @@ ds_exit() {
     ds_ops_restore_all
     ds_freeze_thaw_all
     [ -f "$DS_OPS_LEDGER" ] && ds_ops_restore_all
+    ds_appops_restore_if_any
     # 只撤销我们自己发起的 Doze。没 force 过还去 unforce 的话，
     # 会把系统正在进行的深度空闲打断，下一轮它又从头进 —— 来回收口最耗电。
     [ "$ds_doze_sent" = "1" ] && timeout 2 dumpsys deviceidle unforce >/dev/null 2>&1
@@ -1302,9 +1370,28 @@ ds_tick() {
             [ "$_snap_done" = "1" ] || { _snap="$(ds_white_snapshot)"; _snap_done=1; }
             ds_white_add "$pkg" "$_snap"
         fi
+        ds_appops_boost "$pkg"
         ds_snap_write
         log_ds "新加入白名单的应用已加白"
     done
+
+    # 深睡期间每 5 分钟确认白名单还在：ColorOS 等 ROM 可能清掉系统条目。
+    if [ $((t - ds_last_white_check)) -ge "$WHITE_RECHECK_INTERVAL" ]; then
+        ds_last_white_check=$t
+        if [ "$DS_DOZE_ENABLED" = "1" ]; then
+            _re_snap="$(ds_white_snapshot)"
+            for pkg in $(echo "$DS_WHITE" | tr ',' ' ') $(ds_push_pkg_list | tr ',' ' '); do
+                [ -n "$pkg" ] || continue
+                case ",$_re_snap," in
+                    *",$pkg,"*) ;;
+                    *) ds_white_add "$pkg" "$_re_snap"
+                       ds_appops_boost "$pkg"
+                       ds_snap_write
+                       log_ds "白名单被系统移除，已补回：$pkg" ;;
+                esac
+            done
+        fi
+    fi
 
     if [ $((t - ds_last_media)) -ge "$MEDIA_CHECK_INTERVAL" ]; then
         ds_last_media=$t
@@ -1450,6 +1537,10 @@ ds_lock_acquire() {
             ''|*[!0-9]*) ;;
             *)
                 if [ -d "/proc/$p" ] && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'deep_sleep.sh'; then
+                    # 把真身 pid 补回 pid 文件：service.sh 的看护只读它，
+                    # 文件陈旧时会每 60 秒再拉起一个注定抢锁失败的实例，
+                    # 日志就会一直刷"已有深睡实例"。
+                    echo "$p" > "$PIDFILE" 2>/dev/null
                     log_ds "已有深睡实例在跑（pid $p），本次不重复启动"
                     return 1
                 fi
@@ -1499,6 +1590,7 @@ ds_shutdown() {
     # 入口失败/账本残留时也兜底还原；先解冻，再恢复冻结期间写不进去的 appops。
     ds_freeze_restore_if_any
     ds_ops_restore_if_any
+    ds_appops_restore_if_any
     # 退出前把 dsactive 写回 0：api.sh 停止守护后页面还会读这份 state。
     ds_state_write
     rm -f "$PIDFILE" "$DS_EVENT_TMP" "$DS_EVENT_FIFO" 2>/dev/null
@@ -1532,6 +1624,7 @@ ds_main() {
     ds_freeze_probe
     ds_freeze_restore_if_any
     ds_ops_restore_if_any
+    ds_appops_restore_if_any
     ds_wakes_load
     ds_snap_restore_if_any
     # 启动时先量一次大小。光靠 log_ds 里那个"每 64 条"不够：_ds_logn 是

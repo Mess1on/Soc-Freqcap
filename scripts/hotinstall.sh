@@ -24,6 +24,15 @@ if [ -f "$MODDIR/remove" ]; then
   say "模块已标记卸载，跳过启动"
   exit 0
 fi
+# 管理器里停用后热安装：不替用户把守护拉起来；旧实例会自己看到 disable 标记并退出。
+if [ -f "$MODDIR/disable" ]; then
+  say "模块处于停用状态，跳过启动"
+  exit 0
+fi
+if [ -f "$DATA/safemode" ]; then
+  say "模块处于安全模式，跳过启动（删除 $DATA/safemode 后重启恢复）"
+  exit 0
+fi
 
 # 1) 深睡守护：先停旧的。TERM 会走 ds_exit（解冻 + unforce + 撤临时白名单）；
 #    万一卡住，4 秒后 kill -9，冻结账本和快照由新脚本启动时还原。

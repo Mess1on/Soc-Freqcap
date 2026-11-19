@@ -2,17 +2,20 @@
 
 Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏自动交还系统；附带 WebUI 与深度睡眠。
 
-作者：梦笙Mess1on & Ktwo　　版本：V2.2　　适用：KernelSU / Magisk / APatch · arm64-v8a
+作者：梦笙Mess1on & Ktwo　　版本：V2.3　　适用：KernelSU / Magisk / APatch · arm64-v8a
 
 ## 核心特性
 
 | 特性 | 说明 |
 |---|---|
 | 按簇自动分档 | 读每个 `policy*` 的频率表自动分档，不写死 CPU 编号；封顶值向下吸附到频点，绝不超过设定百分比 |
+| 芯片预设 | 全新安装默认「均衡」档；CPU/GPU 封顶页可一键套「省电 / 均衡」，覆盖 14 套骁龙/天玑落档参数；点预设会同时打开动态封顶并切到对应风格 |
+| 动态封顶 | 页面一个开关；省电风格持续低载后把静置天花板收到 960MHz（按真实频点向上取，不低过硬件最低），下限放回硬件最低、hispeed 置 0；负载统计排除 CPU0；普通/智能模式的百分比不会超过厂商原始上限 |
 | 智能调度 | 首页可在「限频 / 智能」间切换；智能按空闲、轻载、中载、重载四档动态给目标，`CPU_PCT_*` 只当天花板 |
 | 游戏与分应用放开 | `games.txt` 认包名，进游戏解除封顶并把节点权限交还系统（只撤模块自己的帽，厂商已压低的游戏/热控上限保留）；`app_modes.conf` 支持 `full` / `keep` / 单独数值 |
-| GPU 多后端 | 高通 KGSL、MTK Mali devfreq，以及天玑 9500 这类无 GPU devfreq 机型的 `gpufreqv2 limit_table` |
+| GPU 多后端 | 高通 KGSL、MTK Mali devfreq、天玑 `gpufreqv2 limit_table`，以及老 MTK 的 `gpufreq_opp_dump` + GED `custom_upbound_gpu_freq` |
 | WebUI + 深度睡眠 | 页面调参 / 名单 / 建议；熄屏后 Doze 收口（force-idle + 白名单），可配豁免与唤醒榜 |
+| 参数导入 / 导出 | 维护页一键导出 `socfreq.conf`，粘贴导入；逐项校验、原子替换，失败不留半份配置 |
 
 ## 安装
 
@@ -40,7 +43,7 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 模块**只负责报版本号，不下载、不安装**——新版统一放网盘，地址写在
 `update.json` 的 `zipUrl`，并同步置顶在 [CHANGELOG.md](CHANGELOG.md)。
 
-当前下载地址：[https://pan.quark.cn/s/89e180d9cfc9](https://pan.quark.cn/s/89e180d9cfc9)。
+当前下载地址：[https://pan.quark.cn/s/eeeffc4e0885](https://pan.quark.cn/s/eeeffc4e0885)。
 点管理器里的「更新」会下载失败，这是预期行为：GitHub 只放版本号，安装包在夸克网盘，
 复制上面的地址下载 zip 后再手动安装。
 
@@ -64,10 +67,14 @@ WebUI：管理器模块页 → 打开 WebUI。首页徽标显示「常态限频�
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `CPU_PCT_BIG` / `CPU_PCT_LITTLE` | 65 / 65 | 超大核 / 小核封顶百分比 |
+| `CPU_MIN_PCT_*` | 0 | 进阶最低频百分比，0 = 跟随系统；页面在 CPU 封顶里折叠 |
+| `CPU_FLOOR_M` | 0 | M 簇封顶下限（Hz，0=不设）；动态封顶/智能/温控/电量偏移都不会把它压到该值以下。Find N5 设 1785600 |
 | `CPU_PCT_MID` / `CPU_PCT_MID2` | 66 / 64 | 中间两档（4 簇以上机型用） |
 | `GPU_PCT` | 45 | GPU 封顶百分比 |
 | `STRATEGY` | cap | `cap` 固定百分比封顶；`smart` 四档智能调度，百分比只当天花板 |
-| `SCREEN_POLICY` | cap（新装）/ 升级按旧键迁移 | 熄屏保持封顶+轻巡检；`uncap` 交还系统、`keep` 全量巡检；缺键时 `SCREEN_UNCAP=0` 补 cap、其余补 uncap |
+| `APP_SWITCH_TIER` | 2 | 智能模式切前台首拍预热档：0=关、1=轻载、2=中载、3=重载 |
+| `SCREEN_POLICY` | cap | 熄屏保持封顶（默认开，页面一个开关）；关 = `uncap` 交还系统；高级用户可手工写 `keep` |
+| `CAP_BACKEND` | auto | CPU 封顶第二道锁：自动叠加 MTK PPM；`sysfs` 可一键退回只写 sysfs。高通 msm 为实验性强制项。隐藏项，无页面开关 |
 | `INTERVAL` | 5 | 巡检间隔（秒） |
 
 数值会被夹回合法区间，调速器名只认白名单。完整键表、分应用档位、实时偏移（PSI / 温控 / 电量阶梯）见 [配置文档](docs/configuration.md)。

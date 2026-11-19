@@ -92,6 +92,33 @@ reject conf_set_many
 reject conf_set_many CPU_PCT_BIG
 reject conf_set_many CPU_PCT_BIG=999
 
+echo "== 参数导入（原子）=="
+ok "$(A conf_keys | grep -c '^CAP_BACKEND$')" "1" "conf_keys 暴露封顶后端键"
+ok "$(A conf_keys | grep -c '^CPU_FLOOR_M$')" "1" "conf_keys 暴露 M 簇封顶下限键"
+ok "$(A conf_set CPU_FLOOR_M 1785600 >/dev/null; grep '^CPU_FLOOR_M=' socfreq.conf)" \
+   "CPU_FLOOR_M=1785600" "M 簇封顶下限可写"
+reject conf_set CPU_FLOOR_M 10000001
+A conf_set CPU_FLOOR_M 0 >/dev/null
+ok "$(A conf_set CAP_BACKEND ppm >/dev/null; grep '^CAP_BACKEND=' socfreq.conf)" \
+   "CAP_BACKEND=ppm" "CAP_BACKEND 可写 ppm"
+ok "$(A conf_get | sed -n 's/^CAP_BACKEND=//p')" "ppm" "conf_get 读到封顶后端"
+ok "$(A conf_import_many CAP_BACKEND=msm 2>&1)" "OK 1" "导入也认封顶后端字符串"
+ok "$(A conf_get | sed -n 's/^CAP_BACKEND=//p')" "msm" "导入的封顶后端已落盘"
+reject conf_set CAP_BACKEND pwn
+A conf_set CAP_BACKEND auto >/dev/null
+ok "$(A conf_keys | grep -c '^CPU_MIN_PCT_BIG$')" "1" "conf_keys 暴露进阶最低频键"
+A conf_set_many CPU_PCT_BIG=60 CPU_MIN_PCT_BIG=0 >/dev/null
+BAD=$(A conf_import_many CPU_PCT_BIG=70 INTERVAL=999 2>&1)
+ok "$(printf '%s' "$BAD" | grep -c 'INTERVAL')" "1" "导入失败点名到具体键"
+ok "$(A conf_get | sed -n 's/^CPU_PCT_BIG=//p')" "60" "导入失败时原配置一个字节都没改"
+ok "$(A conf_import_many CPU_PCT_BIG=70 CPU_MIN_PCT_BIG=40 2>&1)" "OK 2" \
+   "合法导入一次提交多个键"
+ok "$(A conf_get | sed -n 's/^CPU_MIN_PCT_BIG=//p')" "40" "导入的最低频已落盘"
+reject conf_set CPU_MIN_PCT_BIG 101
+ok "$(A conf_set CPU_MIN_PCT_BIG 0 >/dev/null; grep '^CPU_MIN_PCT_BIG=' socfreq.conf)" \
+   "CPU_MIN_PCT_BIG=0" "最低频 0 = 跟随系统可写"
+A conf_set_many CPU_PCT_BIG=60 CPU_MIN_PCT_BIG=0 >/dev/null
+
 echo "== 拒绝非法值 =="
 reject conf_set CPU_PCT_BIG 999
 reject conf_set CPU_PCT_BIG 0
@@ -694,6 +721,13 @@ rm -rf "$TMP/run"
 rm -f "$SEP/run/status"
 ok "$(SA status | sed -n 's/^state=//p')" "unknown" \
    "两处都没有时给可解析的 state=unknown（空串会让前端白屏）"
+
+touch "$SEP/safemode"
+ok "$(SA status | sed -n 's/^safemode=//p')" "1" "安全模式标记会出现在 status 里"
+SA safemode_off >/dev/null 2>&1
+ok "$([ -f "$SEP/safemode" ] && echo yes || echo no)" "no" \
+   "safemode_off 删掉标记（不用用户手删文件）"
+ok "$(SA status | sed -n 's/^safemode=//p')" "0" "退出后 status 回到 safemode=0"
 
 SA pause >/dev/null 2>&1
 ok "$([ -f "$SEP/pause" ] && echo yes)" "yes" \
@@ -1335,7 +1369,7 @@ ok "$(DSA ds_white_del com.example.sleep | head -n 1)" "OK com.example.sleep" "�
 ok "$(DSA ds_white_del com.example.sleep | head -n 1)" "MISS com.example.sleep" "重复移除报 MISS"
 ok "$(DSA ds_get | grep -c '^white=')" "0" "移除后名单为空"
 
-echo "== 芯片推荐预设 =="
+echo "== 芯片预设（省电/均衡）=="
 # 没有 adapt 目录时页面要显示"无"，apply 必须拒绝而不是写一堆空值。
 ok "$(A preset_get | sed -n 's/^none=//p')" "1" "无预设时 preset_get 返回 none=1"
 reject preset_apply
@@ -1359,10 +1393,72 @@ ok "$(P preset_get | sed -n 's/^none=//p')" "0" "命中 SoC 时 none=0"
 ok "$(P preset_get | sed -n 's/^big=//p')" "80" "preset_get 带出 BIG"
 ok "$(P preset_get | grep -c '^mid=67$')" "1" "preset_get 带出 MID"
 ok "$(P preset_get | sed -n 's/^title=//p')" "天玑 9400 测试预设" "preset_get 带出标题"
-ok "$(P preset_apply | head -1)" "OK 12" "preset_apply 写入 12 个键（7 个适配值 + 5 个策略键，没有 MID2 就不传）"
+ok "$(P preset_apply | head -1)" "OK 14" "preset_apply 写入 14 个键（7 个适配值 + 5 个策略键 + 动态封顶开关/风格，没有 MID2 就不传）"
 ok "$(grep '^CPU_PCT_BIG=' socfreq.conf)" "CPU_PCT_BIG=80" "预设 BIG 已落盘"
 ok "$(grep '^CPU_PCT_MID=' socfreq.conf)" "CPU_PCT_MID=67" "预设 MID 已落盘"
 ok "$(grep '^GPU_PCT=' socfreq.conf)" "GPU_PCT=35" "预设 GPU 已落盘"
+
+# 同一份文件里两档：sav_* / bal_*，default_* 跟均衡档一致
+cat > "$TMP/adapt/mt6991.conf" <<'EOF'
+#match soc=MT6991
+default_cpu_pct_big=60
+default_cpu_pct_mid=60
+default_cpu_pct_little=97
+default_gpu_pct=32
+preset_sav_big=46
+preset_sav_mid=45
+preset_sav_little=76
+preset_sav_gpu=25
+preset_bal_big=60
+preset_bal_mid=60
+preset_bal_little=97
+preset_bal_gpu=32
+default_th_high=75
+default_th_low=68
+default_psi_gain=10
+EOF
+ok "$(P preset_get | sed -n 's/^sav_big=//p')" "46" "preset_get 带出省电 BIG"
+ok "$(P preset_get | sed -n 's/^sav_mid=//p')" "45" "preset_get 带出省电 MID"
+ok "$(P preset_get | sed -n 's/^bal_big=//p')" "60" "preset_get 带出均衡 BIG"
+ok "$(P preset_get | sed -n 's/^big=//p')" "60" "旧 big= 别名指向均衡档"
+ok "$(P preset_apply sav >/dev/null; grep '^CPU_PCT_BIG=' socfreq.conf)" \
+   "CPU_PCT_BIG=46" "preset_apply sav 写省电档"
+ok "$(P preset_apply sav >/dev/null; grep '^SUPPRESS=' socfreq.conf)" \
+   "SUPPRESS=1" "省电预设打开动态封顶"
+ok "$(P preset_apply sav >/dev/null; grep '^SUP_STYLE=' socfreq.conf)" \
+   "SUP_STYLE=sav" "省电预设把风格设为省电（静置 960MHz）"
+ok "$(P preset_apply bal >/dev/null; grep '^CPU_PCT_BIG=' socfreq.conf)" \
+   "CPU_PCT_BIG=60" "preset_apply bal 写均衡档"
+ok "$(P preset_apply bal >/dev/null; grep '^SUP_STYLE=' socfreq.conf)" \
+   "SUP_STYLE=bal" "均衡预设把风格设为均衡"
+reject preset_apply pwn
+rm -rf "$TMP/adapt" "$TMP/stub2"
+
+# 同 SoC 不同核数：cores=7 的专用预设要压过通用 SM8750 表
+mkdir -p "$TMP/adapt" "$TMP/stub2"
+printf '#!/bin/sh\n[ "$1" = ro.product.brand ] && echo OPPO\n[ "$1" = ro.soc.model ] && echo SM8750\n' \
+  > "$TMP/stub2/getprop"
+chmod +x "$TMP/stub2/getprop"
+printf '#match soc=SM8750\ndefault_cpu_pct_big=62\ndefault_cpu_pct_little=68\ndefault_gpu_pct=46\ndefault_th_high=75\ndefault_th_low=68\ndefault_psi_gain=5\n' \
+  > "$TMP/adapt/sm8750.conf"
+printf '#match brand=OPPO\n#match soc=SM8750\n#match cores=7\ndefault_cpu_pct_big=62\ndefault_cpu_pct_little=78\ndefault_cpu_floor_m=1785600\ndefault_gpu_pct=46\ndefault_th_high=72\ndefault_th_low=66\ndefault_psi_gain=5\npreset_sav_big=46\npreset_sav_little=51\npreset_sav_gpu=37\npreset_bal_big=62\npreset_bal_little=78\npreset_bal_gpu=46\n' \
+  > "$TMP/adapt/sm8750_7core.conf"
+P7() { PATH="$TMP/stub2:$ORIG_PATH" SF_TEST_CORES=7 sh webroot/api.sh "$@"; }
+P8() { PATH="$TMP/stub2:$ORIG_PATH" SF_TEST_CORES=8 sh webroot/api.sh "$@"; }
+ok "$(P7 preset_get | sed -n 's/^name=//p')" "sm8750_7core" "7 核选更具体的 Find N5 预设"
+ok "$(P7 preset_get | sed -n 's/^little=//p')" "78" "7 核均衡档带出 M 簇 78%"
+ok "$(P7 preset_apply >/dev/null; grep '^CPU_PCT_LITTLE=' socfreq.conf)" "CPU_PCT_LITTLE=78" \
+   "7 核均衡预设可应用"
+ok "$(P7 preset_apply sav >/dev/null; grep '^CPU_PCT_LITTLE=' socfreq.conf)" "CPU_PCT_LITTLE=51" \
+   "7 核省电预设把 M 簇放回 51%"
+ok "$(P8 preset_get | sed -n 's/^name=//p')" "sm8750" "8 核同 SoC 仍选通用预设"
+ok "$(P8 preset_get | sed -n 's/^little=//p')" "68" "8 核均衡档带出 M 簇 68%"
+# SoC 别名也要走和装机同一套归一化：PINEAPPLEP → SM8650
+printf '#match soc=SM8650\ndefault_cpu_pct_big=59\ndefault_cpu_pct_little=90\ndefault_gpu_pct=50\n' \
+  > "$TMP/adapt/sm8650.conf"
+printf '#!/bin/sh\n[ "$1" = ro.product.brand ] && echo OPPO\n[ "$1" = ro.soc.model ] && echo PINEAPPLEP\n' \
+  > "$TMP/stub2/getprop"
+ok "$(P preset_get | sed -n 's/^name=//p')" "sm8650" "PINEAPPLEP 归一成 SM8650 后命中预设"
 rm -rf "$TMP/adapt" "$TMP/stub2"
 
 echo

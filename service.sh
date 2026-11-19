@@ -36,6 +36,37 @@ DS_SH="$MODDIR/scripts/deep_sleep.sh"
 # tools/safemode.sh 是它的开关。
 [ -f "$DATA/safemode" ] && exit 0
 
+# 连续短启动保护：只有“换了 boot_id 且距上次启动 <120s”才计数。
+# 同一个 boot 里管理器重跑 service.sh（热安装/重启用户空间）不算重启，
+# 不会因为后台清理任务被杀而误累计；两次正常重启间隔超过 2 分钟也重置。
+BOOT_GUARD="$DATA/boot_guard"
+_bid=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+_now=$(date +%s 2>/dev/null)
+if [ -n "$_bid" ] && [ -n "$_now" ]; then
+  _old=$(cat "$BOOT_GUARD" 2>/dev/null)
+  _obid=${_old%% *}
+  _rest=${_old#* }
+  _ots=${_rest%% *}
+  _ocnt=${_rest#* }
+  case "$_ots" in ''|*[!0-9]*) _ots=0 ;; esac
+  case "$_ocnt" in ''|*[!0-9]*) _ocnt=0 ;; esac
+  if [ "$_bid" = "$_obid" ]; then
+    _cnt=$_ocnt
+  elif [ "$_ots" -gt 0 ] && [ "$_now" -gt "$_ots" ] &&
+       [ $((_now - _ots)) -lt 120 ]; then
+    _cnt=$((_ocnt + 1))
+  else
+    _cnt=1
+  fi
+  printf '%s %s %s\n' "$_bid" "$_now" "$_cnt" > "$BOOT_GUARD" 2>/dev/null
+  if [ "$_cnt" -ge 3 ]; then
+    : > "$DATA/safemode" 2>/dev/null
+    echo "连续 $_cnt 次快速重启，已进入安全模式；在 WebUI「维护」或 action.sh 里可一键退出" \
+      >> "$DATA/service.log" 2>/dev/null
+    exit 0
+  fi
+fi
+
 # 开机先清一次旧版本留下的冻结：冻结功能已移除，但升级上来的机器可能还留着
 # 账本或 socfreq_ds 组。那些进程会一直停着、收不到消息 —— 深睡开关关着也一样，
 # 因为清理解冻和"要不要深睡"是两件事，必须无条件做。
@@ -76,7 +107,12 @@ alive() {
 stale() {
   [ -f "$HB" ] || return 0
   _now=$(date +%s 2>/dev/null)
-  _mt=$(stat -c %Y "$HB" 2>/dev/null | head -n 1)
+  # $HB 是指向 /dev/soc_freqcap/heartbeat 的软链；toybox stat 默认按
+  # 链接本身取 mtime，会把"软链创建时间"当成心跳，永远判过期，
+  # 看门狗于是每分钟 kill 一次健康守护。先解析到真实文件再 stat。
+  _hb=$(readlink -f "$HB" 2>/dev/null)
+  [ -n "$_hb" ] || _hb=$HB
+  _mt=$(stat -c %Y "$_hb" 2>/dev/null | head -n 1)
   case "$_now" in ''|*[!0-9]*) return 0 ;; esac
   case "$_mt" in ''|*[!0-9]*) return 0 ;; esac
   # 守护睡觉期间不写心跳，而合法睡眠可以到 SOFF/IDLE_INTERVAL 秒（上限 300），
@@ -103,11 +139,19 @@ stale() {
 # 深度睡眠是独立 shell 进程，靠 pid 文件 + cmdline 认人。
 # 只看 pid 文件不够：kill -9 后文件残留，看护会永远以为它还活着。
 ds_alive() {
-  [ -f "$DS_PID" ] || return 1
-  _p=$(cat "$DS_PID" 2>/dev/null)
-  case "$_p" in ''|*[!0-9]*) return 1 ;; esac
-  [ -d "/proc/$_p" ] || return 1
-  tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q 'deep_sleep\.sh'
+  for _f in "$DS_PID" "$DATA/run/dsleep.lock.d/pid"; do
+    [ -f "$_f" ] || continue
+    _p=$(cat "$_f" 2>/dev/null)
+    case "$_p" in ''|*[!0-9]*) continue ;; esac
+    [ -d "/proc/$_p" ] || continue
+    if tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q 'deep_sleep\.sh'; then
+      # 运行锁里的 pid 才是真身；顺手把陈旧的 pid 文件纠正过来，
+      # 否则下一轮 watchdog 还会把它当"没在跑"再拉起一次。
+      [ "$_f" != "$DS_PID" ] && echo "$_p" > "$DS_PID" 2>/dev/null
+      return 0
+    fi
+  done
+  return 1
 }
 
 ds_start() {

@@ -10,7 +10,35 @@
 
 所以强杀守护不会让手机一直卡在低频上。
 
+### 日志几百 KB，会不会越用越卡？
+
+不会。导出文件把**守护 / 深睡 / 启动看门狗 / 安装**四份日志拼在一起，单份超过
+256KB 只保留最近 128KB，所以总量有上限，不会无限增长。日志是追加写，不参与
+UI 渲染，也不随文件变大而变慢。
+
+之前版本有一个日志噪音：深睡 pid 文件陈旧时，看门狗每 60 秒会再拉起一个
+注定抢锁失败的实例，日志里反复出现“已有深睡实例在跑”。新版会把运行锁里的
+真身 pid 补回 pid 文件，看门狗不再重复拉起。这个修复减少的是**多余进程和唤醒**，
+不是“日志变短所以变快”。
+
+### 装不上：`Error: specified file not found in archive` / `Error code: 1`
+
+这条在模块脚本执行之前，是管理器自己的解包器找不到 `module.prop` /
+`META-INF`。常见原因只有三种：
+
+1. 下载不完整 / 网盘预览页给的是坏文件：重新下载，核对包大小和 md5；
+2. 管理器版本过旧，不认当前 zip 的压缩方式：换 KernelSU / Magisk 官方新版；
+3. 把 zip 解压后再装、或把模块目录套了一层：必须直接选 zip，zip 根层就要能看到 `module.prop`。
+
+在手机终端确认 zip 结构（把路径换成实际文件）：
+
+```sh
+unzip -l /sdcard/Download/Soc智能限频_V2.3.zip | head
+# 必须直接看到 module.prop / META-INF/com/google/android/update-binary
+```
+
 ### 装不上：`Installation Blocked` / `A metamodule with custom installer is active`
+
 
 红框里写着 `Current state: Disabled`，`Action required: Re-enable or uninstall it, then reboot`。
 **这跟本模块无关**，是管理器（KernelSU / Magisk 等）自己的闸门：
@@ -77,6 +105,30 @@ su -c 'sh /data/adb/modules/soc_freqcap/tools/safemode.sh off' && reboot  # 退�
 ```
 
 安全模式下守护完全不启动：不改频率、不冻结、不碰 Doze，模块还在，随时能退出来。
+新版只在“boot_id 变了、且距上次启动 <120 秒”时计数，同一个 boot 里管理器重跑
+service.sh 不算重启；两次正常重启间隔超过 2 分钟也会重置。连续 3 次快速重启
+才会自动进安全模式。
+**退出不用手删文件**：WebUI「维护 → 退出安全模式」，或 `action.sh` 第 15 项，
+都会删除 safemode 标记并重启守护；也可以执行
+`su -c 'sh /data/adb/modules/soc_freqcap/tools/safemode.sh off'` 后重启。
+
+**停用/卸载后进程还在写？** 新版守护每轮都会检查模块目录的 `disable` / `remove`
+标记，发现后自己走恢复流程退出，不用等重启。
+
+**日志里的“写入未生效，厂商调速器接管”**：节点写入成功但回读没变，常见于
+realme/OPPO 的 hmbird/scx。这不是模块没跑，而是厂商调度器锁住了上限；模块会
+退避 600 秒，不再每秒重试。想确认是谁在压，看
+`/sys/devices/system/cpu/cpufreq/policy*/scaling_governor` 和 `scaling_max_freq`。
+
+**游戏名单命中但还在压频**：realme/ColorOS 的游戏空间、风驰、游戏助手可能把
+焦点抢到自己的包上。新版会识别 `gamespace` / `gameassist` / `gameopt` 等浮窗，
+改看下面的游戏进程，并兼容没有 `u0` 的窗口行。若某台机仍不触发，临时把游戏
+在「应用」页设为「满血」即可绕过检测；同时提供这两行排查：
+
+```sh
+dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | head
+cat /data/adb/soc_freqcap/socfreqd.log | tail -30
+```
 
 **本版起不再使用 SIGSTOP 兜底**：拿不到 cgroup 冻结就不冻。SIGSTOP 会把进程硬按在原地，
 一旦按到系统正在同步调用的进程，system_server 卡在 binder 上，watchdog 60 秒后整机重启
@@ -153,7 +205,8 @@ V2.1 的出厂配置把 `CPU_GOVERNOR` 写成了 `conservative`。部分荣耀 /
 # 1) 先让守护别再启动（能进系统/能 adb 时）
 su -c 'touch /data/adb/soc_freqcap/safemode' && reboot
 
-# 2) 装上新版后删掉安全模式标记，再重启
+# 2) 进系统后：WebUI「维护 → 退出安全模式」，或 action.sh 第 15 项；
+#    也可以手工删标记后重启
 su -c 'rm -f /data/adb/soc_freqcap/safemode' && reboot
 ```
 

@@ -36,9 +36,13 @@ if [ ! -s "$T/block.sh" ]; then
   echo "  FAIL 没能从 customize.sh 里抠出迁移段（起止的那两句被改过了？）"
   exit 1
 fi
+# _soc_norm 在 DATA= 之前定义，迁移段从 DATA= 开始抠；单独把它带进 case.sh，
+# 否则 _adapt_match 调用时会 “not found”，soc 条件静默失配。
+awk '/^_soc_norm\(\)/{f=1} f{print} f&&/^}/{exit}' "$MOD/customize.sh" > "$T/soc_norm.sh"
 # 后面每个场景都要重抠一次：DATA 换成场景自己的目录
 mk_case() {
   sed -e "s#/data/adb/soc_freqcap#$T/data#g" "$T/block.sh" > "$T/case.sh"
+  cat "$T/soc_norm.sh" "$T/case.sh" > "$T/case2.sh" && mv -f "$T/case2.sh" "$T/case.sh"
 }
 runcase() { ( cd "$T" && MODPATH="$T/mod" && . ./case.sh ) >/dev/null 2>&1; }
 
@@ -112,9 +116,9 @@ mk_case; runcase
 chk "$(sed -n 's/^GPU_PCT=//p' "$T/data/socfreq.conf")" "30" "用户改过的值一个都没被动"
 chk "$(grep -c '^SCREEN_UNCAP=' "$T/data/socfreq.conf")" "1" "新增的键被补上，且只有一行"
 chk "$(grep -c '^BOOT_FULL_S=' "$T/data/socfreq.conf")" "1" "BOOT_FULL_S 同样补齐"
-# 两个旧键都没有：补成 uncap，保持原来"熄屏交还"的映射，不改行为。
-chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "uncap" \
-    "两个熄屏键都没有时补成 uncap（保持原行为）"
+# 两个旧键都没有：统一补 cap（熄屏轻巡检常开），不再按旧行为分叉。
+chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "cap" \
+    "两个熄屏键都没有时补成 cap（轻巡检常开）"
 chk "$(grep -c '^SCREEN_POLICY=' "$T/data/socfreq.conf")" "1" \
     "SCREEN_POLICY 只补一行"
 chk "$([ -f "$T/mod/socfreq.conf" ] && echo y || echo n)" "n" \
@@ -210,17 +214,17 @@ preset_case() {   # $1=芯片代号 $2=期望BIG $3=期望LITTLE $4=no|yes|yes-d
     chk "$g" "$5" "芯片 $1（$4）→ GPU_PCT=$g 期望 $5"
   fi
 }
-preset_case SM8750 46 51 no 45
-preset_case SM8850 46 52 no 42
-preset_case SM8845 51 53 no 41
-preset_case SM8975 40 51 no 41
-preset_case SM8650 74 68 no 56
-preset_case SM8550 70 73 no 59
-preset_case SM8475 69 73 no 47
-preset_case MT6991 80 75 no 35
-preset_case MT6993 72 71 no 35
-preset_case MT6995 73 65 no 37
-preset_case MT6991Z 80 75 no 35      # 带后缀的芯片串也按包含命中
+preset_case SM8750 62 68 no 46
+preset_case SM8850 60 68 no 42
+preset_case SM8845 60 69 no 41
+preset_case SM8975 60 70 no 38
+preset_case SM8650 59 90 no 50
+preset_case SM8550 66 89 no 59
+preset_case SM8475 78 90 no 50
+preset_case MT6991 60 97 no 32
+preset_case MT6993 60 86 no 33
+preset_case MT6995 60 78 no 31
+preset_case MT6991Z 60 97 no 32      # 带后缀的芯片串也按包含命中
 preset_case MT0000 65 65 no          # 其它芯片保持通用默认
 preset_case SM8750 40 65 yes         # 升级 + 用户改过：40 必须活着
 # 升级但值刚好等于旧默认，也不许套——没有"值等于默认就视为没改过"的启发式。
@@ -231,11 +235,11 @@ rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
 eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8975;; ro.board.platform) echo X;; esac; }"
 mk_case; runcase
-chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "47" "SM8975 三簇的中核套到 CPU_PCT_MID"
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "68" "SM8975 三簇的中核套到 CPU_PCT_MID"
 chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID2)" "64" "SM8975 不碰 MID2"
 
 # 天玑三套同样是三簇：中核吃 CPU_PCT_MID
-for _soc in MT6991:67 MT6993:63 MT6995:56; do
+for _soc in MT6991:60 MT6993:68 MT6995:68; do
   rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
   cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
   eval "getprop() { case \"\$1\" in ro.soc.model) echo '${_soc%%:*} ';; ro.board.platform) echo X;; esac; }"
@@ -244,13 +248,13 @@ for _soc in MT6991:67 MT6993:63 MT6995:56; do
   chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID2)" "64" "${_soc%%:*} 不碰 MID2"
 done
 
-# SM8650 有四个频率域（两个 A720 簇同频）：MID / MID2 都应套到 66
+# SM8650 有四个频率域（两个 A720 簇同频）：MID / MID2 都应套到 76
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
 eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8650;; ro.board.platform) echo X;; esac; }"
 mk_case; runcase
-chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "66" "SM8650 中簇套到 CPU_PCT_MID"
-chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID2)" "66" "SM8650 另一中簇套到 CPU_PCT_MID2"
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "76" "SM8650 中簇套到 CPU_PCT_MID"
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID2)" "76" "SM8650 另一中簇套到 CPU_PCT_MID2"
 
 echo "== 荣耀/华为：旧默认的 conservative 被清掉 =="
 # V2.1 出厂写 conservative；部分荣耀/华为内核切过去会硬重启。
@@ -276,7 +280,7 @@ eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8750;; ro.board.platform)
 mk_case; runcase
 chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID2)" "64" "芯片默认不动 MID2"
 chk "$(_g "$T/data/socfreq.conf" CPU_PCT_MID)" "66" "芯片默认不动 MID"
-chk "$(_g "$T/data/socfreq.conf" GPU_PCT)" "45" "8E 芯片默认的 GPU_PCT 是 45"
+chk "$(_g "$T/data/socfreq.conf" GPU_PCT)" "46" "8E 芯片默认的 GPU_PCT 是 46"
 chk "$(_g "$T/data/socfreq.conf" TH_HIGH)" "75" "8E 芯片默认 TH_HIGH=75"
 chk "$(_g "$T/data/socfreq.conf" TH_LOW)" "68" "8E 芯片默认 TH_LOW=68"
 chk "$(_g "$T/data/socfreq.conf" PSI_GAIN)" "5" "8E 芯片默认 PSI_GAIN=5"
@@ -287,7 +291,7 @@ rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
 eval "getprop() { case \"\$1\" in ro.soc.model) echo '';; ro.board.platform) echo sm8750;; esac; }"
 mk_case; runcase
-chk "$(_g "$T/data/socfreq.conf" CPU_PCT_LITTLE)" "51" "属性为空时退到 board.platform，且大小写不敏感"
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_LITTLE)" "68" "属性为空时退到 board.platform，且大小写不敏感"
 # 升级时整个配置文件逐字节不变（连注释/空白都不许动）
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"; cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
@@ -359,6 +363,41 @@ ad_fresh; ad_props OnePlus PJZ110 SM8750-AB
 printf '#match soc=SM8750\ncpu-dir /sys/x 100\n' > "$T/mod/adapt/soc.conf"
 ad_exec
 chk "$(head -n 1 "$OV" 2>/dev/null)" "#from adapt/soc.conf" "soc 条件是包含匹配，属性带后缀也认"
+
+# 5b) 平台别名 / P 后缀归一：PINEAPPLEP 应该命中 SM8650 的适配
+ad_fresh; ad_props OnePlus PJZ110 PINEAPPLEP
+printf '#match soc=SM8650\ncpu-dir /sys/x 100\n' > "$T/mod/adapt/alias.conf"
+ad_exec
+chk "$(head -n 1 "$OV" 2>/dev/null)" "#from adapt/alias.conf" "PINEAPPLEP 归一成 SM8650 后命中"
+
+# 5c) 已知的 P 后缀变体：SM8750P 命中 SM8750
+ad_fresh; ad_props OnePlus PJZ110 SM8750P
+printf '#match soc=SM8750\ncpu-dir /sys/x 100\n' > "$T/mod/adapt/p.conf"
+ad_exec
+chk "$(head -n 1 "$OV" 2>/dev/null)" "#from adapt/p.conf" "SM8750P 归一成 SM8750 后命中"
+
+# 5d) 同 SoC 不同核数：cores=7 的专用表要压过通用 SM8750 表
+ad_fresh; ad_props OPPO PKH110 SM8750
+printf '#match soc=SM8750\ndefault_cpu_pct_big=46\n' > "$T/mod/adapt/sm8750.conf"
+printf '#match brand=OPPO\n#match soc=SM8750\n#match cores=7\ndefault_cpu_pct_big=44\ndefault_cpu_floor_m=1785600\n' \
+  > "$T/mod/adapt/sm8750_7core.conf"
+export SF_TEST_CORES=7
+ad_exec
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_BIG)" "44" "7 核 Find N5 用专用预设"
+chk "$(_g "$T/data/socfreq.conf" CPU_FLOOR_M)" "1785600" "7 核预设带上 M 簇封顶下限"
+chk "$(head -n 1 "$T/data/adapt.conf" 2>/dev/null)" "#from adapt/sm8750_7core.conf" \
+    "运行时 adapt.conf 也选更具体的 7 核表"
+export SF_TEST_CORES=8
+ad_fresh; ad_props OPPO PKH110 SM8750
+printf '#match soc=SM8750\ndefault_cpu_pct_big=46\n' > "$T/mod/adapt/sm8750.conf"
+printf '#match brand=OPPO\n#match soc=SM8750\n#match cores=7\ndefault_cpu_pct_big=44\ndefault_cpu_floor_m=1785600\n' \
+  > "$T/mod/adapt/sm8750_7core.conf"
+ad_exec
+chk "$(_g "$T/data/socfreq.conf" CPU_PCT_BIG)" "46" "8 核同 SoC 仍走通用表"
+chk "$(_g "$T/data/socfreq.conf" CPU_FLOOR_M)" "0" "8 核不额外设 M 簇下限"
+chk "$(head -n 1 "$T/data/adapt.conf" 2>/dev/null)" "#from adapt/sm8750.conf" \
+    "8 核运行时选通用表"
+unset SF_TEST_CORES
 
 # 6) 上一版由 adapt 装的表 + 这一版没有匹配文件 → 撤掉，回到自动探测
 rm -f "$T/mod/adapt"/*.conf
@@ -527,8 +566,7 @@ chk "$([ -d "$T/data/run" ] && echo y)" "y" "同名文件被移开后重建了�
 chk "$(ls -d "$T"/data.bad.* 2>/dev/null | wc -l | tr -d ' ')" "1" \
     "原文件保留为 .bad 备份，没有直接删掉"
 
-echo "== 场景 22：旧配置 SCREEN_UNCAP=0 且无 SCREEN_POLICY → 补 cap =="
-# 这是真正会落进 keep（熄屏 5s 全量巡检）的存量配置；升级时必须只修这一种。
+echo "== 场景 22：旧配置 SCREEN_UNCAP=0 且无 SCREEN_POLICY → 统一 cap =="
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
 sed -e '/^SCREEN_POLICY=/d' -e 's/^SCREEN_UNCAP=.*/SCREEN_UNCAP=0/' "$MOD/socfreq.conf" \
     > "$T/data/socfreq.conf"
@@ -536,27 +574,95 @@ cp "$T/pkg_v1.txt" "$T/mod/games.txt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
 mk_case; runcase
 chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "cap" \
-    "SCREEN_UNCAP=0 的旧配置补成 cap，不再落 keep"
+    "SCREEN_UNCAP=0 的旧配置强制 cap"
 chk "$(grep -c '^SCREEN_POLICY=' "$T/data/socfreq.conf")" "1" "只补一行"
 
-echo "== 场景 23：旧配置 SCREEN_UNCAP=1 且无 SCREEN_POLICY → 保持 uncap =="
+echo "== 场景 23：旧配置 SCREEN_UNCAP=1 且无 SCREEN_POLICY → 也统一 cap =="
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
 sed -e '/^SCREEN_POLICY=/d' -e 's/^SCREEN_UNCAP=.*/SCREEN_UNCAP=1/' "$MOD/socfreq.conf" \
     > "$T/data/socfreq.conf"
 cp "$T/pkg_v1.txt" "$T/mod/games.txt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
 mk_case; runcase
-chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "uncap" \
-    "SCREEN_UNCAP=1 的旧配置保持 uncap，不改行为"
+chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "cap" \
+    "旧 SCREEN_UNCAP=1 也改成 cap（轻巡检常开）"
+chk "$(sed -n 's/^SCREEN_UNCAP=//p' "$T/data/socfreq.conf")" "0" \
+    "旧键同步成 0，避免配置看起来还在交还"
 
-echo "== 场景 24：已有 SCREEN_POLICY=keep → 一个字符都不动 =="
+echo "== 场景 24：已有 SCREEN_POLICY=keep → 首次升级强制 cap，之后不再打回 =="
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
 sed 's/^SCREEN_POLICY=.*/SCREEN_POLICY=keep/' "$MOD/socfreq.conf" > "$T/data/socfreq.conf"
 cp "$T/pkg_v1.txt" "$T/mod/games.txt"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
 mk_case; runcase
 chk "$(grep -c '^SCREEN_POLICY=' "$T/data/socfreq.conf")" "1" "没有补第二行"
-chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "keep" "显式 keep 不被改写"
+chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "cap" "首次升级强制 cap"
+chk "$([ -f "$T/data/.screen_cap_default" ] && echo y)" "y" "写了只强制一次的标记"
+# 第二次升级：用户手工改回 keep，不能被再次打回
+sed -i 's/^SCREEN_POLICY=.*/SCREEN_POLICY=keep/' "$T/data/socfreq.conf"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+mk_case; runcase
+chk "$(sed -n 's/^SCREEN_POLICY=//p' "$T/data/socfreq.conf")" "keep" \
+    "标记已存在时尊重手工 keep，不再强制 cap"
+
+echo "== 场景 25：旧配置只有统一限速 → 摊到三个分簇键，不打回默认 =="
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
+sed -e '/^GOV_UP_BIG=/d' -e '/^GOV_DOWN_BIG=/d' \
+    -e '/^GOV_UP_MID=/d' -e '/^GOV_DOWN_MID=/d' \
+    -e '/^GOV_UP_LITTLE=/d' -e '/^GOV_DOWN_LITTLE=/d' \
+    "$MOD/socfreq.conf" | sed -e 's/^SUP_STYLE=.*/GOV_UP_US=2600\nGOV_DOWN_US=900\n&/' \
+    > "$T/data/socfreq.conf"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+mk_case; runcase
+chk "$(sed -n 's/^GOV_UP_BIG=//p' "$T/data/socfreq.conf")/$(sed -n 's/^GOV_UP_MID=//p' "$T/data/socfreq.conf")/$(sed -n 's/^GOV_UP_LITTLE=//p' "$T/data/socfreq.conf")" \
+    "2600/2600/2600" "旧升频限速摊到分簇键"
+chk "$(sed -n 's/^GOV_DOWN_BIG=//p' "$T/data/socfreq.conf")/$(sed -n 's/^GOV_DOWN_MID=//p' "$T/data/socfreq.conf")/$(sed -n 's/^GOV_DOWN_LITTLE=//p' "$T/data/socfreq.conf")" \
+    "900/900/900" "旧降频限速摊到分簇键"
+
+echo "== 场景 26：新配置没有旧键 → 用模板里的分簇默认值 =="
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
+sed -e '/^GOV_UP_US=/d' -e '/^GOV_DOWN_US=/d' "$MOD/socfreq.conf" > "$T/data/socfreq.conf"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+mk_case; runcase
+chk "$(sed -n 's/^GOV_UP_BIG=//p' "$T/data/socfreq.conf")" "3000" \
+    "没有旧键时保留模板默认（超大核 3000）"
+chk "$(sed -n 's/^GOV_UP_MID=//p' "$T/data/socfreq.conf")" "2000" \
+    "没有旧键时保留模板默认（大核 2000）"
+
+echo "== 场景 27：旧键还是默认 1000 → 落新分簇默认，不算用户选择 =="
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
+sed -e '/^GOV_UP_BIG=/d' -e '/^GOV_DOWN_BIG=/d' \
+    -e '/^GOV_UP_MID=/d' -e '/^GOV_DOWN_MID=/d' \
+    -e '/^GOV_UP_LITTLE=/d' -e '/^GOV_DOWN_LITTLE=/d' \
+    "$MOD/socfreq.conf" | sed -e 's/^SUP_STYLE=.*/GOV_UP_US=1000\nGOV_DOWN_US=1000\n&/' \
+    > "$T/data/socfreq.conf"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+mk_case; runcase
+chk "$(sed -n 's/^GOV_UP_BIG=//p' "$T/data/socfreq.conf")" "3000" \
+    "旧默认升频不迁移，用新默认（超大核 3000）"
+chk "$(sed -n 's/^GOV_DOWN_LITTLE=//p' "$T/data/socfreq.conf")" "2000" \
+    "旧默认降频不迁移，用新默认（小核 2000）"
+
+echo "== 场景 28：只自定义了升频 → 升频保留、降频落新默认 =="
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod"
+sed -e '/^GOV_UP_BIG=/d' -e '/^GOV_DOWN_BIG=/d' \
+    -e '/^GOV_UP_MID=/d' -e '/^GOV_DOWN_MID=/d' \
+    -e '/^GOV_UP_LITTLE=/d' -e '/^GOV_DOWN_LITTLE=/d' \
+    "$MOD/socfreq.conf" | sed -e 's/^SUP_STYLE=.*/GOV_UP_US=2600\nGOV_DOWN_US=1000\n&/' \
+    > "$T/data/socfreq.conf"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+mk_case; runcase
+chk "$(sed -n 's/^GOV_UP_LITTLE=//p' "$T/data/socfreq.conf")" "2600" \
+    "自定义升频摊到分簇键"
+chk "$(sed -n 's/^GOV_DOWN_BIG=//p' "$T/data/socfreq.conf")" "1000" \
+    "旧默认降频落新默认（超大核 1000）"
+chk "$(sed -n 's/^GOV_DOWN_MID=//p' "$T/data/socfreq.conf")" "1500" \
+    "旧默认降频落新默认（大核 1500）"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "装机迁移段台架：全部通过 ($pass)"; else echo "装机迁移段台架：$fail 项失败 / $pass 项通过"; fi

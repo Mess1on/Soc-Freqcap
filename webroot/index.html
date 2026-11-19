@@ -223,6 +223,10 @@ details.more>summary::before{content:'⚙';opacity:.7;font-size:12px;line-height
 .row .lbl{flex:1;min-width:0}
 .row .lbl b{font-weight:600;font-size:14px;display:block}
 .row .lbl span{font-size:11.5px;color:var(--mut);line-height:1.5;display:block}
+/* 分簇限速：一行两个数字框（升/降），按簇显示；缺档由 JS 隐藏整行 */
+.gov-in{display:flex;gap:12px;flex:0 0 auto;align-items:center}
+.gov-in label{font-size:11px;color:var(--mut);display:flex;align-items:center;gap:5px}
+.gov-in input[type=number]{width:82px;text-align:center;padding:8px 6px}
 
 /* 滑杆：槽是凹的、钮是凸的，钮在主色和卡片色之间切换。
    整条 input 的触摸高度 20px，再加 touch-action:pan-y ——
@@ -266,6 +270,9 @@ select:focus,input:focus{outline:none;box-shadow:var(--in)}
 input[type=number]{-moz-appearance:textfield}
 input[type=number]::-webkit-outer-spin-button,
 input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.conf-io{width:100%;min-height:170px;background:var(--card2);color:var(--fg);border:0;
+  border-radius:12px;padding:10px;font:12px/1.6 ui-monospace,Menlo,Consolas,monospace;
+  resize:vertical;margin:10px 0}
 
 /* 按钮：凸起点下去变凹，就是"按进去了" */
 button{font-family:inherit;font-size:13.5px;font-weight:600;border:0;
@@ -794,7 +801,7 @@ button{min-height:44px}
     </div>
     <div class="htxt">
       <h1>Soc智能限频</h1>
-      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.2</span></div>
+      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.3</span></div>
     </div>
   </div>
   <!-- 主题开关：太阳=浅色，月亮=深色。点一下就换，选中哪个存到本地。 -->
@@ -837,7 +844,7 @@ button{min-height:44px}
       <div class="hero-foot">
         <span>桥接 <b id="m-bridge">—</b></span>
         <span class="sep">·</span>
-        <span>守护 <b id="ver2">V2.2</b></span>
+        <span>守护 <b id="ver2">V2.3</b></span>
       </div>
     </div>
   </div>
@@ -875,8 +882,12 @@ button{min-height:44px}
   <div class="subhd"><button class="back" onclick="go('func')">‹</button><b>CPU / GPU 封顶</b></div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.7 1.7 0 00.3 1.9l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-2.9 1.2V21a2 2 0 11-4 0v-.1A1.7 1.7 0 007 19.4a1.7 1.7 0 00-1.9.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00-1.2-2.9H1a2 2 0 110-4h.1A1.7 1.7 0 002.6 7a1.7 1.7 0 00-.3-1.9l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.9.3H7a1.7 1.7 0 001-1.5V1a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.9-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.9V7a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>CPU 封顶百分比</h2>
-    <div class="hint">封顶值向下吸附到实际频点，绝不超过设定百分比；<b>100% 直接使用硬件最高频，不再吸附</b>。实时偏移只影响当前生效值，不改这里显示的设定值</div>
+    <div class="hint">按真实频点向下取整；100% 直接使用硬件最高频。</div>
     <div id="conf-pct"></div>
+    <details class="more"><summary>CPU 最低频（进阶）</summary>
+      <div class="hint">0 = 跟随系统；不会高于该簇封顶。</div>
+      <div id="conf-min"></div>
+    </details>
   </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 9h8M8 13h5"/></svg>GPU</h2>
@@ -890,13 +901,12 @@ button{min-height:44px}
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>保存</h2>
     <div class="row">
       <div class="lbl"><b>套用本机预设</b><span id="preset-hint">读取中…</span></div>
-      <button type="button" id="preset-apply" onclick="applyChipPreset()">推荐</button>
-      <button type="button" id="smooth-apply" onclick="applySmoothPreset()">偏流畅</button>
+      <button type="button" id="preset-sav" onclick="applySaverPreset()">省电</button>
+      <button type="button" id="preset-bal" onclick="applyBalancedPreset()">均衡</button>
     </div>
-    <div class="hint">「推荐」= 能效曲线最优解的封顶与阈值；「偏流畅」= 推荐预设上每个 CPU 簇
-      <b>+10 个百分点</b>，GPU 和其他项不动。两种预设都只填入控件，点「保存并生效」才写入。</div>
+    <div class="hint">省电：低载更省；均衡：日常上限。两档都会打开动态封顶。</div>
     <div class="hint" id="preset-diff" style="display:none"></div>
-    <div class="hint">保存后守护自动重算封顶值并立即生效，无需重启手机</div>
+    <div class="hint">保存后立即生效，无需重启。</div>
     <div class="btns">
       <button class="pri" onclick="saveAll()">保存并生效</button>
       <button onclick="loadConf()">放弃修改</button>
@@ -927,6 +937,7 @@ button{min-height:44px}
   <div class="secttl">维护</div>
   <div class="tiles">
     <button class="tile" onclick="go('logs')"><span class="ti"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h8l5 5v13H6z"/><path d="M14 3v5h5"/><path d="M9 12h7"/><path d="M9 15.5h7"/><path d="M9 19h4"/></svg></span><span class="tt">完整日志</span><span class="td">守护 / 深睡 / 启动看门狗</span></button>
+    <button class="tile" onclick="openConfIO()"><span class="ti"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M8 7l4-4 4 4"/><path d="M4 15v4h16v-4"/></svg></span><span class="tt">参数导入 / 导出</span><span class="td">备份 / 迁移 socfreq.conf</span></button>
   </div>
 <div class="card" id="core-box"><div id="hw-table"></div></div>
 </div>
@@ -936,23 +947,17 @@ button{min-height:44px}
   <h2><svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h6"/></svg>调度策略</h2>
   
 <div class="row">
-      <div class="lbl"><b>调度策略</b><span>限频：按下面四档百分比固定封顶；智能：按负载状态机
-        （空闲/轻载/中载/重载）动态给目标，这里的百分比退化成天花板——目标不会超过它。
-        游戏、满血、熄屏交还三条路径两种策略完全一样</span></div>
+      <div class="lbl"><b>调度策略</b><span>限频按四档固定；智能按负载给目标，百分比只当天花板。</span></div>
       <div class="pset" id="p-strategy"></div>
     </div>
-  <div class="hint" style="margin-top:10px">两档共用同一套执行层（吸附频点 / 游戏交还 / 满血 / 实时偏移），
-    只换"目标百分比从哪来"。切到智能后，上面那四个百分比变成<b>天花板</b>——状态机的目标不会超过它。</div>
+  <div class="hint" style="margin-top:10px">两条路共用吸附频点、游戏交还、满血和实时偏移；只换目标来源。</div>
   <div class="kv4">
-    <div class="kv"><div class="k">空闲 idle</div><div class="v">天花板 ×45%</div></div>
-    <div class="kv"><div class="k">轻载 light</div><div class="v">天花板 ×65%</div></div>
-    <div class="kv"><div class="k">中载 medium</div><div class="v">天花板 ×85%</div></div>
+    <div class="kv"><div class="k">空闲 idle</div><div class="v">天花板 ×45%<br><small>双簇 主55 / 超大40</small></div></div>
+    <div class="kv"><div class="k">轻载 light</div><div class="v">天花板 ×65%<br><small>双簇 主75 / 超大60</small></div></div>
+    <div class="kv"><div class="k">中载 medium</div><div class="v">天花板 ×85%<br><small>双簇 主90 / 超大80</small></div></div>
     <div class="kv"><div class="k">重载 heavy</div><div class="v">天花板 ×100%</div></div>
   </div>
-  <div class="hint">负载按<b>每簇平均占用里最忙的一簇</b>算，不是 8 核求和——单核满载不会被稀释。
-    各簇按自己的 <b>CPU_PCT_*</b> 当天花板算，m=3/4 的中间档也一样。
-    进档 8/30/60%，退档 4/25/55%；升档 1 拍（5s）、降档 2 拍（10s）。
-    智能模式不再叠 PSI 向上借额度；插电仍会被充电地板抬高，省电对比请拔电。</div>
+  <div class="hint">按最忙的一簇算负载；进档 8/30/60%，退档 4/25/55%。游戏、满血、熄屏仍交还。</div>
 </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>保存</h2>
@@ -968,8 +973,7 @@ button{min-height:44px}
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M4 12h4l2-6 4 12 2-6h4"/></svg>现在这台机器会怎么做</h2>
     <div id="func-sum"><div class="hint">正在读当前设置…</div></div>
-    <div class="hint">这三条只调<b>当下生效的封顶</b>，不会去改「配置」页里你设的百分比；
-      首页那一行也会写明现在是被谁调了、调了多少。改完在页面底部按「保存并生效」。</div>
+    <div class="hint">实时偏移只影响当前生效值，不改这里显示的设定值。</div>
   </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M7 3h10v4H7zM5 7h14v14H5z"/><path d="M9 12h6"/></svg>插着电的时候</h2>
@@ -992,8 +996,7 @@ button{min-height:44px}
   </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="7" width="16" height="10" rx="2"/><path d="M21 10v4"/><path d="M6 10v4"/></svg>电量低的时候</h2>
-    <div class="hint">不充电且电量低时再收紧一点，让最后一段电撑久些。插着电不生效，
-      分应用档位不吃这一刀（那是你明确设的值）。</div>
+    <div class="hint">低电量时再收紧；插电不生效。</div>
     <div class="row">
       <div class="lbl"><b>低电量再压一点</b><span>关掉后电量再低也不额外收紧</span></div>
       <label class="sw"><input type="checkbox" id="batt_step" onchange="pv('batt_step');syncFunc()"><i></i></label>
@@ -1023,8 +1026,7 @@ button{min-height:44px}
   </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M8.5 6.5a4 4 0 107 0c0 3-3.5 4.5-3.5 8"/><circle cx="12" cy="18" r="2.6"/></svg>机身发热的时候</h2>
-    <div class="hint">读的是 CPU/GPU 自己的温度传感器。到温度就一档一档往下压，凉下来再一档一档放开，
-      比等系统热管控直接砍频平滑。<b>不管选哪档，都不会低于你设定值往下这么多</b>：</div>
+    <div class="hint">到温度逐档下压，凉下来逐档放开。</div>
     <div class="row">
       <div class="lbl"><b>降速时机</b><span>拿不准就选「适中」</span></div>
       <div class="pset" id="p-th"></div>
@@ -1054,9 +1056,7 @@ button{min-height:44px}
   </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg>CPU 排队偏高的时候</h2>
-    <div class="hint">看的是系统自己的"任务在等 CPU"计数，和这台机最近 10 分钟平常水平比：
-      明显高出才临时放宽一点，不卡了自动收回去。<b>它只会往上放宽，永远不会比你设的值更狠</b>。
-      它看不到 GPU / 存储 / 掉帧，只是"别把 CPU 帽压太死"的护栏；<b>温度已经在压档时它不会借</b>。</div>
+    <div class="hint">CPU 排队明显偏高时临时放宽；温度在压档时不借。</div>
     <div class="row">
       <div class="lbl"><b>要不要借</b><span>拿不准就选「适中」</span></div>
       <div class="pset" id="p-psi"></div>
@@ -1087,38 +1087,44 @@ button{min-height:44px}
   <div class="subhd"><button class="back" onclick="go('func')">‹</button><b>Boost 与压制</b></div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M13 2L4 14h6l-1 8 9-12h-6z"/></svg>动态封顶</h2>
-    <div class="hint">一个开关：亮屏按负载三档收放，同时收紧 uclamp、cpuset 和 hispeed；游戏/满血/熄屏/插电暂停，关闭或卸载还原。</div>
+    <div class="hint">亮屏按负载收放天花板；游戏、满血、熄屏、插电暂停。</div>
     <details class="more"><summary>具体压制项</summary>
-      <div class="hint">
-        频率：三档天花板 + 静置压下限（SM8750/SM8850 超大核直接最低）；<br>
-        任务：uclamp.min / uclamp.max（85/65/45、70/50/30、60/40/20，刻度自适应）；<br>
-        分区：有数据的芯片按档切 cpuset；<br>
-        调速器：walt 拉频源中和、升/降频限速、hispeed（千分比落到当前封顶）。<br>
-        适配：SM8550/8650/8750/8850、MT6989（P 后缀回落基础型号）。
-      </div>
+      <div class="hint">频率三档 + 静置压下限；uclamp.max/cpuset/hispeed 按档切换，刻度自适应。</div>
     </details>
     <div class="row">
-      <div class="lbl"><b>动态封顶</b><span>默认关。压的是"无谓越过最优解的频率"，推荐值本身不动；开启后若卡顿明显就关掉</span></div>
+      <div class="lbl"><b>动态封顶</b><span>低载时逐档收天花板，高载再放回。</span></div>
       <label class="sw"><input type="checkbox" id="suppress" onchange="pv('suppress')"><i></i></label>
     </div>
     <div class="row">
-      <div class="lbl"><b>压制风格</b><span>均衡 = 中间 90%、地板 80%，连续 3 拍 <20% 逐级降；省电 = 中间 85%、地板 70%，连续 2 拍就降，且 0 档也走均衡组 uclamp/cpuset；贴顶先回中间，仍贴顶才回满</span></div>
+      <div class="lbl"><b>压制风格</b><span>均衡：90/80%；省电：85%/960MHz；持续高载才回升。</span></div>
       <div class="pset" id="p-sup"></div>
     </div>
     <details class="more"><summary>升频 / 降频限速微调</summary>
-      <div class="row">
-        <div class="lbl"><b>升频限速</b><span>100-50000µs：数值越大升频越平滑，突发响应越钝</span></div>
-        <input type="number" id="gov_up_us" min="100" max="50000" step="100" value="1000"
-               style="flex:0 0 110px;text-align:center" oninput="pv('gov_up_us')">
+      <div class="hint">单位 µs。默认随风格：均衡 3000/2000/1500，省电 5000/3000/2000（升）；手改后按你的值。</div>
+      <div class="row" id="govrow_big">
+        <div class="lbl"><b>超大核</b><span id="govcpu_big">检测中…</span></div>
+        <div class="gov-in">
+          <label>升 <input type="number" id="gov_up_big" min="100" max="50000" step="100" value="3000"></label>
+          <label>降 <input type="number" id="gov_down_big" min="100" max="50000" step="100" value="1000"></label>
+        </div>
       </div>
-      <div class="row">
-        <div class="lbl"><b>降频限速</b><span>100-50000µs：数值越小负载回落后降得越快</span></div>
-        <input type="number" id="gov_down_us" min="100" max="50000" step="100" value="1000"
-               style="flex:0 0 110px;text-align:center" oninput="pv('gov_down_us')">
+      <div class="row" id="govrow_mid">
+        <div class="lbl"><b>大核</b><span id="govcpu_mid">检测中…</span></div>
+        <div class="gov-in">
+          <label>升 <input type="number" id="gov_up_mid" min="100" max="50000" step="100" value="2000"></label>
+          <label>降 <input type="number" id="gov_down_mid" min="100" max="50000" step="100" value="1500"></label>
+        </div>
+      </div>
+      <div class="row" id="govrow_little">
+        <div class="lbl"><b>小核</b><span id="govcpu_little">检测中…</span></div>
+        <div class="gov-in">
+          <label>升 <input type="number" id="gov_up_little" min="100" max="50000" step="100" value="1000"></label>
+          <label>降 <input type="number" id="gov_down_little" min="100" max="50000" step="100" value="2000"></label>
+        </div>
       </div>
     </details>
     <div class="row">
-      <div class="lbl"><b>禁止 GPU Boost</b><span>一个开关同时管两件事：下限被抬高就压回硬件最低档；关掉 DCVS / 触摸抬频（高通）或 boost 档位（天玑）。游戏、满血、熄屏交还时自动放开</span></div>
+      <div class="lbl"><b>禁止 GPU Boost</b><span>一个开关同时管三件事：压回下限、关 DCVS/触摸抬频、空闲少空转。</span></div>
       <label class="sw"><input type="checkbox" id="gpu_boost_off" onchange="pv('gpu_boost_off')"><i></i></label>
     </div>
   </div>
@@ -1129,7 +1135,7 @@ button{min-height:44px}
       <label class="sw"><input type="checkbox" id="big_min" onchange="pv('big_min')"><i></i></label>
     </div>
     <div class="row">
-      <div class="lbl"><b>CPU 下限锁到底</b><span>常态把各簇最低频压到硬件最低，轻载也贴着地板跑；可能拖慢唤醒，默认关。游戏/满血/熄屏交还时还原；动态封顶开启时此项自动让位</span></div>
+      <div class="lbl"><b>CPU 下限锁到底</b><span>常态把最低频压到硬件最低；动态封顶开启时让位。</span></div>
       <label class="sw"><input type="checkbox" id="cpu_min_lock" onchange="pv('cpu_min_lock');paintCpuMin(lastSt)"><i></i></label>
     </div>
     <div class="hint" id="cmin-stat">CPU 下限巡检：未开启</div>
@@ -1147,13 +1153,7 @@ button{min-height:44px}
   <div class="subhd"><button class="back" onclick="go('func')">‹</button><b>永久豁免</b></div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 21s-8-5-8-11a5 5 0 018-3 5 5 0 018 3c0 6-8 11-8 11z"/></svg>永久豁免</h2>
-    <div class="hint">名单里的应用不受 Doze 限制（等同系统电量设置里的「无限制」），
-      深睡关闭时也会立即写进系统 Doze 白名单，不用等下次深睡。
-      深睡期间正在放音乐的应用会自动临时保护，退出深睡后自动撤销。
-      深睡不再冻结任何进程；push= 的包会被加进 Doze 白名单，保证熄屏后消息还能进来。
-      微信/QQ 等 IM 在深睡关闭时也会整包放行，避免迁移后通知被压。
-      时钟/电话/信息等系统应用已默认豁免，闹钟前 30 分钟不强制深睡。
-      如果系统自己的电池优化还杀后台，再去系统设置里把该应用设为「无限制」。</div>
+    <div class="hint">名单内不受 Doze 限制；深睡关闭时也会写白名单。</div>
     <div class="list" id="ds-white"></div>
     <div class="btns">
       <button class="pri" id="ds-add-btn" onclick="toggleDsPicker()">＋ 添加应用</button>
@@ -1193,8 +1193,7 @@ button{min-height:44px}
 
   <div class="card">
     <h2>完整日志</h2>
-    <div class="hint">守护 / 深度睡眠 / 启动看门狗 三份日志合并显示；
-      默认只取尾部，点"全部"会读完整文件（上限 4000 行）。</div>
+    <div class="hint">三份日志合并；默认尾部，全部最多 4000 行。</div>
     <div class="row" style="border-top:0;box-shadow:none">
       <div class="pset" id="log-src"></div>
     </div>
@@ -1222,7 +1221,7 @@ button{min-height:44px}
 <div class="row">
       <div class="lbl"><b>退出宽限</b><span>游戏退到后台后保持解锁（2-300 秒）</span></div>
       <div class="slider"><input type="range" id="grace" min="2" max="300" oninput="pv('grace')"></div>
-      <div class="pct" id="grace_v">10s</div>
+      <div class="pct" id="grace_v">30s</div>
     </div>
 <div class="row">
       <div class="lbl"><b>开机满血</b><span>开机后前若干秒不封顶（0 = 关）</span></div>
@@ -1230,15 +1229,8 @@ button{min-height:44px}
       <div class="pct" id="boot_full_v">60s</div>
     </div>
 <div class="row">
-      <div class="lbl"><b>熄屏交还系统</b><span>开：熄屏后解除封顶并交还系统，只保留 30s 轻巡检</span></div>
-      <label class="sw"><input type="checkbox" id="screen_uncap"
-        onchange="pv('screen_uncap');if(this.checked)document.getElementById('screen_cap').checked=false"><i></i></label>
-    </div>
-<div class="row">
-      <div class="lbl"><b>熄屏轻巡检</b><span>保持封顶，但只每 30s 压回被顶高的上限、不查前台；
-        关着是旧行为（熄屏也每 5s 全量巡检）</span></div>
-      <label class="sw"><input type="checkbox" id="screen_cap"
-        onchange="pv('screen_cap');if(this.checked)document.getElementById('screen_uncap').checked=false"><i></i></label>
+      <div class="lbl"><b>熄屏保持封顶</b><span>开：熄屏继续封顶；关：熄屏交还系统。</span></div>
+      <label class="sw"><input type="checkbox" id="screen_cap" onchange="pv('screen_cap')"><i></i></label>
     </div>
 <div class="row">
       <div class="lbl"><b>日常调速器</b><span id="gov-hint">选「不干预」会还原原调速器；hmbird/scx 不改写</span></div>
@@ -1259,8 +1251,7 @@ button{min-height:44px}
 <div class="pg" id="p-game">
   <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M4 12a8 8 0 018-8 8 8 0 018 8 8 8 0 01-8 8 8 8 0 01-8-8z"/></svg>可能是游戏、还没进名单</h2>
-    <div class="hint">按发行商词典（vendors.txt）挑出来的候选，<b>不会自动生效</b>：
-      点 ＋ 才加进白名单，不点就什么都不变。名单覆盖不到的新游戏就在这里加。</div>
+    <div class="hint">候选不会自动生效，点 ＋ 才加入。</div>
     <div id="gsug"></div>
     <div class="btns"><button onclick="loadSuggest()">重新扫描</button></div>
   </div>
@@ -1277,14 +1268,7 @@ button{min-height:44px}
   <!-- 分应用档位：按应用设定的例外，与游戏白名单同类，放在游戏页。 -->
   <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7"/></svg>分应用档位</h2>
-    <div class="hint">优先于配置页的全局百分比。<b>满血</b> = 这个应用在前台时整个交还系统
-      （CPU 与 GPU 都不封顶）。CPU 四簇统一按一个百分比封顶；GPU 默认跟随全局，
-      也可以单独给这个应用设一道更低的帽（例如录像时压住 GPU 发热）。
-      <b>熄屏也封顶</b> = 这个应用在熄屏那一刻是前台时也不交还系统，想继续压着它时用。
-      <b>熄屏满血</b> = 这个应用在熄屏那一刻是前台时交还系统（亮屏仍按全局封顶）。
-      熄屏轻巡检不查前台，所以后台下载、后台音乐、闹钟这类不在前台的场景仍会保持封顶；
-      需要整晚放开时，熄屏前先把应用切到前台。
-      相机类应用装机时会按机型自动设为满血（可改可删，升级不会塞回来）。</div>
+    <div class="hint">优先于全局：满血交还系统；熄屏只看那一刻前台；相机默认满血。</div>
     <div id="mode-rows"></div>
     <div class="btns">
       <button class="pri" id="pk-btn" onclick="togglePicker()">＋ 添加应用</button>
@@ -1336,10 +1320,7 @@ button{min-height:44px}
   <div class="subhd"><button class="back" onclick="go('func')">‹</button><b>深度睡眠</b></div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 019.5 4a8.5 8.5 0 1010.5 10.5z"/><path d="M15 3.5l.7 1.8 1.8.7-1.8.7L15 8.5l-.7-1.8-1.8-.7 1.8-.7z"/></svg>深度睡眠</h2>
-    <div class="hint">熄屏且没在充电：满 60 秒让系统进一次 Doze 深度空闲，并把 push / 短信 / 媒体临时加白；
-      之后按 1、5、30、60 分钟复查，系统一旦退出就立刻重新收口。亮屏或插电立即撤销。
-      闹钟前 30 分钟、正在放音乐、游戏挂机时不收口。深睡不再冻结任何进程，只做 Doze；
-      Doze 会暂时限制非白名单应用的后台网络，来电 / 短信 / 闹钟不受影响。</div>
+    <div class="hint">熄屏未充电 60 秒后尝试 Doze；不冻结进程，白名单/推送/IM 同步进系统 Doze。</div>
     <div class="row">
       <div class="lbl"><b>自动深度睡眠</b><span>熄屏后让系统进 Doze 深度空闲，并把 push / 短信 / 媒体临时加白；关闭则完全不碰系统 Doze</span></div>
       <label class="sw"><input type="checkbox" id="ds_enable" onchange="setDsEnable(this.checked)"><i></i></label>
@@ -1380,7 +1361,7 @@ button{min-height:44px}
 
   <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M12 21s-8-5-8-11a5 5 0 018-3 5 5 0 018 3c0 6-8 11-8 11z"/></svg>支持作者</h2>
-    <div class="hint">一直都是免费更新 无收费 悬赏一下给作者动力更新！</div>
+    <div class="hint">免费更新，欢迎支持。</div>
     <div class="reward-grid">
       <figure class="reward">
         <img src="reward-wechat.jpg" alt="微信赞赏码" loading="lazy">
@@ -1401,14 +1382,34 @@ button{min-height:44px}
       <button onclick="ctl('pause')">暂停</button>
       <button onclick="ctl('resume')">恢复</button>
       <button class="dan" onclick="ctl('stop')">停止并恢复</button>
+      <button onclick="ctl('safemode_off')">退出安全模式</button>
       <button class="dan" id="reset-all" onclick="resetAll()">恢复全部默认</button>
     </div>
-    <div class="hint" style="margin-top:10px">恢复全部默认会把百分比、GPU、熄屏策略、实时偏移、深睡开关与豁免名单、分应用档位、适配覆盖都回到出厂；<b>游戏名单、发行商词典、主题保留</b>。需要连点两次确认。</div>
+    <div class="hint" style="margin-top:10px">退出安全模式会删除标记并重启守护。</div>
+    <div class="hint" style="margin-top:10px">恢复默认会重置百分比、偏移、深睡和分应用档位；游戏名单、词典、主题保留。</div>
+  </div>
+
+  <div class="card">
+    <h2><svg class="ico" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>参数导入 / 导出</h2>
+    <div class="hint">导出/导入 socfreq.conf；只接受已知键，全部成功才替换。</div>
+    <details class="more"><summary>打开导入 / 导出</summary>
+      <div class="btns">
+        <button onclick="exportConf()">导出当前参数</button>
+        <button onclick="copyConfIO()">复制</button>
+      </div>
+      <textarea class="conf-io" id="conf-io" spellcheck="false"
+        placeholder="点「导出当前参数」显示；或粘贴 KEY=VALUE 后点「导入并生效」"></textarea>
+      <div class="btns">
+        <button class="pri" onclick="importConf()">导入并生效</button>
+        <button onclick="clearConfIO()">清空</button>
+      </div>
+      <div class="hint" id="conf-io-hint"></div>
+    </details>
   </div>
 
   <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z"/></svg>芯片适配</h2>
-    <div class="hint">这台机看不到核心表、或 GPU 那一档不限频时才用这里。点下面的按钮导出一个 txt（落在 Download/Soc智能限频），把它发给作者；他照着这份包适配好后写进新版本，你到时候更新模块就生效，不用自己动任何文件。</div>
+    <div class="hint">核心表或 GPU 读不到时导出，适配后随版本生效。</div>
     <div id="ovr"><div class="hint">正在看探测结果…</div></div>
     <div class="btns">
       <button class="pri" onclick="exportPkg()">导出适配包</button>
@@ -1752,6 +1753,13 @@ const PCT_KEYS = [
   {k:'CPU_PCT_MID',   n:'中核 (MID)',    d:66},
   {k:'CPU_PCT_LITTLE',n:'小核 (LITTLE)', d:65}
 ];
+/* 进阶最低频：0 = 跟随系统；maxK 用来复用封顶行的核号/频点数据。 */
+const MIN_KEYS = [
+  {k:'CPU_MIN_PCT_BIG',   maxK:'CPU_PCT_BIG',   n:'超大核 (BIG)'},
+  {k:'CPU_MIN_PCT_MID2',  maxK:'CPU_PCT_MID2',  n:'次大核 (MID2)'},
+  {k:'CPU_MIN_PCT_MID',   maxK:'CPU_PCT_MID',   n:'中核 (MID)'},
+  {k:'CPU_MIN_PCT_LITTLE',maxK:'CPU_PCT_LITTLE',n:'小核 (LITTLE)'}
+];
 /* 本机不存在的档位（守护把 coretier_XXX 报成空）。
  * 保存时跳过：写入无意义，且页面会留下一个用户并没有的档位。 */
 const TIER_ABSENT = {};
@@ -1783,6 +1791,25 @@ function buildPctRows(){
         '<span id="tiercpu_' + o.k + '">正在检测核心…</span>' +
         '<span class="tier-mhz" id="tiermhz_' + o.k + '"></span></div>' +
       '<div class="slider"><input type="range" id="' + o.k + '" min="1" max="100" ' +
+      'oninput="pv(\'' + o.k + '\')"></div>' +
+      '<div class="pct" id="' + o.k + '_v">—</div>';
+    box.appendChild(row);
+  });
+}
+
+function buildMinRows(){
+  const box = document.getElementById('conf-min');
+  if(!box) return;
+  box.innerHTML = '';
+  MIN_KEYS.forEach(o=>{
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.id = 'minrow_' + o.k;
+    row.innerHTML =
+      '<div class="lbl"><b>' + o.n + '</b>' +
+        '<span id="mincpu_' + o.k + '">正在检测核心…</span>' +
+        '<span class="tier-mhz" id="minmhz_' + o.k + '"></span></div>' +
+      '<div class="slider"><input type="range" id="' + o.k + '" min="0" max="100" ' +
       'oninput="pv(\'' + o.k + '\')"></div>' +
       '<div class="pct" id="' + o.k + '_v">—</div>';
     box.appendChild(row);
@@ -1833,6 +1860,57 @@ function paintTierCores(s){
     }
     TIER_ABSENT[o.k] = absent;
   });
+
+  /* 进阶最低频行跟着封顶行一起藏：同一档不存在时，最低频也没意义。 */
+  MIN_KEYS.forEach(o=>{
+    const row = document.getElementById('minrow_' + o.k);
+    const cpu = document.getElementById('mincpu_' + o.k);
+    const src = document.getElementById('tiercpu_' + o.maxK);
+    if(cpu && src) cpu.textContent = src.textContent;
+    const absent = !!TIER_ABSENT[o.maxK];
+    if(row){
+      const sl = row.querySelector('.slider');
+      const pc = row.querySelector('.pct');
+      const inp = document.getElementById(o.k);
+      if(sl) sl.style.display = absent ? 'none' : '';
+      if(pc) pc.style.display = absent ? 'none' : '';
+      if(inp) inp.disabled = absent;
+      row.classList[absent ? 'add' : 'remove']('absent');
+    }
+  });
+
+  /* 分簇限速行：本机没有的簇整行藏掉。大核覆盖 MID2+MID 两档
+     （m=4 有次大核，m=3 只有中核），两档都缺才判本机没有大核。
+     守护旧版本连 coretier_* 键都没有时保留整行，只标"检测失败"。 */
+  const govRows = [
+    {id:'big',    keys:['CPU_PCT_BIG']},
+    {id:'mid',    keys:['CPU_PCT_MID2','CPU_PCT_MID']},
+    {id:'little', keys:['CPU_PCT_LITTLE']}
+  ];
+  govRows.forEach(g=>{
+    const row = document.getElementById('govrow_' + g.id);
+    const cpu = document.getElementById('govcpu_' + g.id);
+    if(!row) return;
+    let known = false;
+    const ids = [];
+    g.keys.forEach(k=>{
+      if(!(('coretier_' + k) in s)) return;
+      known = true;
+      const raw = s['coretier_' + k] || '';
+      raw.split(',').forEach(x=>{
+        if(/^\d+$/.test(x) && ids.indexOf(Number(x)) < 0) ids.push(Number(x));
+      });
+    });
+    if(!known){ if(cpu) cpu.textContent = '检测失败'; row.style.display = ''; return; }
+    ids.sort((a,b)=>a-b);
+    if(cpu){
+      cpu.textContent = ids.length
+        ? (ids.length > 1 ? 'CPU ' + ids.join(', ') + '（共 ' + ids.length + ' 核）'
+                          : 'CPU ' + ids[0])
+        : '（未检测到）';
+    }
+    row.style.display = ids.length ? '' : 'none';
+  });
 }
 
 /* 滑杆的进度：新拟物的槽是凹的，光看阴影不知道滑到哪儿了。
@@ -1858,8 +1936,9 @@ function pv(id){
   if(el.type === 'checkbox'){ out.textContent = el.checked ? '开' : '关'; return; }
   // 单位分三类：百分比、秒、还有实时偏移这一组（℃ 和 百分点）。
   // 别一律加 s —— "75s" 这种读数会让人以为温控填错了。
-  if(id === 'gpu_pct' || /^CPU_PCT_/.test(id) || id === 'chg_pct' ||
-     id === 'gov_up_us' || id === 'gov_down_us'){
+  if(/^CPU_MIN_PCT_/.test(id)){
+    out.textContent = (parseInt(el.value,10) || 0) === 0 ? '跟随' : el.value + '%';
+  } else if(id === 'gpu_pct' || /^CPU_PCT_/.test(id) || id === 'chg_pct'){
     out.textContent = el.value + '%';
   } else if(/^th_(high|low)$/.test(id)){
     out.textContent = el.value + '℃';
@@ -1876,7 +1955,7 @@ function pv(id){
     out.textContent = el.value + 's';
   }
   // 拖滑杆时立刻更新折算出的 MHz
-  if(/^(CPU_PCT_|gpu_pct)/.test(id)) queuePaintHw();
+  if(/^(CPU_PCT_|CPU_MIN_PCT_|gpu_pct)/.test(id)) queuePaintHw();
   // 顺带把槽的进度色跟上
   paintSlider(el);
 }
@@ -2117,6 +2196,21 @@ function paintHw(){
       (v.approx ? '≈' : '') + fmtHz(v.cap, false, true);
     el.title = '原生最高 ' + fmtHz(v.hw, false) + '，设定值吸附后 ' +
       (v.approx ? '约 ' : '') + fmtHz(v.cap, false, true);
+  });
+
+  MIN_KEYS.forEach(o=>{
+    const el = document.getElementById('minmhz_' + o.k);
+    if(!el) return;
+    const v = info[o.maxK];
+    const inp = document.getElementById(o.k);
+    if(!v || !inp){ el.textContent = ''; el.title = ''; return; }
+    const cur = parseInt(inp.value,10) || 0;
+    if(cur <= 0){ el.textContent = '跟随系统'; el.title = ''; return; }
+    const want = cpuCapKHz(o.maxK, cur) || Math.floor(v.hw * cur / 100);
+    const t = v.cap > 0 ? Math.min(want, v.cap) : want;
+    el.textContent = '硬件 ' + fmtHz(v.hw, false) + ' → ' + fmtHz(t, false, true);
+    el.title = '最低频目标 ' + fmtHz(t, false, true) +
+               (v.cap > 0 && want > v.cap ? '（不会高于该簇封顶）' : '');
   });
 
   const gmax = parseInt(s.gpu_max,10) || 0;
@@ -2435,6 +2529,13 @@ async function loadStatus(){
       b.className = 'status off';
       t.textContent = '未运行';
     }
+    /* 安全模式：守护没启动，但页面/配置仍可用。给一个明确状态，
+       别让用户以为是模块坏了。 */
+    if(s.safemode === '1'){
+      b.className = 'status off';
+      t.textContent = '安全模式 · 未限频';
+      b.title = '在「维护」里点「退出安全模式」即可恢复';
+    }
     b.classList.remove('stale');
     b.title = '';
     saveBadge();       /* 这一份是刚刚从守护拿到的，下次打开先画它 */
@@ -2532,42 +2633,45 @@ async function loadLog(quiet){
 }
 
 /* ── 配置 ── */
-/* 推荐预设：覆盖安装不会自动套芯片预设，这里给一个手动入口。
-   没有匹配的 adapt/*.conf 时显示"无"，按钮置灰。 */
+/* 芯片预设：省电 / 均衡两档。覆盖安装不会自动套预设，这里给一个手动入口。
+   没有匹配的 adapt/*.conf 时显示"无"，两个按钮都置灰。 */
 let PRESET = null;
-function presetLabel(p){
+function presetLabel(p, mode){
   if(!p || p.none === '1') return '';
+  const pre = mode + '_';
   const parts = [];
-  if(p.big) parts.push('BIG ' + p.big + '%');
-  if(p.mid) parts.push('MID ' + p.mid + '%');
-  if(p.mid2) parts.push('MID2 ' + p.mid2 + '%');
-  if(p.little) parts.push('LITTLE ' + p.little + '%');
-  if(p.gpu) parts.push('GPU ' + p.gpu + '%');
+  const defs = [['big','BIG'], ['mid2','MID2'], ['mid','MID'], ['little','LITTLE'], ['gpu','GPU']];
+  for(const [k, label] of defs){
+    const v = p[pre + k];
+    if(v) parts.push(label + ' ' + v + '%');
+  }
   return parts.join(' / ');
 }
 async function loadPreset(){
   const hint = document.getElementById('preset-hint');
-  const btn = document.getElementById('preset-apply');
-  const smooth = document.getElementById('smooth-apply');
-  if(!hint || !btn) return;
+  const sav = document.getElementById('preset-sav');
+  const bal = document.getElementById('preset-bal');
+  if(!hint || !sav || !bal) return;
   try{
     const p = parse(await api('preset_get'));
     PRESET = p;
     if(p.none === '1'){
       hint.textContent = '无（' + (p.soc || '未知芯片') + ' 没有对应预设）';
-      btn.disabled = true;
-      if(smooth) smooth.disabled = true;
+      sav.disabled = true;
+      bal.disabled = true;
       return;
     }
-    const vals = presetLabel(p);
-    hint.textContent = (p.title || p.soc || '推荐预设') + (vals ? '：' + vals : '');
-    btn.disabled = false;
-    if(smooth) smooth.disabled = false;
+    const sv = presetLabel(p, 'sav');
+    const bv = presetLabel(p, 'bal');
+    hint.textContent = (p.title || p.soc || '本机预设') +
+      ((sv || bv) ? '：省电 ' + (sv || '—') + ' ｜ 均衡 ' + (bv || '—') : '');
+    sav.disabled = false;
+    bal.disabled = false;
   }catch(e){
     /* 读失败不锁按钮：点一下会重试，至少能弹出原因 */
     hint.textContent = '读取失败：' + e.message;
-    btn.disabled = false;
-    if(smooth) smooth.disabled = false;
+    sav.disabled = false;
+    bal.disabled = false;
   }
 }
 /* 名字不能叫 applyPreset：功能页那三组档位已经有一个同名函数，
@@ -2575,36 +2679,38 @@ async function loadPreset(){
  *
  * 预设只填控件、不直接写盘：和滑杆一样要按「保存并生效」。
  * 以前直接调 preset_apply 写 8 个键，用户点「放弃修改」也撤不回来。 */
-async function applyChipPreset(){
+async function applyPresetMode(mode){
   if(!PRESET) await loadPreset();
   if(!PRESET || PRESET.none === '1'){
-    toast(PRESET && PRESET.none === '1' ? '这台芯片没有推荐预设'
+    toast(PRESET && PRESET.none === '1' ? '这台芯片没有可用预设'
                                         : '还没读到预设，稍后再点一次', true);
     return;
   }
+  const pre = mode + '_';
+  const label = mode === 'sav' ? '省电' : '均衡';
   const changes = [];
-  const set = (id, val, label, unit) => {
+  const set = (id, val, name, unit) => {
     const el = document.getElementById(id);
     if(!el || val === undefined || val === '') return;
     if(String(el.value) === String(val)) return;
-    changes.push(label + ' ' + el.value + '→' + val + (unit || ''));
+    changes.push(name + ' ' + el.value + '→' + val + (unit || ''));
     el.value = val;
     if(typeof pv === 'function') pv(id);
   };
-  set('CPU_PCT_BIG',    PRESET.big,    '超大核', '%');
-  set('CPU_PCT_MID2',   PRESET.mid2,   '次大核', '%');
-  set('CPU_PCT_MID',    PRESET.mid,    '中核',   '%');
-  set('CPU_PCT_LITTLE', PRESET.little, '小核',   '%');
-  set('gpu_pct',        PRESET.gpu,    'GPU',    '%');
+  set('CPU_PCT_BIG',    PRESET[pre + 'big'],    '超大核', '%');
+  set('CPU_PCT_MID2',   PRESET[pre + 'mid2'],   '次大核', '%');
+  set('CPU_PCT_MID',    PRESET[pre + 'mid'],    '中核',   '%');
+  set('CPU_PCT_LITTLE', PRESET[pre + 'little'], '小核',   '%');
+  set('gpu_pct',        PRESET[pre + 'gpu'],    'GPU',    '%');
   set('th_high',        PRESET.th_high,'发热线', '℃');
   set('th_low',         PRESET.th_low, '恢复线', '℃');
   set('psi_gain',       PRESET.psi_gain,'PSI 借出','%');
-  /* 三条策略随预设一起落（与省电预设同一语义，电量阶梯不归推荐预设管）：
-     插电不封顶、发热不主动降、PSI 不放宽。 */
-  const setChk = (id, want, label) => {
+  /* 四条策略随预设一起落（与 preset_apply 同一语义，电量阶梯不归预设管）：
+     插电不封顶、发热不主动降、PSI 不放宽、调度回限频。 */
+  const setChk = (id, want, name) => {
     const el = document.getElementById(id);
     if(!el || !!el.checked === want) return;
-    changes.push(label + (want ? ' 开' : ' 关'));
+    changes.push(name + (want ? ' 开' : ' 关'));
     el.checked = want;
     if(typeof pv === 'function') pv(id);
   };
@@ -2612,7 +2718,16 @@ async function applyChipPreset(){
   setChk('psi_adapt', false, 'PSI 借出');
   setChk('chg_uncap', true, '插电放宽');
   set('chg_pct', '100', '插电抬到', '%');
-  /* 调度随预设回限频：最优解靠 cap 守住，动态部分用户手动切智能。 */
+  setChk('suppress', true, '动态封顶');
+  const spEl = document.getElementById('p-sup');
+  if(spEl && spEl.value !== mode){
+    changes.push('压制风格 ' + (spEl.value === 'sav' ? '省电' : '均衡') +
+                 '→' + (mode === 'sav' ? '省电' : '均衡'));
+    if(typeof segInto === 'function')
+      segInto(spEl, [['bal','均衡'],['sav','省电']], mode, () => {});
+    else
+      spEl.value = mode;
+  }
   const seg = document.getElementById('p-strategy');
   if(seg && seg.value !== 'cap'){
     if(seg.value) changes.push('调度 ' + (seg.value === 'smart' ? '智能' : seg.value) + '→限频');
@@ -2620,70 +2735,32 @@ async function applyChipPreset(){
   }
   const diff = document.getElementById('preset-diff');
   if(!changes.length){
-    if(diff){ diff.style.display = ''; diff.textContent = '当前已经是这套预设，不需要再改。'; }
-    toast('当前已经是这套预设');
+    if(diff){ diff.style.display = ''; diff.textContent = '当前已经是' + label + '预设，不需要再改。'; }
+    toast('当前已经是' + label + '预设');
     return;
   }
   if(diff){
     diff.style.display = '';
-    diff.textContent = '已填入，尚未保存：' + changes.join(' · ') +
+    diff.textContent = label + '预设已填入，尚未保存：' + changes.join(' · ') +
                        '。点「保存并生效」才会写入。';
   }
-  /* 功能页那几组下拉也要跟着变：值已经不是预设档了，不能继续显示"适中" */
   if(typeof syncFunc === 'function') syncFunc();
-  toast('已填入预设，记得保存');
+  toast('已填入' + label + '预设，记得保存');
 }
-
-/* 偏流畅预设：推荐值上每个 CPU 簇 +10 个百分点，GPU 和其他控件不动。
- * 只填控件，保存才生效；连点两次结果不变。 */
-async function applySmoothPreset(){
-  if(!PRESET) await loadPreset();
-  if(!PRESET || PRESET.none === '1'){
-    toast(PRESET && PRESET.none === '1' ? '这台芯片没有推荐预设，偏流畅预设也不可用'
-                                        : '还没读到预设，稍后再点一次', true);
-    return;
-  }
-  const changes = [];
-  const num = (v) => { const n = parseInt(v, 10); return isFinite(n) ? n : null; };
-  const setCpu = (id, base, label) => {
-    const b = num(base);
-    if(b === null) return;
-    const el = document.getElementById(id);
-    if(!el) return;
-    const cur = num(el.value);
-    if(cur === null) return;
-    const target = Math.min(100, b + 10);
-    if(cur === target) return;
-    changes.push(label + ' ' + cur + '→' + target + '%');
-    el.value = String(target);
-    if(typeof pv === 'function') pv(id);
-  };
-  setCpu('CPU_PCT_BIG',    PRESET.big,    '超大核');
-  setCpu('CPU_PCT_MID2',   PRESET.mid2,   '次大核');
-  setCpu('CPU_PCT_MID',    PRESET.mid,    '中核');
-  setCpu('CPU_PCT_LITTLE', PRESET.little, '小核');
-  const diff = document.getElementById('preset-diff');
-  if(!changes.length){
-    if(diff){ diff.style.display = ''; diff.textContent = '当前已经是偏流畅预设，不需要再改。'; }
-    toast('当前已经是偏流畅预设');
-    return;
-  }
-  if(diff){
-    diff.style.display = '';
-    diff.textContent = '偏流畅预设已填入，尚未保存：' + changes.join(' · ') +
-                       '。GPU 和其他项未改动，点「保存并生效」才会写入。';
-  }
-  if(typeof syncFunc === 'function') syncFunc();
-  toast('已填入偏流畅预设，记得保存');
-}
+async function applySaverPreset(){ return applyPresetMode('sav'); }
+async function applyBalancedPreset(){ return applyPresetMode('bal'); }
 
 async function loadConf(){
   try{
     const c = parse(await api('conf_get'));
-    loadPreset();   /* 异步补上"推荐预设"那一行，不挡滑块先画出来 */
+    loadPreset();   /* 异步补上预设那一行，不挡滑块先画出来 */
     PCT_KEYS.forEach(o=>{
       const el = document.getElementById(o.k);
       if(el){ el.value = c[o.k] || o.d; pv(o.k); }
+    });
+    MIN_KEYS.forEach(o=>{
+      const el = document.getElementById(o.k);
+      if(el){ el.value = (c[o.k] === undefined || c[o.k] === '') ? 0 : c[o.k]; pv(o.k); }
     });
     const g = document.getElementById('gpu_pct');
     g.value = c.GPU_PCT || 45; pv('gpu_pct');
@@ -2697,21 +2774,17 @@ async function loadConf(){
     const iv = document.getElementById('interval');
     iv.value = c.INTERVAL || 5; pv('interval');
     const gr = document.getElementById('grace');
-    gr.value = c.GAME_GRACE_SEC || 10; pv('grace');
+    gr.value = c.GAME_GRACE_SEC || 30; pv('grace');
     const bf = document.getElementById('boot_full');
     /* 0 是合法值（= 关），不能用 `c.BOOT_FULL_S || 60`：
        那样会把关掉的开关在下次载入时又显示成 60。 */
     bf.value = (c.BOOT_FULL_S === undefined || c.BOOT_FULL_S === '') ? 60 : c.BOOT_FULL_S;
     pv('boot_full');
-    const su = document.getElementById('screen_uncap');
-    /* 新键优先。两个键都没有（手写/极老配置）按新装默认「交还系统」；
-       有 SCREEN_UNCAP 但没有 SCREEN_POLICY 时按旧键映射，老用户行为不变。 */
-    su.checked = c.SCREEN_POLICY === 'uncap'
-              || (c.SCREEN_POLICY === undefined &&
-                  (c.SCREEN_UNCAP === undefined || c.SCREEN_UNCAP === '1'));
+    /* 熄屏保持封顶：缺 SCREEN_POLICY 时按开显示（守护兜底也是 cap）；
+       显式 uncap 才关。keep 也属于“保持封顶”，开关显示为开。 */
     const sc = document.getElementById('screen_cap');
-    sc.checked = c.SCREEN_POLICY === 'cap' || c.SCREEN_POLICY === 'cap_off';
-    pv('screen_uncap'); pv('screen_cap');
+    sc.checked = c.SCREEN_POLICY !== 'uncap';
+    pv('screen_cap');
     /* 实时偏移三条：老配置里没有这些行，守护那边缺省全是"开"，
        页面也必须按开显示，否则会出现"显示关、实际在动"。
        数值同理用 !== '0' / undefined 判断：0 对 TH_MAX、PSI_GAIN 是合法值（= 关掉那一条）。 */
@@ -2727,12 +2800,19 @@ async function loadConf(){
       pv(id);
     };
     num('chg_pct', 'CHG_PCT', 100);
-    /* 压制风格与限速微调：缺行按均衡/1000 显示。 */
+    /* 压制风格与限速微调：缺行按均衡值显示。
+       老配置只有三簇统一的 GOV_UP_US / GOV_DOWN_US，按它兜底。 */
     const spEl = document.getElementById('p-sup');
     if(spEl) segInto(spEl, [['bal','均衡'],['sav','省电']],
                      ((c.SUP_STYLE || '').trim() === 'sav') ? 'sav' : 'bal', () => {});
-    num('gov_up_us', 'GOV_UP_US', 1000);
-    num('gov_down_us', 'GOV_DOWN_US', 1000);
+    const oldUp = (c.GOV_UP_US === undefined || c.GOV_UP_US === '') ? null : c.GOV_UP_US;
+    const oldDn = (c.GOV_DOWN_US === undefined || c.GOV_DOWN_US === '') ? null : c.GOV_DOWN_US;
+    num('gov_up_big',     'GOV_UP_BIG',      oldUp || 3000);
+    num('gov_down_big',   'GOV_DOWN_BIG',    oldDn || 1000);
+    num('gov_up_mid',     'GOV_UP_MID',      oldUp || 2000);
+    num('gov_down_mid',   'GOV_DOWN_MID',    oldDn || 1500);
+    num('gov_up_little',  'GOV_UP_LITTLE',   oldUp || 1000);
+    num('gov_down_little','GOV_DOWN_LITTLE', oldDn || 2000);
     num('th_high', 'TH_HIGH', 75);
     num('th_low',  'TH_LOW',  68);
     num('th_max',  'TH_MAX',  25);
@@ -2782,14 +2862,14 @@ const FUNC_PRESETS = {
   ] },
   th: { ids: ['th_cap', 'th_high', 'th_low', 'th_max'], opts: [
     { v: 'early', lab: '早点降（更凉、更省电）', set: { th_cap: 1, th_high: 70, th_low: 64, th_max: 35 } },
-    { v: 'mid',   lab: '适中（推荐）',           set: { th_cap: 1, th_high: 75, th_low: 68, th_max: 25 } },
+    { v: 'mid',   lab: '适中（默认）',           set: { th_cap: 1, th_high: 75, th_low: 68, th_max: 25 } },
     { v: 'late',  lab: '尽量保性能（很热才降）', set: { th_cap: 1, th_high: 82, th_low: 75, th_max: 15 } },
     { v: 'off',   lab: '不主动降（交给系统）',   set: { th_cap: 0 } },
   ] },
   psi: { ids: ['psi_adapt', 'psi_gain'], opts: [
     { v: 'off',  lab: '不放宽（一直按设定值）', set: { psi_adapt: 0 } },
     { v: 'low',  lab: '少借一点',               set: { psi_adapt: 1, psi_gain: 5 } },
-    { v: 'mid',  lab: '适中（推荐）',           set: { psi_adapt: 1, psi_gain: 10 } },
+    { v: 'mid',  lab: '适中（默认）',           set: { psi_adapt: 1, psi_gain: 10 } },
     { v: 'high', lab: '多借一些（更不容易卡）', set: { psi_adapt: 1, psi_gain: 20 } },
   ] },
 };
@@ -2967,21 +3047,26 @@ async function saveAll(){
     // 首页未刷过 status 时它为空，此时按"全都存在"处理。
     const pairs = PCT_KEYS.filter(o=>!TIER_ABSENT[o.k])
                           .map(o=>[o.k, document.getElementById(o.k).value]);
+    MIN_KEYS.filter(o=>!TIER_ABSENT[o.maxK])
+            .forEach(o=>pairs.push([o.k, document.getElementById(o.k).value]));
     pairs.push(['GPU_PCT', document.getElementById('gpu_pct').value]);
     pairs.push(['GPU_BOOST_OFF', document.getElementById('gpu_boost_off').checked ? '1' : '0']);
     pairs.push(['SUPPRESS', document.getElementById('suppress').checked ? '1' : '0']);
     pairs.push(['SUP_STYLE', document.getElementById('p-sup').value || 'bal']);
-    pairs.push(['GOV_UP_US', document.getElementById('gov_up_us').value]);
-    pairs.push(['GOV_DOWN_US', document.getElementById('gov_down_us').value]);
+    pairs.push(['GOV_UP_BIG', document.getElementById('gov_up_big').value]);
+    pairs.push(['GOV_DOWN_BIG', document.getElementById('gov_down_big').value]);
+    pairs.push(['GOV_UP_MID', document.getElementById('gov_up_mid').value]);
+    pairs.push(['GOV_DOWN_MID', document.getElementById('gov_down_mid').value]);
+    pairs.push(['GOV_UP_LITTLE', document.getElementById('gov_up_little').value]);
+    pairs.push(['GOV_DOWN_LITTLE', document.getElementById('gov_down_little').value]);
     pairs.push(['BIG_MIN', document.getElementById('big_min').checked ? '1' : '0']);
     pairs.push(['CPU_MIN_LOCK', document.getElementById('cpu_min_lock').checked ? '1' : '0']);
     pairs.push(['INTERVAL', document.getElementById('interval').value]);
     pairs.push(['GAME_GRACE_SEC', document.getElementById('grace').value]);
     pairs.push(['BOOT_FULL_S', document.getElementById('boot_full').value]);
-    const suOn = document.getElementById('screen_uncap').checked;
     const scOn = document.getElementById('screen_cap').checked;
-    pairs.push(['SCREEN_POLICY', suOn ? 'uncap' : (scOn ? 'cap' : 'keep')]);
-    pairs.push(['SCREEN_UNCAP', suOn ? '1' : '0']);
+    pairs.push(['SCREEN_POLICY', scOn ? 'cap' : 'uncap']);
+    pairs.push(['SCREEN_UNCAP', scOn ? '0' : '1']);
     pairs.push(['CPU_GOVERNOR', GOV_LOCKED ? '' : document.getElementById('governor').value]);
     pairs.push(['BATT_STEP', document.getElementById('batt_step').checked ? '1' : '0']);
     pairs.push(['BATT_LOW', document.getElementById('batt_low').value]);
@@ -3787,7 +3872,7 @@ function renderPicker(){
 /* ── 深度睡眠 ──
  * 数据来自 api.sh：ds_get 带白名单（首次加载），ds_state 只给状态与榜单（2 秒轮询）。
  * 唤醒榜格式 pkg:次数:是否白名单，逗号分隔，最多 12 条。 */
-const DS = {enable:0, alive:0, paused:0, active:0, wcsince:0, white:{}, run:[], cur:[], limit:80};
+const DS = {enable:0, alive:0, paused:0, noactive:0, active:0, wcsince:0, white:{}, run:[], cur:[], limit:80};
 
 function dsBoard(v){
   if(!v) return [];
@@ -3807,7 +3892,7 @@ function parseDs(text){
     else if(k === 'dsw') o.run = dsBoard(v);
     else if(k === 'dswc') o.cur = dsBoard(v);
     else if(k === 'dsactive') o.active = +v || 0;
-    else if(k === 'enable' || k === 'alive' || k === 'paused' || k === 'wcsince') o[k] = +v || 0;
+    else if(k === 'enable' || k === 'alive' || k === 'paused' || k === 'noactive' || k === 'wcsince') o[k] = +v || 0;
   });
   return o;
 }
@@ -3825,11 +3910,12 @@ function paintDsStatus(){
     m.textContent = '正在写系统 Doze 设置';
     document.getElementById('ds_enable').checked = !!DS.enable;
     return;
-  }
-  if(!DS.enable){
+  }  if(!DS.enable){
     box.classList.add('off'); t.textContent = '未启用'; m.textContent = '打开后熄屏 20 秒进入';
   }else if(DS.paused){
     box.classList.add('off'); t.textContent = '模块已暂停'; m.textContent = '恢复后自动接上';
+  }else if(DS.noactive){
+    box.classList.add('off'); t.textContent = '外部墓碑接管'; m.textContent = '深睡由外部模块负责，本模块不启动';
   }else if(!DS.alive){
     box.classList.add('off'); t.textContent = '守护没在跑'; m.textContent = '关掉再打开开关';
   }else if(DS.active){
@@ -3920,6 +4006,7 @@ function paintDsBoards(){
 function applyDs(st, full){
   if(full) DS.white = st.white;
   DS.enable = st.enable; DS.alive = st.alive; DS.paused = st.paused;
+  DS.noactive = st.noactive;
   DS.active = st.active;
   DS.wcsince = st.wcsince; DS.run = st.run; DS.cur = st.cur;
   paintDsStatus();
@@ -4059,10 +4146,113 @@ function renderDsPicker(){
 async function ctl(cmd){
   try{
     await api(cmd);
-    const m = {restart:'守护已重启', pause:'已暂停', resume:'已恢复', stop:'已停止并恢复频率'};
+    const m = {restart:'守护已重启', pause:'已暂停', resume:'已恢复', stop:'已停止并恢复频率',
+               safemode_off:'已退出安全模式，守护已重启'};
     toast(m[cmd] || '完成');
     setTimeout(loadStatus, 900);
   }catch(e){ toast(e.message, true); }
+}
+
+/* 功能页「维护 → 参数导入/导出」跳到关于页的卡片并展开 */
+function openConfIO(){
+  go('about');
+  setTimeout(()=>{
+    const el = document.getElementById('conf-io');
+    const card = el && el.closest('.card');
+    if(!card) return;
+    const d = card.querySelector('details');
+    if(d) d.open = true;
+    card.scrollIntoView({block:'center'});
+  }, 80);
+}
+
+/* ── 参数导入 / 导出 ─────────────────────────────────────────────
+ * 只传 socfreq.conf 的 KEY=VALUE；导入走 conf_import_many（临时副本
+ * 逐项校验，全部成功才原子替换），不会出现“前 20 个写进去、第 21 个
+ * 值非法就停住”的半份配置。 */
+async function exportConf(){  const el = document.getElementById('conf-io');
+  const hint = document.getElementById('conf-io-hint');
+  try{
+    const raw = await api('conf_get');
+    el.value = '# Soc智能限频 参数导出\n' +
+               '# 只包含 socfreq.conf；分应用档位 / 游戏名单 / 深睡豁免不在这里\n' +
+               raw.split('\n').filter(Boolean).join('\n') + '\n';
+    if(hint) hint.textContent = '已导出，点「复制」保存到剪贴板。';
+    toast('已导出当前参数');
+  }catch(e){
+    if(hint) hint.textContent = '导出失败：' + e.message;
+    toast('导出失败：' + e.message, true);
+  }
+}
+
+async function copyConfIO(){
+  const el = document.getElementById('conf-io');
+  if(!el.value.trim()) return toast('先点「导出当前参数」，或粘贴要导入的文本', true);
+  try{
+    await navigator.clipboard.writeText(el.value);
+    toast('已复制');
+  }catch(e){
+    try{
+      el.focus(); el.select(); el.setSelectionRange(0, el.value.length);
+      document.execCommand('copy');
+      toast('已复制');
+    }catch(_){
+      toast('复制失败，请长按文本框手动复制', true);
+    }
+  }
+}
+
+function clearConfIO(){
+  const el = document.getElementById('conf-io');
+  if(el) el.value = '';
+  const hint = document.getElementById('conf-io-hint');
+  if(hint) hint.textContent = '';
+}
+
+async function importConf(){
+  const el = document.getElementById('conf-io');
+  const hint = document.getElementById('conf-io-hint');
+  const raw = (el && el.value || '').trim();
+  if(!raw) return toast('先把导出的文本粘贴进来', true);
+  let keys;
+  try{
+    keys = new Set((await api('conf_keys')).trim().split(/\s+/));
+    keys.add('CPU_GOVERNOR');
+  }catch(e){
+    return toast('读不到参数键表：' + e.message, true);
+  }
+  const allowEmpty = new Set(['CPU_GOVERNOR', 'SCREEN_STATE_PATH', 'BATT_CURRENT_PATH']);
+  const pairs = [];
+  let skipped = 0;
+  raw.split(/\r?\n/).forEach(line=>{
+    line = line.trim();
+    if(!line || line.startsWith('#')) return;
+    const i = line.indexOf('=');
+    if(i <= 0){ skipped++; return; }
+    const k = line.slice(0, i).trim();
+    const v = line.slice(i + 1).trim();
+    if(!keys.has(k)){ skipped++; return; }
+    if(!v && !allowEmpty.has(k)){ skipped++; return; }
+    pairs.push(k + '=' + v);
+  });
+  if(!pairs.length){
+    if(hint) hint.textContent = '没有可导入的已知参数（跳过了 ' + skipped + ' 行）。';
+    return toast('没有可导入的已知参数', true);
+  }
+  if(!window.confirm('将导入 ' + pairs.length + ' 项参数并立即生效，继续？')) return;
+  try{
+    if(hint) hint.textContent = '正在导入 ' + pairs.length + ' 项…';
+    const out = await api.apply(null, ['conf_import_many'].concat(pairs));
+    if(hint) hint.textContent = '导入完成：' + out.trim() + '；已重新加载配置。';
+    toast('导入完成，正在重新加载');
+    await loadConf();
+    if(typeof syncFunc === 'function') syncFunc();
+    loadPreset();
+    setTimeout(loadStatus, 600);
+  }catch(e){
+    if(hint) hint.textContent = '导入失败（原配置未改动）：' + e.message;
+    toast('导入失败：' + e.message, true);
+  }
 }
 
 async function loadAbout(){
@@ -4141,7 +4331,8 @@ async function loadOvr(){
   box.innerHTML = '';
   const st = lastSt || {};
   box.appendChild(ovrNote('这台机现在：核心 ' + (st.ncores || '?') + ' 颗、档位 ' + (st.ntier || '?') +
-    ' 档、GPU 限频' + (st.gpu_ok === '1' ? '已接上' : (st.gpu_ok === '0' ? '没接上' : '未知'))));
+    ' 档、GPU 限频' + (st.gpu_ok === '1' ? '已接上' : (st.gpu_ok === '0' ? '没接上' : '未知')) +
+    '、封顶后端 ' + (st.capbe || '未知')));
   if(on){
     box.appendChild(ovrNote('在用作者适配的节点表（' + body.length + ' 条，随模块版本发布）：'));
     body.forEach(l=>{
@@ -4435,6 +4626,7 @@ buildStaticDD();
    桥接慢或失败时这一页也不能是空的三行。 */
 syncFunc();
 buildPctRows();
+buildMinRows();
 labelRanges();
 syncSliders();
 /* 先把上次的徽标画出来（首次打开没有缓存时仍是"连接中"）：

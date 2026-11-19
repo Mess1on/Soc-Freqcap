@@ -295,7 +295,7 @@ $UP
 $DN
 $DN" >/dev/null
 ok "$(sed -n 's/^CPU_PCT_BIG=//p' "$D/socfreq.conf")" "100" "98 +5 夹到 100（不是写成 103 被拒）"
-# 下限：留 20%，命令行连按几下不至于把机器压成 1%
+# 下限：和页面一样保留全程 1%，命令行也允许调到 1%
 sed -i 's/^CPU_PCT_BIG=.*/CPU_PCT_BIG=22/; s/^CPU_PCT_MID2=.*/CPU_PCT_MID2=22/;
         s/^CPU_PCT_MID=.*/CPU_PCT_MID=22/;  s/^CPU_PCT_LITTLE=.*/CPU_PCT_LITTLE=22/' "$D/socfreq.conf"
 run_act "$UP
@@ -304,7 +304,7 @@ $UP
 $UP
 $DN
 $DN" >/dev/null      # 第 5 项 = CPU -5%
-ok "$(sed -n 's/^CPU_PCT_BIG=//p' "$D/socfreq.conf")" "20" "22 -5 夹到 20，不会一按就到底"
+ok "$(sed -n 's/^CPU_PCT_BIG=//p' "$D/socfreq.conf")" "17" "22 -5 = 17，不再私设 20% 下限"
 
 echo "== 9 暂停 / 恢复 toggle =="
 OUT=$(run_act "$UP

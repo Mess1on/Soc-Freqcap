@@ -16,7 +16,8 @@ DATA=/data/adb/soc_freqcap
 _had_journal=0
 for _b in "$DATA" "$MODDIR"; do
   { [ -f "$_b/run/nodes.saved" ] || [ -f "$_b/run/cpuset.saved" ] ||
-    [ -f "$_b/run/uclamp.saved" ]; } && _had_journal=1
+    [ -f "$_b/run/uclamp.saved" ] || [ -f "$_b/run/bgcgroup.saved" ] ||
+    [ -f "$_b/run/ppm.saved" ] || [ -f "$_b/run/msm.saved" ]; } && _had_journal=1
 done
 
 # 停掉所有还会写节点的进程。
@@ -66,7 +67,7 @@ if [ -f "$DS_PID" ]; then
   esac
   rm -f "$DS_PID" 2>/dev/null
 fi
-[ -f "$DS_SH" ] && ( . "$DS_SH" >/dev/null 2>&1; ds_ops_restore_if_any; ds_freeze_restore_if_any; ds_snap_restore_if_any )
+[ -f "$DS_SH" ] && ( . "$DS_SH" >/dev/null 2>&1; ds_ops_restore_if_any; ds_appops_restore_if_any; ds_freeze_restore_if_any; ds_snap_restore_if_any )
 
 # 守护可能已被管理器删掉，或因 ELF 被 loader 拒绝而跑不起来，
 # 此时只剩 run/*.saved 里的原始值，逐条读回作为最后兜底。三本账都要兜：
@@ -189,6 +190,75 @@ restore_uclamp() {
   if [ "$_rf" = 0 ]; then rm -f "$U"; else echo "  保留账本：$U"; fi
 }
 
+# 后台分组账本：background / system-background 的 uclamp.max 与 background cpuset。
+# 和 uclamp/cpuset 一样是字符串值，必须单独还原；漏掉会留下"卸载后后台仍被收窄"。
+restore_bgcgroup() {
+  B="$1/run/bgcgroup.saved"
+  [ -f "$B" ] || return 0
+  _rf=0
+  while read -r NODE VAL MODE; do
+    [ -e "$NODE" ] || continue
+    [ -n "$VAL" ] || continue
+    chmod 0644 "$NODE" 2>/dev/null
+    echo "$VAL" > "$NODE" 2>/dev/null
+    _now=$(cat "$NODE" 2>/dev/null | tr -d ' \r\n')
+    [ "$_now" = "$VAL" ] || {
+      _rf=1
+      echo "  后台分组未还原：$NODE（期望 $VAL，实际 ${_now:-读不到}）"
+    }
+    case "$MODE" in ''|*[!0-7]*) MODE=644 ;; esac
+    chmod "$MODE" "$NODE" 2>/dev/null
+  done < "$B"
+  if [ "$_rf" = 0 ]; then rm -f "$B"; else echo "  保留账本：$B"; fi
+}
+
+# PPM / msm 第二道锁的兜底。守护正常退出会自己还原；这里只在
+# 二进制缺失/被杀时按账本恢复。PPM 的 ppm.saved 每行 "<idx> <原值>"，
+# msm.saved 是原始整串（可能为空）。
+restore_ppm() {
+  P="$1/run/ppm.saved"
+  [ -f "$P" ] || return 0
+  N=/proc/ppm/policy/hard_userlimit_max_cpu_freq
+  [ -e "$N" ] || { rm -f "$P"; return 0; }
+  _rf=0
+  while read -r IDX ORIG; do
+    case "$IDX" in ''|*[!0-9]*) continue ;; esac
+    case "$ORIG" in ''|*[!0-9-]*) continue ;; esac
+    echo "$IDX $ORIG" > "$N" 2>/dev/null
+    _now=$(awk -v i="$IDX" '$1 == i { print $2; exit }' "$N" 2>/dev/null)
+    [ "$_now" = "$ORIG" ] || _rf=1
+  done < "$P"
+  if [ "$_rf" = 0 ]; then rm -f "$P"; else echo "  保留账本：$P"; fi
+}
+
+restore_msm() {
+  M="$1/run/msm.saved"
+  [ -f "$M" ] || return 0
+  if [ -e /sys/module/msm_performance/parameters/cpu_max_freq ]; then
+    N=/sys/module/msm_performance/parameters/cpu_max_freq
+  elif [ -e /sys/kernel/msm_performance/parameters/cpu_max_freq ]; then
+    N=/sys/kernel/msm_performance/parameters/cpu_max_freq
+  else
+    rm -f "$M"
+    return 0
+  fi
+  # msm 只改写到的 CPU；没写到的会继续吃旧帽。还原时给所有存在的
+  # CPU 都写一条：原串有值用原值，没有写 0（0=解除，-1 会被拒）。
+  _orig=$(cat "$M" 2>/dev/null)
+  _payload=
+  for _c in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    [ -e "/sys/devices/system/cpu/cpu$_c" ] || continue
+    _v=$(printf ' %s ' "$_orig" | tr ' ' '\n' | awk -F: -v c="$_c" '$1 == c { print $2; exit }')
+    [ -n "$_v" ] || _v=0
+    _payload="$_payload $_c:$_v"
+  done
+  if [ -n "$_payload" ] && printf '%s\n' "${_payload# }" > "$N" 2>/dev/null; then
+    rm -f "$M"
+  else
+    echo "  保留账本：$M"
+  fi
+}
+
 # 两处都要兜：账本现在在 $DATA/run，旧版本写在 $MODDIR/run，
 # 从旧版本直升时账本可能仍留在模块目录里，只兜一处等于留一半。
 #
@@ -202,6 +272,9 @@ for BASE in "$DATA" "$MODDIR"; do
   restore_govs "$BASE"
   restore_cpuset "$BASE"
   restore_uclamp "$BASE"
+  restore_bgcgroup "$BASE"
+  restore_ppm "$BASE"
+  restore_msm "$BASE"
 done
 
 # 账本不在：守护可能从未成功启动，但节点也可能被早期版本写过。
@@ -258,9 +331,11 @@ stop_procs KILL
 # /data/local/tmp 再删数据目录；否则卸载后就再也找不回原始值。
 _rem=0
 for _j in "$DATA/run/nodes.saved" "$DATA/run/perms.saved" "$DATA/run/govs.saved" \
-          "$DATA/run/cpuset.saved" "$DATA/run/uclamp.saved" \
+          "$DATA/run/cpuset.saved" "$DATA/run/uclamp.saved" "$DATA/run/bgcgroup.saved" \
+          "$DATA/run/ppm.saved" "$DATA/run/msm.saved" \
           "$MODDIR/run/nodes.saved" "$MODDIR/run/perms.saved" "$MODDIR/run/govs.saved" \
-          "$MODDIR/run/cpuset.saved" "$MODDIR/run/uclamp.saved"; do
+          "$MODDIR/run/cpuset.saved" "$MODDIR/run/uclamp.saved" "$MODDIR/run/bgcgroup.saved" \
+          "$MODDIR/run/ppm.saved" "$MODDIR/run/msm.saved"; do
   [ -f "$_j" ] && _rem=1
 done
 if [ "$_rem" = 1 ]; then

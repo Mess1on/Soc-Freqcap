@@ -78,7 +78,7 @@ can_use_keys() {
 # 不然一次按下算两回。
 # other = 别的实体键：调用处当它"有人在动"，重新计时继续等。
 # 只认音量键的话，先按一下侧键亮屏、或者误按别的键，那一下被丢掉、时钟不重置，
-# 人慢慢看完八行菜单就会撞上 90 秒。
+# 人慢慢看完菜单就会撞上 90 秒。
 #
 # 读数窗口 0.1 秒 + 隔 0.05 秒再看。evdev 每次 open 是一个新客户端，
 # 只在进程活着的那段收事件，两次读数之间按下的键会丢掉——窗口越短空档越大，
@@ -124,9 +124,9 @@ key_wait() {
 }
 
 # ── 动作表 ──────────────────────────────────────────────────────
-# 只读的（1/2/3）按下去直接执行；改东西的五个（4~8）都要二次确认：
+# 只读的（1/2/3）按下去直接执行；改东西的（4~14）都要二次确认：
 # 音量+ 取消、音量- 确认。只有两个键的界面里，误碰的代价就靠确认那一步兜住。
-NITEMS=8
+NITEMS=15
 
 label() {
   case "$1" in
@@ -138,6 +138,13 @@ label() {
     6) echo "重启守护（改完配置让它立刻生效）" ;;
     7) echo "暂停 / 恢复限频" ;;
     8) echo "停掉守护并恢复到开机前状态" ;;
+    9) echo "GPU 封顶 +5%" ;;
+    10) echo "GPU 封顶 -5%" ;;
+    11) echo "切换调度策略（限频 ↔ 智能）" ;;
+    12) echo "切换动态封顶（开 ↔ 关）" ;;
+    13) echo "切换熄屏保持封顶（开 ↔ 关）" ;;
+    14) echo "切换深度睡眠（开 ↔ 关）" ;;
+    15) echo "退出安全模式并重启守护" ;;
   esac
 }
 
@@ -151,12 +158,55 @@ bump_cpu() {
     _v=$(confv "$_k")
     case "$_v" in ''|*[!0-9]*) _v=65 ;; esac
     _n=$((_v + _d))
-    # 下限留 20%：1% 也是合法值，但命令行里连按几下就到底了，
-    # 机器看起来像坏了，而用户不知道是谁干的。
-    [ "$_n" -lt 20 ] && _n=20
+    # 和页面一样留全程 1~100：命令行里也允许调到 1%，不替用户设下限。
+    [ "$_n" -lt 1 ] && _n=1
     [ "$_n" -gt 100 ] && _n=100
     api conf_set "$_k" "$_n" >/dev/null
   done
+}
+
+bump_gpu() {
+  _v=$(confv GPU_PCT)
+  case "$_v" in ''|*[!0-9]*) _v=45 ;; esac
+  _n=$((_v + $1))
+  [ "$_n" -lt 1 ] && _n=1
+  [ "$_n" -gt 100 ] && _n=100
+  api conf_set GPU_PCT "$_n" >/dev/null
+  say "GPU_PCT=$_n"
+}
+
+toggle_key() {
+  _k=$1
+  _v=$(confv "$_k")
+  [ "$_v" = "1" ] && _n=0 || _n=1
+  api conf_set "$_k" "$_n" >/dev/null
+  say "$_k=$_n"
+}
+
+toggle_strategy() {
+  _v=$(confv STRATEGY)
+  [ "$_v" = "smart" ] && _n=cap || _n=smart
+  api conf_set STRATEGY "$_n" >/dev/null
+  say "STRATEGY=$_n"
+}
+
+toggle_screen() {
+  _v=$(confv SCREEN_POLICY)
+  if [ "$_v" = "uncap" ]; then
+    _p=cap; _u=0; say "熄屏保持封顶：开"
+  else
+    _p=uncap; _u=1; say "熄屏保持封顶：关"
+  fi
+  api conf_set SCREEN_POLICY "$_p" >/dev/null
+  api conf_set SCREEN_UNCAP "$_u" >/dev/null
+}
+
+toggle_ds() {
+  _v=$(sed -n 's/^[[:space:]]*enable[[:space:]]*=//p' "$DATA/dsleep.conf" 2>/dev/null \
+       | head -n 1 | sed 's/#.*//' | tr -d ' \r\t')
+  [ "$_v" = "1" ] && _n=0 || _n=1
+  api ds_set enable "$_n" >/dev/null
+  say "深度睡眠：$([ "$_n" = 1 ] && echo 开 || echo 关)"
 }
 
 do_item() {
@@ -164,7 +214,7 @@ do_item() {
     # 必须用 -E（ERE）：toybox 的 sed 在 BRE 里不认 \| 交替，
     # 那条过滤在手机上会一行都不放行 —— 第 1 项点了没任何输出的根因就在这儿。
     # 开发机是 GNU sed，认 \|，所以这类写法在 PC 上永远测不出来。
-    1) api status | sed -nE 's/^(state|game_pkg|reason|fg|app_mode|paused|alive|pid|interval|grace|soc|ncores|nmode)=/    \1 = /p' ;;
+    1) api status | sed -nE 's/^(state|game_pkg|reason|fg|app_mode|paused|alive|pid|interval|grace|soc|ncores|nmode|strat|smart|prime)=/    \1 = /p' ;;
     2) "$DAEMON" probe 2>&1 | sed 's/^/    /' ;;
     3) api log 30 | tail -n 30 | sed 's/^/    /' ;;
     4) bump_cpu 5;  say "已 +5%，现在四簇：$(api conf_get | sed -n 's/^CPU_PCT_[A-Z0-9]*=//p' | tr '\n' ' ')" ;;
@@ -172,6 +222,13 @@ do_item() {
     6) say "重启守护…"; api restart; say "完成" ;;
     7) if [ -f "$DATA/pause" ]; then say "恢复限频…"; api resume; else say "暂停限频…"; api pause; fi ;;
     8) say "停止并恢复…"; api stop; say "已恢复到开机前状态" ;;
+    9) bump_gpu 5 ;;
+    10) bump_gpu -5 ;;
+    11) toggle_strategy ;;
+    12) toggle_key SUPPRESS ;;
+    13) toggle_screen ;;
+    14) toggle_ds ;;
+    15) say "退出安全模式…"; api safemode_off; say "已删除 safemode 标记，守护已重启" ;;
   esac
 }
 
@@ -198,9 +255,15 @@ if ! can_use_keys; then
   say "2 $DAEMON probe"
   say "3 sh $API log 30"
   say "4 sh $API conf_set CPU_PCT_BIG 70   （四簇同理）"
-  say "6 $DAEMON restart"
-  say "7 touch $DATA/pause   ／   rm -f $DATA/pause && $DAEMON restart"
-  say "8 $DAEMON stop"
+  say "5 sh $API conf_set GPU_PCT 50"
+  say "6 sh $API conf_set STRATEGY smart   （或 cap）"
+  say "7 sh $API conf_set SUPPRESS 1   （0 = 关）"
+  say "8 sh $API conf_set SCREEN_POLICY cap   （uncap = 交还）"
+  say "9 sh $API ds_set enable 1   （0 = 关深睡）"
+  say "10 $DAEMON restart"
+  say "11 touch $DATA/pause   ／   rm -f $DATA/pause && $DAEMON restart"
+  say "12 $DAEMON stop"
+  say "15 sh $API safemode_off   （退出安全模式）"
   ui_print ""
   say "参数与 WebUI 一致，改完由守护巡检生效"
   exit 0
@@ -213,7 +276,7 @@ ui_print ""
 
 # 菜单只完整打一次，之后每按一次只补一行当前项：
 # 管理器的「执行」输出是只能往下追加的文本区，没有"刷新"这个动作，
-# 每次按键重打八行就是八屏重复，选到哪一行反而要往下翻。
+# 每次按键重打整张菜单就是多屏重复，选到哪一行反而要往下翻。
 # 真终端（[ -t 1 ] 为真）例外，那里 ANSI 清屏序列有人认。
 print_menu() {
   _i=1
@@ -231,7 +294,7 @@ print_menu
 # 这一行在不在，是"界面被关掉了"和"我们自己退出了"的分界
 atrace "菜单已画出，开始等按键（上限 90s）"
 while :; do
-  # 90 秒：八行菜单要边看边想，30 秒不够
+  # 90 秒：菜单项多了，边看边想，30 秒不够
   K=$(key_wait 90)
   case "$K" in
     timeout) atrace "菜单超时退出"; ui_print ""; say "超时退出，未做任何改动"; exit 0 ;;

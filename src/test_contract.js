@@ -162,6 +162,12 @@ ok(/mv -f "\$MODPATH\/\$_f" "\$DATA\/\$_f"/.test(fs.readFileSync(MOD0 + '/custom
 }
 ok(/rm -rf \/data\/adb\/soc_freqcap/.test(fs.readFileSync(MOD0 + '/uninstall.sh', 'utf8')),
    '卸载清掉数据目录（不留 root 私有的孤儿目录）');
+ok(/restore_bgcgroup/.test(fs.readFileSync(MOD0 + '/uninstall.sh', 'utf8')) &&
+   /bgcgroup\.saved/.test(fs.readFileSync(MOD0 + '/uninstall.sh', 'utf8')),
+   '卸载兜底还原后台分组账本（background uclamp/cpuset）');
+ok(/SF_MODDIR "\/disable"/.test(csrc) && /SF_MODDIR "\/remove"/.test(csrc) &&
+   /模块停用\/卸载标记/.test(csrc),
+   '守护自查停用/卸载标记：不用等重启就退出并还原');
 /* uninstall.sh 的兜底：三个 restore_* 函数内部拼的都是 "$1/run/xxx.saved"，
    所以调用点必须传**父目录**。这一版之前就踩了：循环变量存的是
    /data/adb/soc_freqcap/run，函数再拼一次 run/ 变成 .../run/run/nodes.saved，
@@ -304,21 +310,19 @@ console.log('\n== 名单升级通道（games.base.txt 三方合并）==');
      '存在 src/test_install_merge.sh（迁移段的台架）');
 }
 
-/* ── ① 熄屏策略：新装 uncap、老用户保持 keep ─────────────────── */
+/* ── ① 熄屏保持封顶：默认开，一个开关 ─────────────────────── */
 console.log('\n== 熄屏轻巡检 / 开机满血 ==');
 ok(/^SCREEN_POLICY=cap$/m.test(conf), '包内 conf 给全新安装写 cap（保持封顶+轻巡检）');
 ok(/^SCREEN_UNCAP=0$/m.test(conf), '旧键 SCREEN_UNCAP 仍写 0（只做兼容映射）');
-ok(/cfg\.screen_policy = SCREEN_KEEP;/.test(csrc) &&
+ok(/cfg\.screen_policy = SCREEN_CAP;/.test(csrc) &&
    /cfg\.soff_interval = 15;/.test(csrc),
-   '守护兜底是 keep / 15s：升级用户没有新键时行为不变');
-ok(/!uncap_seen \? SCREEN_UNCAP/.test(csrc) &&
-   /cfg\.screen_uncap \? SCREEN_UNCAP : SCREEN_KEEP/.test(csrc),
-   '没有 SCREEN_POLICY 时旧 SCREEN_UNCAP 照旧映射；两个键都没有才按新装默认 uncap');
-ok(/if \(cfg_get\("SCREEN_POLICY", v\) == 0\)[\s\S]{0,360}?uncap[\s\S]{0,160}?keep[\s\S]{0,200}?cap_off/.test(csrc),
-   'SCREEN_POLICY 认 uncap / keep / cap（坏值回落旧映射）');
-ok(/static void cpu_min_to_floor\(void\)[\s\S]{0,400}scaling_min_freq[\s\S]{0,200}hw_min/.test(csrc) &&
+   '守护兜底是 cap / 15s：没有 SCREEN_POLICY 也默认轻巡检');
+ok(!/!uncap_seen \? SCREEN_UNCAP/.test(csrc) &&
+   /if \(cfg_get\("SCREEN_POLICY", v\) == 0\)[\s\S]{0,160}?uncap[\s\S]{0,120}?keep[\s\S]{0,120}?cap_off/.test(csrc),
+   '缺键一律 cap；显式写了 uncap / keep / cap 的手工配置仍尊重');
+ok(/static void cpu_min_to_floor\(void\)[\s\S]{0,500}min_floor_for[\s\S]{0,200}scaling_min_freq/.test(csrc) &&
    /static void cpu_min_restore\(void\)[\s\S]{0,500}journal_value\(NODES_JOURNAL, path, &orig\)/.test(csrc),
-   'CPU 下限只在熄屏压到 cpuinfo_min，亮屏按账本还原');
+   'CPU 下限熄屏压到用户最低/硬件最低，亮屏按账本还原');
 ok(/int adapt_screen_off_tick\(const struct adapt_cfg \*c, int dt\)/.test(fs.readFileSync(MOD0 + '/src/adapt.c', 'utf8')) &&
    /cfg\.screen_policy == SCREEN_CAP && \+\+g_soff_th >= 4/.test(csrc),
    '熄屏温控每 4 拍采一次（只有 cap 策略）');
@@ -329,9 +333,10 @@ ok(/probe_min/.test(csrc) && /=== CPU 下限（写一次立刻还原）===/.test
    'probe_min 子命令写一次、读回、立刻还原');
 ok(/\[ "\$_k" = SCREEN_POLICY \] && continue/.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')),
    '通用补键循环跳过 SCREEN_POLICY，由专门迁移段处理');
-ok(/_had_uncap.*_old_uncap[\s\S]{0,260}?SCREEN_POLICY=cap/.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')) &&
-   /SCREEN_POLICY=uncap/.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')),
-   '旧配置 SCREEN_UNCAP=0 补 cap（修 keep 陷阱），其余保持 uncap');
+ok(/_CAP_MARK="\$DATA\/\.screen_cap_default"/.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')) &&
+   /SCREEN_POLICY=cap/.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')) &&
+   /: > "\$_CAP_MARK"/.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')),
+   '存量配置升级时一次性强制 cap（标记文件，之后手改不被打回）');
 /* 判断失败必须当"亮屏"：读不到就放开，等于在最不可靠的时候取消所有保护 */
 ok(/if \(!got \|\| rc != 0\) return 1;/.test(csrc),
    'screen_awake 读不到时按亮屏处理（宁可照常限频，不要悄悄放开）');
@@ -365,15 +370,13 @@ ok(/ps_append\(buf, sizeof buf, n,[\s\S]{0,60}?"state=%s\\nscreen=%s\\nsoff=%d\\
    '状态里发布 screen/soff，页面能区分 ACTIVE 与熄屏');
 ok(/st === 'full'/.test(html) && /s\.soff/.test(html),
    '页面能渲染 state=full（熄屏轻巡检），不会落到"未运行"');
-// 开关落到两个键：新键给守护，旧键留给回退/兼容
-ok(/pairs\.push\(\['SCREEN_POLICY', suOn \? 'uncap' : \(scOn \? 'cap' : 'keep'\)\]\)/.test(html) &&
-   /pairs\.push\(\['SCREEN_UNCAP', suOn \? '1' : '0'\]\)/.test(html) &&
-   /id="screen_cap"/.test(html),
-   '页面三档：交还 / 轻巡检保持封顶 / 旧行为，并兼容写 SCREEN_UNCAP');
-ok(/c\.SCREEN_POLICY === 'uncap'/.test(html) &&
-   /c\.SCREEN_POLICY === undefined &&/.test(html) &&
-   /c\.SCREEN_UNCAP === undefined \|\| c\.SCREEN_UNCAP === '1'/.test(html),
-   '页面读新键；老配置按旧开关显示；两个键都没有时按默认打开');
+// 熄屏保持封顶：页面只留一个开关，开 = cap，关 = uncap
+ok(/id="screen_cap"/.test(html) && !/id="screen_uncap"/.test(html) &&
+   /pairs\.push\(\['SCREEN_POLICY', scOn \? 'cap' : 'uncap'\]\)/.test(html) &&
+   /pairs\.push\(\['SCREEN_UNCAP', scOn \? '0' : '1'\]\)/.test(html),
+   '页面一个「熄屏保持封顶」开关：开写 cap、关写 uncap');
+ok(/sc\.checked = c\.SCREEN_POLICY !== 'uncap'/.test(html),
+   '缺 SCREEN_POLICY 时按开显示（默认保持封顶）');
 
 /* ── P0b：深度空闲 / keep ─────────────────────────────────────── */
 console.log('\n== P0b 深度空闲 / 分应用 keep ==');
@@ -429,6 +432,15 @@ console.log('\n== P0.5 巡检瘦身 ==');
 {
   const adaptSrc = fs.readFileSync(MOD0 + '/src/adapt.c', 'utf8');
   const svc = fs.readFileSync(MOD0 + '/service.sh', 'utf8');
+  ok(/BOOT_GUARD/.test(svc) && /boot_id/.test(svc) && /_obid/.test(svc) &&
+     /_now - _ots/.test(svc) && !/sleep 120; echo 0/.test(svc) &&
+     /: > "\$DATA\/safemode"/.test(svc),
+     '连续短启动按 boot_id 计数（同一 boot 重跑 service.sh 不累计）');
+  ok(/dsleep\.lock\.d\/pid/.test(svc) && /echo "\$_p" > "\$DS_PID"/.test(svc),
+     '看门狗用运行锁 pid 兜底，深睡 pid 文件陈旧时不再每分钟重复拉起');
+  ok(/safemode_off/.test(apiSrc) && /safemode_off/.test(html) &&
+     /safemode=%s/.test(apiSrc) && /退出安全模式/.test(html),
+     '维护页和 action.sh 都能一键退出安全模式（不用手删 /data 文件）');
   ok(/: > "\$LOCK"/.test(svc) && !/rm -f "\$LOCK"/.test(svc),
      '看门狗自救只清空锁文件、不删除（删了会换 inode，旧守护还能再锁一份）');
   ok(/#define MAX_THERMAL 128/.test(adaptSrc) &&
@@ -446,20 +458,27 @@ console.log('\n== P0.5 巡检瘦身 ==');
   ok(/strstr\(low, "trip"\)\) return 0/.test(adaptSrc)
      && /thermal_type_ok\("cpu-hw-trip-0"\)/.test(fs.readFileSync(MOD0 + '/src/test_real.c', 'utf8')),
      'trip 阈值节点（cpu-hw-trip-*，恒 95000）被过滤，不当成当前温度');
-  ok(/#define HEARTBEAT_FILE RUN_DIR "\/heartbeat"/.test(csrc) &&
+  ok(/#define TMP_RUN\s+"\/dev\/soc_freqcap"/.test(csrc) &&
+     /#define HEARTBEAT_FILE TMP_RUN "\/heartbeat"/.test(csrc) &&
+     /#define STATUS_FILE TMP_RUN "\/status"/.test(csrc) &&
+     /#define CORE_STATE_FILE TMP_RUN "\/cores.state"/.test(csrc) &&
+     /#define NODES_JOURNAL RUN_DIR "\/nodes.saved"/.test(csrc) &&
+     /tmp_link\(HEARTBEAT_FILE, RUN_DIR "\/heartbeat"\)/.test(csrc) &&
+     /tmp_link\(STATUS_FILE, RUN_DIR "\/status"\)/.test(csrc) &&
      /static void heartbeat\(void\)/.test(csrc) &&
      /now - g_hb_at < 60/.test(csrc) &&
      /heartbeat\(\);/.test(csrc) &&
      /unlink\(HEARTBEAT_FILE\)/.test(csrc),
-     '守护心跳 60 秒写一次（不每拍闪元数据），退出时删除');
+     '运行态（心跳/状态/逐核窗口）落 /dev tmpfs，账本留 /data，旧路径用软链兼容');
   ok(/static size_t ps_append\(/.test(csrc) &&
      /g_screen_off && access\(STATUS_FILE, F_OK\) == 0 && g_status_len &&[\s\S]{0,80}?n == g_status_len/.test(csrc) &&
      /memcmp\(buf, g_status_cache, n\)/.test(csrc),
      '熄屏时 status 内容不变就不落盘（亮屏仍每拍写）');
   ok(/HB="\$DATA\/run\/heartbeat"/.test(svc) &&
-     /stat -c %Y "\$HB"/.test(svc) &&
+     /readlink -f "\$HB"/.test(svc) &&
+     /stat -c %Y "\$_hb"/.test(svc) &&
      /\[ "\$\(\(_now - _mt\)\)" -gt "\$_lim" \]/.test(svc),
-     '看门狗按心跳 mtime 判过期（不只看 pid）');
+     '看门狗按心跳 mtime 判过期（软链先解析真实文件）');
   ok(/SOFF_INTERVAL/.test(svc) && /IDLE_INTERVAL/.test(svc) && /_v=\$\(\(_v \+ 60\)\)/.test(svc),
      '阈值按配置里的最长睡眠现算（固定 90s 会误杀合法的 300s 长睡）');
   ok(/"\$SLEEP" 60/.test(svc) && /kill -9 "\$PID"/.test(svc),
@@ -505,12 +524,12 @@ console.log('\n== P2 电量阶梯 ==');
 }
 
 /* ── 出厂默认的五项行为 ───────────────────────────────────────── */
-console.log('\n== 出厂默认（熄屏交还 / 充电不封顶 / 电量阶梯关 / 温控适中 / PSI 适中） ==');
+console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电量阶梯关 / 温控适中 / PSI 适中） ==');
 {
   ok(/^SCREEN_POLICY=cap$/m.test(conf), '新装默认熄屏保持封顶（cap）');
-  ok(/!uncap_seen \? SCREEN_UNCAP/.test(csrc) &&
-     /\(c\.SCREEN_UNCAP === undefined \|\| c\.SCREEN_UNCAP === '1'\)/.test(html),
-     '两个熄屏键都没有时，守护和页面都按 uncap（显式 keep 不受影响）');
+  ok(/cfg\.screen_policy = SCREEN_CAP;/.test(csrc) &&
+     !/!uncap_seen \? SCREEN_UNCAP/.test(csrc),
+     '缺键时守护按 cap；页面开关缺键也按开显示');
   ok(/^CHG_UNCAP=1$/m.test(conf) && /^CHG_PCT=100$/m.test(conf),
      '充电态默认不封顶');
   ok(/cfg\.ad\.chg = 1;\s+cfg\.ad\.chg_pct = 100;/.test(csrc),
@@ -529,8 +548,8 @@ console.log('\n== 出厂默认（熄屏交还 / 充电不封顶 / 电量阶梯�
      !/uncap（新装）/.test(fs.readFileSync(process.argv[6], 'utf8')) &&
      !/keep（升级）/.test(DOC),
      '装机注释与文档不再把升级情形写成 uncap / keep（实际是保留原值）');
-  ok(/熄屏轻巡检不查前台/.test(html) && /不在前台的场景仍会保持封顶/.test(html),
-     '页面写清 soff 只看熄屏瞬间前台，后台任务仍吃 cap');
+  ok(/熄屏只看那一刻前台/.test(html) && /满血交还系统/.test(html),
+     '页面写清 soff 只看熄屏瞬间前台');
   /* CPU 下限锁：默认关；亮屏只读偏离才写、30s 节流、夹回 3 次停 10 分钟 */
   ok(/^CPU_MIN_LOCK=0$/m.test(conf) && /cfg\.cpu_min_lock = 0;/.test(csrc),
      'CPU 下限锁默认关，缺键兜底也是 0');
@@ -584,8 +603,13 @@ console.log('\n== 出厂默认（熄屏交还 / 充电不封顶 / 电量阶梯�
   ok(/gbo\.checked = c\.GPU_BOOST_OFF !== '0'/.test(html),
      '页面缺键时按开显示，和守护缺键默认一致');
   ok(!/id="gpu_min_lock"/.test(html) && !/pairs\.push\(\['GPU_MIN_LOCK'/.test(html) &&
-     /一个开关同时管两件事/.test(html),
+     /一个开关同时管三件事/.test(html),
      'GPU 下限锁定已并入「禁止 GPU Boost」，页面只剩一个开关');
+  ok(/KGSL_IDLE_TIMER/.test(csrc) && /KGSL_IDLE_MS\s+48/.test(csrc) &&
+     /force_no_nap/.test(csrc) &&
+     /boost_restore_path\(KGSL_IDLE_TIMER\)/.test(csrc) &&
+     /kgsl_idle_trim\(\);/.test(csrc),
+     'KGSL idle_timer 只降不升到 48ms、force_no_nap 归零，交权/关闭按账本还原');
   ok(/gbo_seen \? gbo_val : \(gml_seen \? gml_val : 1\)/.test(csrc) &&
      /cfg\.gpu_min_lock = cfg\.gpu_boost_off;/.test(csrc),
      '旧配置只有 GPU_MIN_LOCK 时仍能迁移，两个都没有按开');
@@ -611,21 +635,25 @@ console.log('\n== 出厂默认（熄屏交还 / 充电不封顶 / 电量阶梯�
   ok(/GPU_BOOST_OFF\)\s+is_switch/.test(apiSrc) && /GPU_BOOST_OFF/.test(apiSrc),
      'api 侧校验 GPU_BOOST_OFF 只能是 0/1');
   ok(/id="gpu_boost_off"/.test(html) && /pairs\.push\(\['GPU_BOOST_OFF'/.test(html) &&
+     !/id="bg_light"/.test(html) && !/pairs\.push\(\['BG_LIGHT'/.test(html) &&
      /id="suppress"/.test(html) && /pairs\.push\(\['SUPPRESS'/.test(html) &&
      /id="p-sup"/.test(html) && /pairs\.push\(\['SUP_STYLE'/.test(html) &&
-     /id="gov_up_us"/.test(html) && /id="gov_down_us"/.test(html) &&
-     /pairs\.push\(\['GOV_UP_US'/.test(html) && /pairs\.push\(\['GOV_DOWN_US'/.test(html),
-     '动态封顶页：开关 + 压制风格 + 升/降频限速二级菜单，控件与保存配对');
+     /id="gov_up_big"/.test(html) && /id="gov_down_little"/.test(html) &&
+     /id="govrow_mid"/.test(html) &&
+     /pairs\.push\(\['GOV_UP_BIG'/.test(html) && /pairs\.push\(\['GOV_DOWN_LITTLE'/.test(html),
+     '动态封顶页：开关 + 压制风格 + 按簇升降频限速二级菜单；后台收口常驻、页面无开关');
   ok(/g_sup_uclamp_nodes\[\]/.test(csrc) &&
      /suppress_uclamp_apply\(void\)[\s\S]{0,260}write_journaled\(NODES_JOURNAL, p, 0\)/.test(csrc) &&
      /suppress_uclamp_restore\(void\)[\s\S]{0,200}boost_restore_path/.test(csrc) &&
      /suppress_uclamp_apply\(\);/.test(csrc) && /suppress_uclamp_restore\(\);/.test(csrc),
      '动态封顶压低任务组 uclamp.min，节点缺失跳过、交权/暂停还原');
-  ok(/static int sup_prime_min_enabled\(void\)/.test(csrc) &&
-     /SM8750/.test(csrc) && /SM8850/.test(csrc) &&
-     /sup_prime_min_enabled\(\) && \(p->tier & 3\) == 0 && p->hw_min > 0/.test(csrc) &&
-     /sup_prime_min_enabled\(\) && \(g_pol\[i\]\.tier & 3\) == 0/.test(csrc),
-     'SM8750/SM8850 压制时最高频簇落硬件最低，且不拿它触发贴顶回升');
+  ok(/static long sup_cap_for\(const struct policy \*p\)/.test(csrc) &&
+     /long want = p->cap \* sup_pct\(\) \/ 100;/.test(csrc) &&
+     /if \(p->hw_min > 0 && want < p->hw_min\) want = p->hw_min;/.test(csrc) &&
+     !/sup_prime_min_enabled/.test(csrc) &&
+     /cfg\.big_min && t == 0/.test(csrc) &&
+     /big_min_hit = \(cfg\.big_min && tierkey == 0\)/.test(csrc),
+     '动态压制按百分比收，不再无条件把超大核钉最低（BIG_MIN 仍可手动开）');
   ok(/elif \[ "\$_k" = SUP_STYLE \]; then/.test(apiSrc) &&
      /case "\$_v" in bal\|sav\) ;; \*\) die "BAD_SUPSTYLE"/.test(apiSrc),
      'SUP_STYLE 是字符串键：走 cfg_set 的 elif 分支，不能掉进数字校验');
@@ -637,14 +665,16 @@ console.log('\n== 出厂默认（熄屏交还 / 充电不封顶 / 电量阶梯�
      '温控闭环默认关（发热交给系统热管理），阈值默认 75/68');
   ok(/^PSI_ADAPT=1$/m.test(conf) && /^PSI_GAIN=5$/m.test(conf),
      '真的卡的时候默认少借（最多一档 +5）');
-  for (const f of ['adapt/sm8750.conf', 'adapt/sm8850.conf',
+  for (const f of ['adapt/sm8750.conf', 'adapt/sm8750_7core.conf', 'adapt/sm8850.conf',
                    'adapt/sm8845.conf', 'adapt/sm8975.conf',
                    'adapt/sm8650.conf', 'adapt/sm8550.conf', 'adapt/sm8475.conf',
                    'adapt/mt6991.conf', 'adapt/mt6993.conf', 'adapt/mt6995.conf',
                    'adapt/mt6989.conf']) {
     const a = fs.readFileSync(MOD0 + '/' + f, 'utf8');
-    ok(/^default_th_high=75$/m.test(a) && /^default_th_low=68$/m.test(a) &&
-       /^default_psi_gain=5$/m.test(a),
+    const special = f.includes('7core');
+    const th = special ? /^default_th_high=72$/m.test(a) && /^default_th_low=66$/m.test(a)
+                       : /^default_th_high=75$/m.test(a) && /^default_th_low=68$/m.test(a);
+    ok(th && /^default_psi_gain=5$/m.test(a),
        f.split('/')[1] + ' 新装默认也落在少借这一档');
   }
 }
@@ -747,6 +777,10 @@ ok(/set_perm\s+"\$MODPATH\/webroot\/api\.sh"\s+0 0 0755/.test(cust),
   ok(/"\$BIN" restart/.test(hot) && /"\$BIN" stop/.test(hot) &&
      /if \[ -f "\$PAUSE" \]/.test(hot) && /deep_sleep\.sh/.test(hot),
      '热安装脚本：暂停保持、否则 restart 主守护并按开关重启深睡');
+  ok(/\[ -f "\$MODDIR\/disable" \]/.test(hot),
+     '热安装遇到停用标记不拉起守护');
+  ok(!/重启后自动生效/.test(cust) && /无需重启/.test(cust) && /请重启手机/.test(cust),
+     '安装完成只给一条明确指引（热安装无需重启 / 否则请重启）');
   ok(/\[ -f "\$MODDIR\/remove" \] && exit 0/.test(fs.readFileSync(MOD0 + '/service.sh', 'utf8')),
      'service.sh 看到 remove 标记就不启动（卸载到重启之间不再写频率）');
   ok(/\[ -f "\$MODDIR\/remove" \]/.test(hot) && /跳过启动/.test(hot),
@@ -832,6 +866,11 @@ console.log('\n== action.sh 输入方式（音量键）==');
 const act = fs.readFileSync(path.join(MODDIR, 'action.sh'), 'utf8');
 const actCode = stripSh(act);
 {
+  ok(/NITEMS=15/.test(act) && /bump_gpu/.test(act) && /toggle_strategy/.test(act) &&
+     /toggle_screen/.test(act) && /toggle_ds/.test(act) && /toggle_key SUPPRESS/.test(act),
+     'action.sh 覆盖 GPU、策略、动态封顶、熄屏封顶、深睡');
+  ok(/\[ "\$_n" -lt 1 \] && _n=1/.test(act),
+     'action.sh CPU/GPU 调节保留 1~100 全程，不私设 20% 下限');
   // 1) 每一次 getevent 读数都必须在 timeout 里
   const bare = (actCode.match(/^[^\n]*getevent[^\n]*$/gm) || [])
     .filter(l => /getevent\s+-lqc/.test(l) && !/timeout/.test(l));
@@ -1010,7 +1049,7 @@ console.log('\n== 默认值 ==');
 // 而且用户看不出"我装的是 55 还是 66"。
 {
   const DF = {CPU_PCT_BIG:65, CPU_PCT_MID2:64, CPU_PCT_MID:66, CPU_PCT_LITTLE:65,
-              GPU_PCT:45, INTERVAL:5, GAME_GRACE_SEC:10};
+              GPU_PCT:45, INTERVAL:5, GAME_GRACE_SEC:30};
   for (const [k,v] of Object.entries(DF)) {
     ok(new RegExp('^' + k + '=' + v + '\\s*$', 'm').test(conf), 'conf 里 ' + k + '=' + v);
     if (/^CPU_PCT_/.test(k)) {
@@ -1024,7 +1063,7 @@ console.log('\n== 默认值 ==');
      (csrc.match(/dflt\[4\]\s*=\s*\{[^}]*\}/) || [''])[0]);
   ok(/cfg\.gpu_pct\s*=\s*45;/.test(csrc), '守护 GPU fallback 45');
   ok(/cfg\.interval\s*=\s*5;/.test(csrc), '守护 INTERVAL fallback 5');
-  ok(/cfg\.grace\s*=\s*10;/.test(csrc), '守护 GAME_GRACE fallback 10');
+  ok(/cfg\.grace\s*=\s*30;/.test(csrc), '守护 GAME_GRACE fallback 30');
 
   /* ── 滑杆的手势与热区（新拟物改版时最容易顺手改回去）────────────
      竖着滑列表时误改封顶值，根因是 range 的触摸热区太厚、
@@ -2006,7 +2045,7 @@ ok(/"webp"\)\s*\)?\s*return\s*"image\/webp"/.test(iconBody), '守护给 webp 发
      '关于页有微信赞赏码');
   ok(/<img src="reward-alipay\.png"[^>]*alt="支付宝赞赏码"/.test(html),
      '关于页有支付宝赞赏码');
-  ok(html.includes('一直都是免费更新 无收费 悬赏一下给作者动力更新！'),
+  ok(html.includes('免费更新，欢迎支持。'),
      '赞赏码文案和约定一致');
   ok(fs.existsSync(MOD0 + '/webroot/reward-wechat.jpg') &&
      fs.existsSync(MOD0 + '/webroot/reward-alipay.png'),
@@ -2474,7 +2513,7 @@ console.log('\n== 分应用档位 ==');
        /#builtin/.test(cz) && /grep -Fxq -- "\$_p" "\$DATA\/\.binst"/.test(cz) &&
        /grep -Fxv -f "\$DATA\/\.bold" "\$DATA\/\.bnew"/.test(cz),
        '装机只给已安装的包追加（#builtin），并按基准只补新增项');
-    ok(/相机类应用.set/.test(html) || /相机类应用装机时/.test(html),
+    ok(/相机默认满血/.test(html),
        '页面上说明相机类默认满血、可改可删');
   }
 
@@ -2511,9 +2550,9 @@ console.log('\n== 分应用档位 ==');
        /origWhen/.test(ds2) && /暂不进入深睡/.test(ds2) &&
        /暂不进入系统 Doze/.test(ds2),
        '闹钟前 30 分钟不进入，7:30 收口也让路（防止早上闹钟不响）');
-    ok(/深睡不再冻结任何进程/.test(html) && /系统 Doze 白名单/.test(html)
-       && /微信\/QQ/.test(html) && /深睡关闭时也会立即写进/.test(html),
-       '睡眠页说明：不再冻结；深睡关闭也把 white/push/IM 写进系统 Doze 白名单');
+    ok(/不冻结进程/.test(html) && /系统 Doze/.test(html)
+       && /白名单\/推送\/IM/.test(html),
+       '睡眠页说明：不冻结；白名单/推送/IM 同步进系统 Doze');
     ok(!/满 20 秒先冻结|7 分 30 秒再让系统|立刻解冻还原/.test(html),
        '睡眠页不再出现过时的冻结/7:30/解冻文案');
     ok(/builtin_white\) builtin_white ;;/.test(apiSrc) &&
@@ -2830,72 +2869,71 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
      '装机脚本用 adapt 匹配 + 芯片默认两个函数，不再有 _soc_preset');
   ok(!/_soc_preset|_big=65; _lit=62|_big=60; _lit=65/.test(cz),
      '装机脚本里没有第二套写死的芯片值');
-  // 单一来源：值只在 adapt/<soc>.conf 里
+  // 单一来源：值只在 adapt/<soc>.conf 里；default_* = 均衡档（bal_*）
   {
+    const files = ['adapt/sm8750.conf', 'adapt/sm8750_7core.conf', 'adapt/sm8850.conf',
+                   'adapt/sm8845.conf', 'adapt/sm8975.conf',
+                   'adapt/sm8650.conf', 'adapt/sm8550.conf', 'adapt/sm8475.conf',
+                   'adapt/mt6991.conf', 'adapt/mt6993.conf', 'adapt/mt6995.conf',
+                   'adapt/mt6989.conf'];
+    const bad = [];
+    for (const f of files) {
+      const a = fs.readFileSync(MOD0 + '/' + f, 'utf8');
+      for (const k of ['big', 'little', 'gpu']) {
+        const sav = (a.match(new RegExp('^preset_sav_' + k + '=(\\d+)$', 'm')) || [])[1];
+        const bal = (a.match(new RegExp('^preset_bal_' + k + '=(\\d+)$', 'm')) || [])[1];
+        if (!sav || !bal) bad.push(f + ':' + k);
+      }
+      for (const k of ['mid2', 'mid']) {
+        if (new RegExp('^default_cpu_pct_' + k + '=', 'm').test(a)) {
+          const sav = (a.match(new RegExp('^preset_sav_' + k + '=(\\d+)$', 'm')) || [])[1];
+          const bal = (a.match(new RegExp('^preset_bal_' + k + '=(\\d+)$', 'm')) || [])[1];
+          if (!sav || !bal) bad.push(f + ':' + k);
+        }
+      }
+      const pairs = [['big', 'default_cpu_pct_big'], ['little', 'default_cpu_pct_little'],
+                     ['mid2', 'default_cpu_pct_mid2'], ['mid', 'default_cpu_pct_mid'],
+                     ['gpu', 'default_gpu_pct']];
+      for (const [pk, dk] of pairs) {
+        const bal = (a.match(new RegExp('^preset_bal_' + pk + '=(\\d+)$', 'm')) || [])[1];
+        const def = (a.match(new RegExp('^' + dk + '=(\\d+)$', 'm')) || [])[1];
+        if (bal && def && bal !== def) bad.push(f + ':' + pk + '默认!=均衡');
+      }
+    }
+    ok(bad.length === 0, '12 份 adapt 都有省电/均衡预设，且 default_* = 均衡档', bad.join(','));
     const s8750 = fs.readFileSync(MOD0 + '/adapt/sm8750.conf', 'utf8');
-    const s8850 = fs.readFileSync(MOD0 + '/adapt/sm8850.conf', 'utf8');
-    const s8845 = fs.readFileSync(MOD0 + '/adapt/sm8845.conf', 'utf8');
-    const s8975 = fs.readFileSync(MOD0 + '/adapt/sm8975.conf', 'utf8');
-    ok(/^#match soc=SM8750$/m.test(s8750) && /^default_cpu_pct_big=46$/m.test(s8750) &&
-       /^default_cpu_pct_little=51$/m.test(s8750) && /^default_gpu_pct=45$/m.test(s8750) &&
-       /^default_th_high=75$/m.test(s8750) && /^default_psi_gain=5$/m.test(s8750),
-       '8E 默认值在 adapt/sm8750.conf（46/51、GPU45、TH75、PSI10）');
-    ok(/^#match soc=SM8850$/m.test(s8850) && /^default_cpu_pct_big=46$/m.test(s8850) &&
-       /^default_cpu_pct_little=52$/m.test(s8850) && /^default_gpu_pct=42$/m.test(s8850),
-       '8E5 默认值在 adapt/sm8850.conf（46/52、GPU42）');
-    ok(/^#match soc=SM8845$/m.test(s8845) && /^default_cpu_pct_big=51$/m.test(s8845) &&
-       /^default_cpu_pct_little=53$/m.test(s8845) && /^default_gpu_pct=41$/m.test(s8845),
-       '8 Gen 5 默认值在 adapt/sm8845.conf（51/53、GPU41）');
-    ok(/^#match soc=SM8975$/m.test(s8975) && /^default_cpu_pct_big=40$/m.test(s8975) &&
-       /^default_cpu_pct_mid=47$/m.test(s8975) && /^default_cpu_pct_little=51$/m.test(s8975) &&
-       /^default_gpu_pct=41$/m.test(s8975),
-       '8E Extreme Gen 6 默认值在 adapt/sm8975.conf（40/47/51、GPU41）');
-
-    /* 天玑三套：峰值不同，但都是 3 簇（BIG/MID/LITTLE）。 */
-    const s8650 = fs.readFileSync(MOD0 + '/adapt/sm8650.conf', 'utf8');
-    const s8550 = fs.readFileSync(MOD0 + '/adapt/sm8550.conf', 'utf8');
-    const s8475 = fs.readFileSync(MOD0 + '/adapt/sm8475.conf', 'utf8');
-    ok(/^#match soc=SM8650$/m.test(s8650) && /^default_cpu_pct_big=74$/m.test(s8650) &&
-       /^default_cpu_pct_mid2=66$/m.test(s8650) && /^default_cpu_pct_mid=66$/m.test(s8650) &&
-       /^default_cpu_pct_little=68$/m.test(s8650) && /^default_gpu_pct=56$/m.test(s8650),
-       '8 Gen 3 默认值在 adapt/sm8650.conf（74/66/66/68、GPU55）');
-    ok(/^#match soc=SM8550$/m.test(s8550) && /^default_cpu_pct_big=70$/m.test(s8550) &&
-       /^default_cpu_pct_mid=69$/m.test(s8550) && /^default_cpu_pct_little=73$/m.test(s8550) &&
-       /^default_gpu_pct=59$/m.test(s8550),
-       '8 Gen 2 默认值在 adapt/sm8550.conf（70/69/73、GPU59）');
-    ok(/^#match soc=SM8475$/m.test(s8475) && /^default_cpu_pct_big=69$/m.test(s8475) &&
-       /^default_cpu_pct_mid=66$/m.test(s8475) && /^default_cpu_pct_little=73$/m.test(s8475) &&
-       /^default_gpu_pct=47$/m.test(s8475),
-       '8+ Gen 1 默认值在 adapt/sm8475.conf（69/66/73、GPU47）');
-
+    ok(/^preset_sav_big=46$/m.test(s8750) && /^preset_sav_little=51$/m.test(s8750) &&
+       /^preset_sav_gpu=37$/m.test(s8750) && /^preset_bal_big=62$/m.test(s8750) &&
+       /^preset_bal_little=68$/m.test(s8750) && /^preset_bal_gpu=46$/m.test(s8750),
+       '8E 两档：省电 46/51/37，均衡 62/68/46');
+    const s7 = fs.readFileSync(MOD0 + '/adapt/sm8750_7core.conf', 'utf8');
+    ok(/^preset_sav_big=46$/m.test(s7) && /^preset_sav_little=51$/m.test(s7) &&
+       /^preset_bal_big=62$/m.test(s7) && /^preset_bal_little=78$/m.test(s7) &&
+       /^preset_bal_gpu=46$/m.test(s7) && /^default_cpu_floor_m=1785600$/m.test(s7) &&
+       !/^cpuset_/m.test(s7),
+       'Find N5 7 核：省电 51、均衡 78、M 簇下限 1.7856GHz，不套 8 核 cpuset');
     const m6991 = fs.readFileSync(MOD0 + '/adapt/mt6991.conf', 'utf8');
-    const m6993 = fs.readFileSync(MOD0 + '/adapt/mt6993.conf', 'utf8');
-    const m6995 = fs.readFileSync(MOD0 + '/adapt/mt6995.conf', 'utf8');
-    ok(/^#match soc=MT6991$/m.test(m6991) && /^default_cpu_pct_big=80$/m.test(m6991) &&
-       /^default_cpu_pct_mid=67$/m.test(m6991) && /^default_cpu_pct_little=75$/m.test(m6991) &&
-       /^default_gpu_pct=35$/m.test(m6991),
-       '天玑 9400/9400+ 默认值在 adapt/mt6991.conf（80/67/75、GPU35）');
-    ok(/^#match soc=MT6993$/m.test(m6993) && /^default_cpu_pct_big=72$/m.test(m6993) &&
-       /^default_cpu_pct_mid=63$/m.test(m6993) && /^default_cpu_pct_little=71$/m.test(m6993) &&
-       /^default_gpu_pct=35$/m.test(m6993),
-       '天玑 9500 默认值在 adapt/mt6993.conf（72/63/71、GPU35）');
-    ok(/^#match soc=MT6995$/m.test(m6995) && /^default_cpu_pct_big=73$/m.test(m6995) &&
-       /^default_cpu_pct_mid=56$/m.test(m6995) && /^default_cpu_pct_little=65$/m.test(m6995) &&
-       /^default_gpu_pct=37$/m.test(m6995),
-       '天玑 9600 Pro 默认值在 adapt/mt6995.conf（73/56/65、GPU37）');
-    ok(!/default_cpu_pct_mid2/.test(m6991 + m6993 + m6995),
+    ok(/^preset_sav_big=46$/m.test(m6991) && /^preset_sav_mid=45$/m.test(m6991) &&
+       /^preset_sav_little=76$/m.test(m6991) && /^preset_sav_gpu=25$/m.test(m6991) &&
+       /^preset_bal_big=60$/m.test(m6991) && /^preset_bal_mid=60$/m.test(m6991) &&
+       /^preset_bal_little=97$/m.test(m6991) && /^preset_bal_gpu=32$/m.test(m6991),
+       '天玑 9400 两档：省电 1632/1485/1819/400，均衡 2176/1980/2324/500');
+    ok(!/default_cpu_pct_mid2/.test(m6991 + fs.readFileSync(MOD0 + '/adapt/mt6993.conf', 'utf8') +
+       fs.readFileSync(MOD0 + '/adapt/mt6995.conf', 'utf8')),
        '天玑三套都是 3 簇，不写 MID2');
+  }
     /* 覆盖安装不会自动套预设，页面手动入口必须能按当前 SoC 找到同一份文件 */
     ok(/preset_get\)\s+preset_get/.test(apiSrc) &&
        /preset_apply\)\s+preset_apply/.test(apiSrc) &&
-       /_preset_match\(\)[\s\S]{0,500}#match/.test(apiSrc) &&
+       /_preset_cap\(\)/.test(apiSrc) &&
+       /_preset_match\(\)[\s\S]{0,1600}#match/.test(apiSrc) &&
        /getprop ro\.soc\.model/.test(apiSrc),
-       'api 有推荐预设：按 SoC 匹配 adapt/*.conf（和装机同一套规则）');
-    ok(/id="preset-hint"/.test(html) && /id="preset-apply"/.test(html) &&
-       /没有对应预设/.test(html),
-       'CPU/GPU 封顶页有"应用推荐预设"，无匹配时显示"无"');
+       'api 有省电/均衡预设：按 SoC 匹配 adapt/*.conf（和装机同一套规则）');
+    ok(/id="preset-hint"/.test(html) && /id="preset-sav"/.test(html) &&
+       /id="preset-bal"/.test(html) && /没有对应预设/.test(html),
+       'CPU/GPU 封顶页有"省电/均衡"两档，无匹配时显示"无"');
     {
-      /* 后声明的同名函数会静默覆盖前面的：这次推荐预设按钮就是被
+      /* 后声明的同名函数会静默覆盖前面的：这次预设按钮就是被
          功能页的 applyPreset(group) 盖掉，点了直接抛错。 */
       const script = (html.match(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/) || ['', ''])[1];
       const names = [...script.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)]
@@ -2904,20 +2942,15 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
       ok(dups.length === 0, '页面脚本没有重名函数（否则后一个会静默覆盖前一个）',
          [...new Set(dups)].join(','));
     }
-    const smoothSrc = (html.match(/async function applySmoothPreset[\s\S]*?(?=async function loadConf)/) || [''])[0];
-    ok(/async function applySmoothPreset[\s\S]{0,4000}?Math\.min\(100, b \+ 10\)/.test(html) &&
-       /onclick="applySmoothPreset\(\)"/.test(html) && /id="smooth-apply"/.test(html) &&
-       !/setCpu\('gpu_pct'/.test(smoothSrc) && !/setChk\('psi_adapt'/.test(smoothSrc) &&
-       !/paintStrategy\('cap'\)/.test(smoothSrc),
-       '偏流畅=推荐每个 CPU 簇 +10%，GPU/温控/PSI/调度不动，只填控件');
-    ok(/async function applyChipPreset[\s\S]{0,1800}set\('CPU_PCT_BIG'/.test(html) &&
-       /onclick="applyChipPreset\(\)"/.test(html) &&
+    ok(/async function applyPresetMode[\s\S]{0,2500}?PRESET\[pre \+ 'big'\]/.test(html) &&
+       /onclick="applySaverPreset\(\)"/.test(html) &&
+       /onclick="applyBalancedPreset\(\)"/.test(html) &&
        !/onclick="applyPreset\(\)"/.test(html) &&
        !/api\('preset_apply'\)/.test(html) &&
        /id="preset-diff"/.test(html) &&
-       /保存并生效/.test(html),
-       '推荐预设只填控件并列出 diff，必须按保存才写入；函数名不与 applyPreset 冲突');
-  }
+       /保存并生效/.test(html) &&
+       /setChk\('th_cap'/.test(html) && /setChk\('psi_adapt'/.test(html),
+       '省电/均衡预设只填控件并列出 diff，随落三条策略，必须按保存才写入');
   // 只对全新安装：_FRESH_CONF=1 才调 _soc_defaults；升级不碰
   ok(/if \[ "\$_FRESH_CONF" = 1 \]; then\s*\n\s*_soc_defaults/.test(cz) &&
      !/_soc_defaults[^\n]*keep/.test(cz),
@@ -2938,6 +2971,23 @@ console.log('\n== 芯片预设 / 档位行渲染 ==');
   // 三方默认值一致性不能被预设悄悄破坏：包里的 conf 仍是通用默认
   ok(/^CPU_PCT_BIG=65$/m.test(conf) && /^CPU_PCT_LITTLE=65$/m.test(conf),
      '包里那份 conf 保持通用默认（芯片默认只在装机时改安装后的副本）');
+  ok(/^CPU_MIN_PCT_BIG=0$/m.test(conf) && /id="conf-min"/.test(html) &&
+     /buildMinRows/.test(html) && /MIN_KEYS/.test(html) &&
+     /CPU_MIN_PCT_BIG/.test(html),
+     'CPU 封顶里带进阶最低频二级菜单，默认 0=跟随系统');
+  ok(/^CAP_BACKEND=auto$/m.test(conf) && /CAP_BACKEND/.test(apiSrc) &&
+     /"CAP_BACKEND"/.test(csrc) && /CAP_BACKEND/.test(fs.readFileSync(MOD0 + '/docs/configuration.md', 'utf8')),
+     '封顶后端键：conf 默认 auto、api 放行、守护读取、文档有说明');
+  ok(/capbe=%s/.test(csrc) && /capbe_cfg=/.test(csrc) && /ppm_map=/.test(csrc),
+     'probe/status 输出封顶后端与 PPM 映射诊断');
+  ok(/ppm_restore_all|msm_restore_all/.test(csrc) && /be_handback/.test(csrc) &&
+     /be_restore_cleanup/.test(csrc),
+     'PPM/msm 第二道锁有交权与停用还原路径');
+  ok(/id="conf-io"/.test(html) && /exportConf/.test(html) &&
+     /importConf/.test(html) && /conf_import_many/.test(html) &&
+     /conf_keys/.test(html) && /conf_import_many/.test(apiSrc) &&
+     /cmd_conf_import_many/.test(apiSrc),
+     '维护页参数导入/导出：导出 conf_get，导入走原子 conf_import_many');
 
   /* 未检测到的档位：不摆滑杆、不显示百分比，只留名字 +（未检测到）。 */
   ok(/sl\.style\.display = absent \? 'none' : ''/.test(ui),
@@ -3596,8 +3646,32 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
   ok(/static const int kSmartFrac\[4\] = \{[\s\S]{0,220}?45,[\s\S]{0,100}?65,[\s\S]{0,100}?85,[\s\S]{0,100}?100/.test(csrc) &&
      /ceil \* kSmartFrac\[state\] \/ 100/.test(csrc),
      '智能目标 = 各簇天花板 ×45/65/85/100%');
+  ok(/long vendor_max;/.test(csrc) &&
+     /static long cap_from_pct/.test(csrc) &&
+     /want > p->vendor_max/.test(csrc) &&
+     /cap_from_pct\(&p\[i\], eff\)/.test(csrc) &&
+     /else if \(cfg\.strategy == 1\)[\s\S]{0,240}suppress_smooth_apply\(\)/.test(csrc) &&
+     /cur < g_pol\[i\]\.last_got/.test(csrc),
+     '百分比按硬件算完压回厂商原始上限；智能模式也应用风格限速，厂商压低后不抢写');
   ok(/int need = want > g_sm\.state \? 1 : 2;/.test(csrc),
      '智能升档 1 拍、降档 2 拍（突发不用等 10 秒）');
+  ok(/^APP_SWITCH_TIER=2$/m.test(conf) &&
+     /cfg_get\("APP_SWITCH_TIER"/.test(csrc) &&
+     /smart_boost_state/.test(csrc) &&
+     /clusters_below_half/.test(csrc) &&
+     /静置且各簇低于半帽，直接回空闲档/.test(csrc),
+     '切前台首拍预热到中载（可配 0-3）＋静置跨档快降');
+  ok(/p\[l\] != '\/' && p\[l\] != ':'/.test(csrc) &&
+     /分身\/多开\/工作资料常报/.test(csrc),
+     '前台包名解析剥离 :process 后缀（分身/多开），多用户 u10/u0a123 已覆盖');
+  ok(/grab_pkg_relaxed/.test(csrc) && /is_game_overlay/.test(csrc) &&
+     /gameassist|gamespace/.test(csrc),
+     '无 u0 的 ROM 与 ColorOS/realme 游戏助手浮窗也能取到真正的游戏包名');
+  ok(/int offline;/.test(csrc) &&
+     /节点暂不可读（核心离线\/热插拔）/.test(csrc) &&
+     /已恢复，重新压回封顶/.test(csrc) &&
+     /if \(p->offline\) return;/.test(csrc),
+     '核心离线/热插拔：静默跳过、回来自动重压，不刷错误日志');
   ok(/static int cluster_max_load\(/.test(csrc) &&
      /core_policy_of\(c\)/.test(csrc) && /sum\[pol\] \+= core_load_pct\(/.test(csrc) &&
      /cluster_max_load\(sum, cnt, MAX_CORES\)/.test(csrc),
@@ -3633,13 +3707,24 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /cfg\.sup_style \? 70 : 80/.test(csrc) &&
      /cfg\.sup_style \? 85 : 90/.test(csrc) &&
      /cfg\.sup_style \? 2 : 3/.test(csrc) &&
-     /scaling_cur_freq/.test(csrc) &&
-     /if \(cfg\.suppress\) return;[\s\S]{0,80}if \(!cfg\.cpu_min_lock\) return;/.test(csrc),
-     '动态封顶：1s 快拍、贴顶驱动三档天花板（地板 70/80、中间 85/90）+ 压制期间亮屏下限由压制接管');
+     /SUP_RELEASE_FLOOR/.test(csrc) &&
+     /SUP_RELEASE_MID/.test(csrc) &&
+     /SUP_LEVEL_HOLD_S/.test(csrc) &&
+     /cpu_busy_pct_ex\(1\)/.test(csrc) &&
+     /g_sup_floor_busy_n/.test(csrc) &&
+     /if \(cfg\.suppress && !user_any\) return;[\s\S]{0,140}if \(!cfg\.cpu_min_lock && !user_any\) return;/.test(csrc),
+     '动态封顶：1s 快拍、持续负载驱动三档天花板（地板 60 / 中间 75 才回升，换档后先稳 6s）');
   ok(/g_sup_up_n < 2/.test(csrc) &&
      /suppress_boost_apply\(\);[\s\S]{0,160}?g_sup_reapply_at[\s\S]{0,120}?suppress_uclamp_apply\(\)/.test(csrc) &&
      /g_sup_chg_pause = 0;[\s\S]{0,200}?suppress_boost_apply\(\)/.test(csrc),
-     '贴顶连续 2 拍才放一档；每个快拍补写 boost、拔电立刻补回，防系统恢复 input_boost_ms');
+     '连续高载才放一档；每个快拍补写 boost、拔电立刻补回，防系统恢复 input_boost_ms');
+  ok(/static void gov_rate_for\(int ri, int \*up, int \*down\)/.test(csrc) &&
+     /sav_up\[3\] = \{5000, 3000, 2000\}/.test(csrc) &&
+     /sav_dn\[3\] = \{500, 500, 500\}/.test(csrc) &&
+     /bal_up\[3\] = \{3000, 2000, 1500\}/.test(csrc) &&
+     /bal_dn\[3\] = \{800, 800, 500\}/.test(csrc) &&
+     /gov_rate_for\(ri, &up, &down\)/.test(csrc),
+     '升/降频限速随压制风格换表：均衡 3000/2000/1500-800/800/500，省电 5000/3000/2000-500');
   /* CPU 下限锁到底：钉死判定后不再无限退避循环。 */
   ok(/g_min_pfails\[i\] >= 9/.test(csrc) && /g_min_giveup\[i\] = 1/.test(csrc) &&
      /now - g_min_give_at < 1800/.test(csrc) && /cming=%d/.test(csrc),
@@ -3721,6 +3806,28 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /g_sup_level <= SUP_OPT \? SUP_MID_LV : SUP_FLOOR_LV/.test(csrc) &&
      /cpuset_apply_level\(prof\)/.test(csrc),
      'uclamp.max/cpuset/hispeed 随 profile 换档；sav 的 0 档也走均衡组');
+  ok(/static void bg_light_apply\(void\)/.test(csrc) &&
+     /background\/cpu\.uclamp\.max", 50/.test(csrc) &&
+     /system-background\/cpu\.uclamp\.max", 60/.test(csrc) &&
+     /bg_cpus_mask/.test(csrc) &&
+     /^BG_LIGHT=1$/m.test(conf) && /cfg\.bg_light = 1;/.test(csrc) &&
+     !/id="bg_light"/.test(html) &&
+     /cpuset_apply_level[\s\S]{0,300}g == 2\) continue/.test(csrc) &&
+     !/background\/cpu\.uclamp\.max", 50, 50, 50/.test(csrc),
+     '后台 uclamp.max（50/60）与 cpuset 收口常驻开启，不随封顶档位、页面无开关、不碰前台');
+  ok(/sys\/prctl\.h/.test(csrc) && /PR_SET_TIMERSLACK/.test(csrc) &&
+     /set_timer_slack\(3000000000UL\)/.test(csrc) &&
+     /set_timer_slack\(5000000000UL\)/.test(csrc) &&
+     /set_timer_slack\(50000UL\)/.test(csrc),
+     '熄屏/深空闲 timer slack 3s/5s，亮屏恢复 50µs');
+  ok(/static uint64_t file_stamp\(const char \*path\)/.test(csrc) &&
+     /st_mtim\.tv_nsec/.test(csrc) && /st_ino/.test(csrc) &&
+     /cfg_stamp\(void\) \{[\s\S]{0,40}return file_stamp\(CFG_FILE\)/.test(csrc),
+     '配置/名单重载用纳秒+size+inode 指纹，修同秒漏重载');
+  ok(/fsync\(fileno\(f\)\)/.test(csrc) &&
+     /for \(int pass = 0; pass < 2; pass\+\+\)/.test(csrc) &&
+     /\/scaling_min_freq/.test(csrc),
+     '账本 fsync，还原先 max/普通节点、最后 min');
   ok(/g_sup_umax_nodes\[0\]\.optimal == 85/.test(fs.readFileSync(MOD0 + '/src/test_real.c', 'utf8')) &&
      /g_sup_umax_nodes\[0\]\.floor == 60/.test(fs.readFileSync(MOD0 + '/src/test_real.c', 'utf8')) &&
      /cpuset_sysbg_lv2=0-1,5-6/.test(fs.readFileSync(MOD0 + '/src/test_real.c', 'utf8')),
@@ -3735,7 +3842,7 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /g_sup_stuck\[i\] = got;/.test(csrc) &&
      /nows - g_sup_stuck_at\[i\] < 600/.test(csrc),
      '压制边界：插电暂停（插电不封顶）+ 内核钳制 600s 退避不空转');
-  ok(/int fg_changed = fg\[0\] && strcmp\(fg, g_fg\) != 0;[\s\S]{0,260}?suppress_boost_apply\(\);/.test(csrc),
+  ok(/int fg_changed = fg\[0\] && strcmp\(fg, g_fg\) != 0;[\s\S]{0,2200}?suppress_boost_apply\(\);/.test(csrc),
      '切前台立即补写 boost/uclamp/限速，缩短冷启动拉频窗口');
   ok(/if \(cfg\.suppress && !a\.chg_on\) \{[\s\S]{0,700}suppress_tick\(\);/.test(csrc),
      '亮屏常态尾部切 1s 快拍（插电暂停）');
@@ -3861,7 +3968,7 @@ console.log('\n== restart 不吊住调用者 ==');
      && /doze\.before-policy3/.test(ds) && /音乐\/健康\/Scene/.test(ds),
      '音乐/健康/Scene 一次迁移出 Doze 白名单（不再整包常驻放行）');
   ok(/媒体应用 \$pkg 已临时加白/.test(ds)
-     && /ds_enter\(\)[\s\S]{0,1400}ds_media_playing/.test(ds),
+     && /ds_enter\(\)[\s\S]{0,3200}ds_media_playing/.test(ds),
      '正在播放的媒体进入深睡时临时加 Doze 白名单');
   ok(!/ds_conf_opt appops|ds_conf_opt doze/.test(ds)
      && /^DS_DOZE_ENABLED=1$/m.test(ds),
@@ -3949,7 +4056,6 @@ console.log('\n== restart 不吊住调用者 ==');
      && /dsactive=\$ds_active/.test(ds),
      'state 输出 dsw/dswc/wcsince/dsactive 四个键');
   ok(/SOCFREQ_DATA_DIR/.test(ds), '数据目录可由环境变量覆盖（台架与其他管理器装机）');
-  ok(!/若晴|elite_freq_cap/.test(ds), '脚本里不出现其他模块的标识');
 
   /* 开机看护与卸载还原。 */
   const svc = fs.readFileSync(MOD0 + '/service.sh', 'utf8');
@@ -4063,11 +4169,11 @@ console.log('\n== restart 不吊住调用者 ==');
   /* 版本：module.prop / 页面模块版本 / README / 守护二进制一起改；
      页面 #ver2 在 status 回来后会用守护的 SF_VERSION 覆盖，两边必须一致。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.2$/m.test(mp) && /^versionCode=20213$/m.test(mp),
-     'module.prop 是 V2.2 / 20213');
-  ok(/SF_VERSION "2\.2"/.test(csrc), '守护源码里的版本号同步到 2.2');
-  ok(/id="ver">V2\.2</.test(html) && /id="ver2">V2\.2</.test(html),
-     '页面：模块版本与守护版本都是 V2.2');
+  ok(/^version=V2\.3$/m.test(mp) && /^versionCode=23000$/m.test(mp),
+     'module.prop 是 V2.3 / 23000');
+  ok(/SF_VERSION "2\.3"/.test(csrc), '守护源码里的版本号同步到 2.3');
+  ok(/id="ver">V2\.3</.test(html) && /id="ver2">V2\.3</.test(html),
+     '页面：模块版本与守护版本都是 V2.3');
   ok(/\.sub\{[^}]*white-space:normal/.test(html),
      '标题副行允许换行，窄屏不会把版本号省略成 "…"');
   ok(/<html lang="zh-CN" data-style="glass">/.test(html),
@@ -4080,8 +4186,8 @@ console.log('\n== restart 不吊住调用者 ==');
      /\[data-style="glass"\] \.tabbar\{/.test(html) &&
      !/自适配动态限频|powerd/.test(html),
      '两套规则并存：玻璃只在 data-style=glass 下生效，注释不点名其它模块');
-  ok(/版本：V2\.2/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
-     'README 标题行同步到 V2.2');
+  ok(/版本：V2\.3/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
+     'README 标题行同步到 V2.3');
   {
     /* 管理器按 update.json 的 versionCode 提示更新，和 module.prop 漂移会
        出现"提示了但装不上"或"明明有新版却不提示"，两边必须同源。 */

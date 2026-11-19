@@ -39,7 +39,9 @@ games.base.txt         上次装机时"包里那份名单"的留档，只用于�
 socfreqd.lock          单实例锁（里面是 pid）
 socfreqd.log           日志
 state                  守护状态快照
-run/heartbeat          守护每轮写一次的心跳 mtime；看门狗 >90s 未更新才拉起
+run/heartbeat          软链 → /dev/soc_freqcap/heartbeat（心跳/状态在 tmpfs，避免每轮弄脏 F2FS）
+run/status             软链 → /dev/soc_freqcap/status（game/normal、前台、pid 等运行侧字段）
+run/*.saved            还原账本，必须留在 /data（崩溃/重启后靠它还原节点）
 pause                  存在 = 看门狗不再拉起守护
 labels.tsv             应用名缓存（pkg<TAB>apk路径<TAB>名字）：按 APK 路径判新装/升级
                        （路径里那个随机后缀每次更新都会变），所以不需要时间型过期
@@ -52,6 +54,8 @@ ds_stats.conf          上次深睡退出时的当次榜快照
 dsleep.log             深度睡眠日志（进出、被系统弹出、加白、拔电重置）
 override.conf          机型适配表（自动探测扑空时才按它兜底）。正常来源是装机脚本
                        从包里的 adapt/ 按 #match 命中后装进来的，第一行带 #from adapt/ 标记
+adapt.conf             装机按 #match（brand/model/soc/cores）选中的运行时适配表
+                       （cpuset_ / gov_ 行）；守护优先读它，没有才退回模块内 adapt/<soc>.conf
 icon/                  WebUI 图标缓存（<包名>.<APK 的 mtime>.<取图算法版>.b64
                        外加同名 .via 来源标记；改选图规则时把 api.sh 里的 ICON_ALGO +1，
                        老缓存里选错的那些会自然失效，不用叫用户手动清）
@@ -59,6 +63,8 @@ run/                   journal 与运行时文件
   nodes.saved            数值节点原值 + 权限
   perms.saved            只记权限（游戏期放宽到 666 的那批）
   govs.saved             调速器名字
+  ppm.saved              MTK PPM 每个 cluster 的原值（第二道锁）
+  msm.saved              高通 msm_performance 的原始整串（第二道锁）
   status                 首页读的状态
   boot_boost_until       开机满血窗口的截止秒（/proc/uptime 口径）
   dsleep.pid             深度睡眠守护的 pid（看护和停止都按它 + /proc cmdline 认人）
@@ -135,26 +141,14 @@ node src/test_contract.js src/socfreqd.c webroot/index.html \
 少传这七个里的任何一个都会在开头就报"参数不对"并打印用法（`exit 2`），
 不会跑到一半才崩在某个 `readFileSync(undefined)` 上。
 
-末尾还有一个**可选**参数：另一个模块的 `api.sh`，用来做相似度对比。
-它不随本包发布，所以没传就跳过那两条，其余检查照跑：
+末尾还有一个**可选**参数：同类接口脚本，用来做相似度对比。
+它不随本包发布，没传就跳过那两条，其余检查照跑：
 
 ```sh
-node src/test_contract.js ... src/icon.c src/ref_api_ktwo.sh
+node src/test_contract.js ... src/icon.c
 ```
 
-> 这一条当初是必填的，结果外部用户照着 README 跑，第一步就卡在
-> "参数不对"——要一个他手上根本没有的文件。别人的模块怎么装、
-> 叫什么名字，只有作者知道。这种参数不该挡在自检的门口。
-
-最后一个参数是**任意一份同类限频模块的接口脚本**，只用来跑一条断言：
-本模块的 `api.sh` 和它不能雷同到让人觉得是同一个东西。
-判据是剔除 `fi`/`done`/`}` 这类 shell 语法糖之后，双方还剩几行逐字相同
-（上限 3 行），以及最长公共连续片段（上限 20 字符）。
-
-**这一份基准文件需要你自己准备，不会随包分发**——
-把别人的代码再分发一次和抄它是一回事。随便找个同类限频模块的
-`api.sh` 传进去即可（第八个参数），找不到就不传，
-那两条相似度断言会打印 `skip` 后跳过，其余检查照常跑完。
+可选参数只用于本地相似度自检；不传就跳过，不影响其余检查。
 
 各项的具体条数以脚本最后一行打印的 `全部通过 (N)` 为准——
 这里不写死数字：每加一批断言它就会烂一次，写在文档里的数必然比代码旧。

@@ -181,7 +181,302 @@ static int sf_first_col_is(const char *path, const char *key) {
   return hit;
 }
 
+/* AC-1…AC-5、AC-7：直接测守护内函数。主机可在 -DSF_ALGO_ONLY 下只跑本函数。 */
+static void sf_test_smart_audit(void) {
+  printf("== 智能模式审计 AC-1…AC-5 / AC-7 ==\n");
+
+  /* AC-1 占用长间隙作废 */
+  {
+    int save_iv = cfg.interval;
+    cfg.interval = 5;
+    sf_check(cpu_busy_stale_ms(5) == 10000 && cpu_busy_stale_ms(2) == 10000 &&
+             cpu_busy_stale_ms(8) == 16000,
+             "AC-1：T=max(2×INTERVAL,10) 秒（默认 10s，INTERVAL=8 则 16s）", NULL);
+    sf_check(!cpu_busy_gap_stale(0, 5) && !cpu_busy_gap_stale(5000, 5) &&
+             !cpu_busy_gap_stale(10000, 5) && cpu_busy_gap_stale(10001, 5) &&
+             cpu_busy_gap_stale(-1, 5),
+             "AC-1：默认 T 下 Δt≤10s 不作废，>T 或回退作废", NULL);
+    sf_check(!cpu_busy_gap_stale(16000, 8) && cpu_busy_gap_stale(16001, 8),
+             "AC-1：INTERVAL=8 时 T=16s", NULL);
+
+    cfg.interval = 5;
+    g_cpu_prev_ok = 0;
+    sf_check(cpu_busy_must_rearm(1000) == 1, "AC-1：首次采样重立", NULL);
+    g_cpu_prev_ok = 1;
+    sf_check(cpu_busy_must_rearm(1000 + 5000) == 0, "AC-1：间隔=INTERVAL 不作废", NULL);
+    sf_check(cpu_busy_must_rearm(1000 + 10000) == 0, "AC-1：间隔=T 不作废", NULL);
+    sf_check(cpu_busy_must_rearm(1000 + 10001) == 1, "AC-1：间隔>T 作废并重立", NULL);
+    g_cpu_prev_ok = 1;
+    sf_check(cpu_busy_must_rearm(1000 + 10001 + 5000) == 0,
+             "AC-1：作废后下一拍正常间隔可用", NULL);
+
+    g_cpu_prev_ok = 0;
+    sf_check(cpu_busy_must_rearm(50000) == 1, "AC-1：再立一个基线供回退测试", NULL);
+    g_cpu_prev_ok = 1;
+    sf_check(cpu_busy_must_rearm(49999) == 1, "AC-1：时钟回退作废", NULL);
+
+    cfg.interval = 8;
+    g_cpu_prev_ok = 0;
+    cpu_busy_must_rearm(0);
+    g_cpu_prev_ok = 1;
+    sf_check(cpu_busy_must_rearm(16000) == 0 && cpu_busy_must_rearm(16001) == 1,
+             "AC-1：非默认 INTERVAL 的 must_rearm", NULL);
+    cfg.interval = save_iv;
+    g_cpu_prev_ok = 0;
+  }
+
+  /* AC-5 超大核档钳制 */
+  {
+    sf_check(smart_prime_state_step(3, 5) == 0 && smart_prime_state_step(0, 9) == 1 &&
+             smart_prime_state_step(1, 7) == 1 && smart_prime_state_step(1, 31) == 2 &&
+             smart_prime_state_step(2, 29) == 2 && smart_prime_state_step(2, 61) == 3 &&
+             smart_prime_state_step(3, 59) == 3 && smart_prime_state_step(-1, 5) == 0 &&
+             smart_prime_state_step(-1, -1) == -1,
+             "AC-5：超大核档位带迟滞，8/30/60 附近不来回抖", NULL);
+    sf_check(smart_effective_state(0, 3, 0, 2) == 0 &&
+             smart_effective_state(3, 3, 0, 2) == 3 &&
+             smart_effective_state(0, 3, 2, 2) == 2 &&
+             smart_effective_state(0, 3, 3, 2) == 3 &&
+             smart_effective_state(0, 3, 3, 1) == 3 &&
+             smart_effective_state(0, 2, -1, 2) == 2,
+             "AC-5：只有超大核按自己的档位向下钳，m=1/无样本不钳", NULL);
+    {
+      struct policy save[MAX_POLICY];
+      int save_n = g_npol;
+      memcpy(save, g_pol, sizeof g_pol);
+      memset(g_pol, 0, sizeof g_pol);
+      g_npol = 2;
+      g_pol[0].hw_max = 2000000; g_pol[0].pol_no = 0;
+      g_pol[1].hw_max = 3000000; g_pol[1].pol_no = 1;
+      int psum[4] = {50, 10, 0, 0}, pcnt[4] = {2, 2, 0, 0};
+      sf_check(prime_cluster_busy(psum, pcnt) == 5,
+               "AC-5：超大核占用取最高频 policy 的平均值", NULL);
+      pcnt[1] = 0;
+      sf_check(prime_cluster_busy(psum, pcnt) == -1,
+               "AC-5：超大核全部离线时占用无效", NULL);
+      memcpy(g_pol, save, sizeof g_pol);
+      g_npol = save_n;
+    }
+
+    int sv = g_sm.state, sbig = cfg.pct[0], slit = cfg.pct[3];
+    int save_prime = g_prime_state;
+    cfg.pct[0] = 46; cfg.pct[3] = 51;
+    g_sm.state = 3;
+    g_prime_state = 0;
+    sf_check(smart_pct_tier(0, 2) == 18 && smart_pct_tier(3, 2) == 51,
+             "AC-5：m=2 全局重载+超大核空闲：超大核按空闲 46×40%，主簇仍满幅", NULL);
+    g_prime_state = 2;
+    sf_check(smart_pct_tier(0, 2) == 36 && smart_pct_tier(3, 2) == 51,
+             "AC-5：m=2 超大核中载：46×80%，主簇仍满幅", NULL);
+    g_prime_state = -1;
+    sf_check(smart_pct_tier(0, 2) == 46,
+             "AC-5：无有效样本时 smart_pct_tier 不钳超大核", NULL);
+    g_sm.state = sv; cfg.pct[0] = sbig; cfg.pct[3] = slit;
+    g_prime_state = save_prime;
+  }
+
+  /* AC-2 亮屏/边沿预热、AC-3 熄屏收空闲、AC-4 STRATEGY 边沿 */
+  {
+    int save_st = cfg.strategy, save_tier = cfg.app_switch_tier;
+    int save_ok = g_cpu_prev_ok, save_fast = g_sm_fast_n;
+    int save_state = g_sm.state, save_pend = g_sm.pending, save_n = g_sm.pend_n;
+    int save_warm = g_smart_warmup;
+    char save_gstate[16];
+    snprintf(save_gstate, sizeof save_gstate, "%s", g_state);
+
+    cfg.strategy = 1;
+    cfg.app_switch_tier = 2;
+    g_sm.state = 3; g_sm.pending = 3; g_sm.pend_n = 2; g_sm_fast_n = 1;
+    g_cpu_prev_ok = 1;
+    snprintf(g_state, sizeof g_state, "normal");
+    sf_check(smart_on_enter_screen_off(1) == 1 && g_sm.state == 0 &&
+             g_sm.pending == 0 && g_sm.pend_n == 0 && g_sm_fast_n == 0 &&
+             g_cpu_prev_ok == 0,
+             "AC-3：smart+keep 进入熄屏收到空闲并重立基线", NULL);
+    int sbig = cfg.pct[0], slit = cfg.pct[3];
+    int save_prime = g_prime_state;
+    cfg.pct[0] = 46; cfg.pct[3] = 51;
+    g_prime_state = -1;
+    sf_check(smart_pct_tier(0, 2) == 18 && smart_pct_tier(3, 2) == 28,
+             "AC-3：收档后目标为空闲乘数（超大核 40% / 主簇 55%）", NULL);
+    cfg.pct[0] = sbig; cfg.pct[3] = slit;
+    g_prime_state = save_prime;
+
+    g_sm.state = 3;
+    sf_check(smart_on_enter_screen_off(0) == 0 && g_sm.state == 3,
+             "AC-3：非 keep（uncap）不把智能档收到空闲", NULL);
+    cfg.strategy = 0;
+    g_sm.state = 2;
+    sf_check(smart_on_enter_screen_off(1) == 0 && g_sm.state == 2,
+             "AC-3：STRATEGY=cap 不改智能状态", NULL);
+
+    cfg.strategy = 1;
+    cfg.app_switch_tier = 2;
+    g_sm.state = 0; g_sm.pending = 0; g_sm.pend_n = 0;
+    g_cpu_prev_ok = 1;
+    g_smart_warmup = 0;
+    snprintf(g_state, sizeof g_state, "normal");
+    smart_on_leave_screen_off();
+    sf_check(g_cpu_prev_ok == 0 && g_smart_warmup == 1,
+             "AC-2：亮屏重立基线并请求预热（同应用也走这条，不靠 fg_changed）", NULL);
+    g_test_busy = -1;
+    g_test_half = 0;
+    int ch = smart_tick(0);
+    sf_check(ch == 1 && g_sm.state == 2 && g_smart_warmup == 0,
+             "AC-2：预热只升不降到默认中载 2", NULL);
+
+    g_sm.state = 3; g_smart_warmup = 1;
+    g_test_busy = -1;
+    smart_tick(0);
+    sf_check(g_sm.state == 3, "AC-2：当前档更高则不压回", NULL);
+
+    cfg.app_switch_tier = 0;
+    g_sm.state = 0;
+    g_cpu_prev_ok = 1;
+    g_smart_warmup = 0;
+    smart_on_leave_screen_off();
+    sf_check(g_cpu_prev_ok == 0 && g_smart_warmup == 0,
+             "AC-2：APP_SWITCH_TIER=0 只重立、不预热", NULL);
+
+    cfg.app_switch_tier = 2;
+    snprintf(g_state, sizeof g_state, "game");
+    g_smart_warmup = 0;
+    g_sm.state = 0;
+    smart_on_leave_screen_off();
+    sf_check(g_smart_warmup == 0 && g_sm.state == 0,
+             "AC-2：游戏交权态亮屏不预热", NULL);
+    snprintf(g_state, sizeof g_state, "normal");
+
+    cfg.strategy = 0;
+    cfg.app_switch_tier = 2;
+    g_sm.state = 3; g_sm.pending = 2; g_sm.pend_n = 1; g_sm_fast_n = 2;
+    g_cpu_prev_ok = 1;
+    g_smart_warmup = 0;
+    smart_on_strategy_edge(1, 0);
+    sf_check(g_sm.state == 0 && g_sm.pending == 0 && g_sm.pend_n == 0 &&
+             g_sm_fast_n == 0 && g_cpu_prev_ok == 0 && g_smart_warmup == 0,
+             "AC-4：smart→cap 重置状态机和基线，不预热", NULL);
+
+    cfg.strategy = 1;
+    g_sm.state = 3; g_cpu_prev_ok = 1; g_smart_warmup = 0;
+    smart_on_strategy_edge(0, 1);
+    sf_check(g_sm.state == 0 && g_cpu_prev_ok == 0 && g_smart_warmup == 1,
+             "AC-4：cap→smart 重置后请求预热", NULL);
+    g_test_busy = -1; g_test_half = 0;
+    smart_tick(0);
+    sf_check(g_sm.state == 2, "AC-4：cap→smart 预热到中载", NULL);
+
+    cfg.strategy = save_st;
+    cfg.app_switch_tier = save_tier;
+    g_cpu_prev_ok = save_ok;
+    g_sm_fast_n = save_fast;
+    g_sm.state = save_state;
+    g_sm.pending = save_pend;
+    g_sm.pend_n = save_n;
+    g_smart_warmup = save_warm;
+    g_test_busy = -2;
+    g_test_half = -1;
+    snprintf(g_state, sizeof g_state, "%s", save_gstate);
+  }
+
+  /* AC-7 smart_tick 集成（可注入 busy / 预热 / 半帽，不改算法数字） */
+  {
+    int save_st = cfg.strategy, save_tier = cfg.app_switch_tier;
+    int save_state = g_sm.state, save_pend = g_sm.pending, save_n = g_sm.pend_n;
+    int save_fast = g_sm_fast_n, save_warm = g_smart_warmup;
+    int save_prime = g_prime_state;
+    cfg.strategy = 1;
+    cfg.app_switch_tier = 2;
+    g_smart_warmup = 0;
+    g_test_busy = -1;
+    g_test_half = 0;
+
+    g_sm.state = 0; g_sm.pending = 0; g_sm.pend_n = 3; g_sm_fast_n = 1;
+    sf_check(smart_tick_ex(0, 1, 0) == 1 && g_sm.state == 2 && g_sm.pend_n == 0 &&
+             g_sm_fast_n == 0,
+             "AC-7：预热只升不降，计数清零", NULL);
+    sf_check(smart_tick_ex(0, 1, 0) == 0 && g_sm.state == 2,
+             "AC-7：已在预热档则不降", NULL);
+
+    g_sm.state = 0; g_prime_state = 0;
+    smart_tick(1);
+    sf_check(g_sm.state == 2 && g_prime_state == -1,
+             "AC-7：预热拍不拿旧超大核档位钳制", NULL);
+
+    g_sm.state = 0; g_sm.pending = 0; g_sm.pend_n = 0; g_sm_fast_n = 0;
+    sf_check(smart_tick_ex(30, 0, 0) == 1 && g_sm.state == 2,
+             "AC-7：升档 1 拍", NULL);
+
+    g_sm.state = 2; g_sm.pending = 0; g_sm.pend_n = 0;
+    sf_check(smart_tick_ex(0, 0, 0) == 0 && g_sm.state == 2 && g_sm.pend_n == 1,
+             "AC-7：降档第 1 拍不切", NULL);
+    sf_check(smart_tick_ex(0, 0, 0) == 1 && g_sm.state == 0,
+             "AC-7：降档第 2 拍才切", NULL);
+
+    g_sm.state = 1; g_sm.pending = 2; g_sm.pend_n = 1;
+    sf_check(smart_tick_ex(10, 0, 0) == 0 && g_sm.state == 1 && g_sm.pend_n == 0,
+             "AC-7：want==state 清 pend_n", NULL);
+
+    g_sm.state = 2; g_sm.pending = 2; g_sm.pend_n = 0; g_sm_fast_n = 0;
+    sf_check(smart_tick_ex(0, 0, 1) == 0 && g_sm.state == 2 && g_sm_fast_n == 1,
+             "AC-7：静置快降第 1 拍计数", NULL);
+    sf_check(smart_tick_ex(0, 0, 1) == 1 && g_sm.state == 0 && g_sm_fast_n == 0,
+             "AC-7：静置快降连续 2 拍回 0 并复位计数", NULL);
+
+    g_sm.state = 2; g_sm_fast_n = 1;
+    smart_tick_ex(0, 0, 0);
+    sf_check(g_sm_fast_n == 0 && g_sm.state == 2,
+             "AC-7：快降条件不满足时计数清零", NULL);
+
+    cfg.strategy = save_st;
+    cfg.app_switch_tier = save_tier;
+    g_sm.state = save_state;
+    g_sm.pending = save_pend;
+    g_sm.pend_n = save_n;
+    g_sm_fast_n = save_fast;
+    g_smart_warmup = save_warm;
+    g_prime_state = save_prime;
+    g_test_busy = -2;
+    g_test_half = -1;
+  }
+
+  printf("\n== 前台包名兼容（无 u0 / 游戏助手浮窗）==\n");
+  {
+    char out[256] = {0};
+    sf_check(grab_pkg("  mCurrentFocus=Window{a1b2c3 com.relaxed.app/com.relaxed.app.Main}",
+                      out) == 0 && !strcmp(out, "com.relaxed.app"),
+             "没有 u0 的窗口行也能解析包名", out);
+    sf_check(grab_pkg("  mCurrentFocus=Window{a1b2c3 com.relaxed.app:remote/com.relaxed.app.Main}",
+                      out) == 0 && !strcmp(out, "com.relaxed.app"),
+             "无 u0 + :process 同时剥离", out);
+    sf_expect_pkg("游戏助手抢焦点：改看下面的游戏",
+                  "  mCurrentFocus=Window{a u0 com.coloros.gamespace/com.coloros.gamespace.Main}\n"
+                  "  mFocusedApp=AppWindowToken{b u0 com.tencent.tmgp.sgame/com.tencent.tmgp.sgame.Main}\n",
+                  "com.tencent.tmgp.sgame");
+    {
+      int save_n = g_npkg;
+      if (save_n < MAX_PKG) {
+        snprintf(g_pkgs[save_n], PKG_LEN, "%s", "com.tencent.tmgp.sgame");
+        g_npkg = save_n + 1;
+      }
+      sf_expect_pkg("录屏软件帧率录制：主 display 是浮窗，第二 display 是游戏",
+                    "  mCurrentFocus=Window{a u0 com.omarea.vtools/com.omarea.vtools.Main}\n"
+                    "  mFocusedApp=AppWindowToken{b u0 com.omarea.vtools/com.omarea.vtools.Main}\n"
+                    "  mTopFullscreenOpaqueWindowState=Window{c u0 com.omarea.vtools/com.omarea.vtools.Main}\n"
+                    "  Display #1\n"
+                    "  mCurrentFocus=Window{d u0 com.tencent.tmgp.sgame/com.tencent.tmgp.sgame.Main}\n",
+                    "com.tencent.tmgp.sgame");
+      g_npkg = save_n;
+    }
+  }
+}
+
 int sf_test_main(void) {
+#ifdef SF_ALGO_ONLY
+  printf("socfreqd 算法自检（主机）\n\n");
+  /* 复用下面智能模式回归块：跳过设备/图标用例。 */
+  goto sf_algo_tests;
+#endif
   printf("socfreqd 真实代码自检\n\n");
 
   printf("== 前台包名解析: mCurrentFocus ==\n");
@@ -270,13 +565,22 @@ int sf_test_main(void) {
                 "  mTopFullscreenOpaqueWindowState=Window{9f2b1a u0 com.mt.game/com.mt.game.Main}",
                 "com.mt.game");
 
+  sf_expect_pkg("小窗抢焦点但全屏游戏仍在",
+                "  mCurrentFocus=Window{a1b2c3 u0 com.tencent.mm/com.tencent.mm.ui.LauncherUI}\n"
+                "  mTopFullscreenOpaqueWindowState=Window{9f2b1a u0 com.tencent.tmgp.sgame/com.tencent.tmgp.sgame.Main}",
+                "com.tencent.tmgp.sgame");
+
   printf("\n== 解析失败必须报错而不是留垃圾 ==\n");
 
   sf_expect_fail("空输入", "");
   sf_expect_fail("无任何前台信息", "  mCurrentFocus=null\n  mFocusedApp=null\n");
   sf_expect_fail("窗口名无斜杠", "  mCurrentFocus=Window{a1b2c3 u0 StatusBar}\n");
-  sf_expect_fail("缺少用户号", "  mCurrentFocus=Window{com.foo.bar/com.foo.bar.Main}\n");
-  sf_expect_fail("用户号非数字", "  mCurrentFocus=Window{a1b2c3 uX com.foo.bar/com.foo.bar.Main}\n");
+  sf_expect_pkg("缺少用户号（无 u0）也按包名兜底",
+                "  mCurrentFocus=Window{com.foo.bar/com.foo.bar.Main}\n",
+                "com.foo.bar");
+  sf_expect_pkg("用户号形态不认识时仍按包名兜底",
+                "  mCurrentFocus=Window{a1b2c3 uX com.foo.bar/com.foo.bar.Main}\n",
+                "com.foo.bar");
 
   /* 超长行不得溢出 out[] */
   {
@@ -298,9 +602,21 @@ int sf_test_main(void) {
     sf_check(grab_pkg("  mCurrentFocus=Window{a1b2c3 u0 com.a.b/com.a.b.C}", out) == 0 &&
                  !strcmp(out, "com.a.b"),
              "成功返回 0", out);
+    sf_check(grab_pkg("  mCurrentFocus=Window{a1b2c3 u0 com.foo.bar:remote/com.foo.bar.Main}",
+                      out) == 0 && !strcmp(out, "com.foo.bar"),
+             "剥离 :process 后缀（分身/多开）", out);
+    sf_check(grab_pkg("  mCurrentFocus=Window{a1b2c3 u10 com.foo.bar/com.foo.bar.Main}",
+                      out) == 0 && !strcmp(out, "com.foo.bar"),
+             "多用户 u10 正常解析", out);
+    sf_check(grab_pkg("  mCurrentFocus=Window{a1b2c3 u0a123 com.clone.app/com.clone.app.Main}",
+                      out) == 0 && !strcmp(out, "com.clone.app"),
+             "u0a123（用户号+app id）正常解析", out);
+    sf_check(grab_pkg("  mCurrentFocus=Window{a1b2c3 u0 com.foo-bar/x}", out) != 0,
+             "包名里的非法字符仍然拒绝", NULL);
     sf_check(grab_pkg("  mCurrentFocus=null", out) != 0, "失败返回 -1", NULL);
     sf_check(grab_pkg("", out) != 0, "空行返回 -1", NULL);
-    sf_check(grab_pkg("u0 com.x.y/", out) != 0, "空包名返回 -1", NULL);
+    sf_check(grab_pkg("u0 com.x.y/", out) == 0 && !strcmp(out, "com.x.y"),
+             "没有前导空格的 u0 行也能解析", out);
   }
 
   printf("\n== 频点吸附 snap_from_list ==\n");
@@ -331,6 +647,59 @@ int sf_test_main(void) {
     sf_check(snap_from_list("", 1000000) == 1000000, "无频点表时返回原值", NULL);
     sf_check(snap_from_list("   \n\t ", 1000000) == 1000000, "空白频点表返回原值", NULL);
     sf_check(snap_from_list("abc def", 1000000) == 1000000, "非数字频点被忽略", NULL);
+    /* 合并 boost 表用：没有真实候选时返回 0，交给调用方回退原值 */
+    sf_check(snap_best_from_list(tbl, 1500000) == 1400000, "boost 合并：取最高可吸附点", NULL);
+    sf_check(snap_best_from_list("", 1000000) == 0, "boost 合并：空表返回 0", NULL);
+    sf_check(snap_best_from_list("2000000", 1500000) == 0, "boost 合并：高于目标不选", NULL);
+    /* PPM/msm 的 0 和 -1 都表示无限制，比较时当无穷大 */
+    sf_check(be_eff(-1) > be_eff(3000000) && be_eff(0) > be_eff(3000000),
+             "PPM 无限制值按无穷大比较", NULL);
+  }
+
+  printf("\n== M 簇封顶下限 ==\n");
+  {
+    struct policy p;
+    memset(&p, 0, sizeof p);
+    p.hw_max = 3532800;
+    p.tier = 3;
+    cfg.cap_floor_m = 1785600;
+    sf_check(cap_floor_apply(&p, 1500000) == 1785600,
+             "M 簇（tier3）低于下限时抬到 1.7856GHz", NULL);
+    sf_check(cap_floor_apply(&p, 2200000) == 2200000,
+             "高于下限不压", NULL);
+    p.tier = 0;
+    sf_check(cap_floor_apply(&p, 1500000) == 1500000,
+             "只作用于 M 簇，不动 L 簇", NULL);
+    cfg.cap_floor_m = 0;
+    sf_check(cap_floor_apply(&p, 1500000) == 1500000,
+             "0 = 不设下限", NULL);
+  }
+
+  printf("\n== 老 MTK GPU OPP 解析 ==\n");
+  {
+    const char *txt =
+        "[07] freq = 900000, volt = 75000\n"
+        "[06] freq = 800000, volt = 70000\n"
+        "garbage line\n";
+    long f[4] = {0};
+    int idx[4] = {0};
+    int n = mtk_old_parse_opp_text(txt, f, idx, 4);
+    sf_check(n == 2 && f[0] == 900000000L && idx[0] == 7 &&
+             f[1] == 800000000L && idx[1] == 6,
+             "解析频率（kHz→Hz）和 OPP 序号", NULL);
+    sf_check(mtk_old_parse_opp_text("", f, idx, 4) == 0,
+             "空 OPP 表返回 0", NULL);
+  }
+
+  printf("\n== msm 还原串 ==\n");
+  {
+    snprintf(g_msm_orig, sizeof g_msm_orig, "0:1996800");
+    char b[1024];
+    int ok = msm_build_restore(b, sizeof b);
+    sf_check(ok && strstr(b, "0:1996800") != NULL,
+             "原串里有的 CPU 用原值", b);
+    sf_check(strstr(b, "1:0") != NULL || !core_exists(1),
+             "原串里没有的 CPU 写 0 解除限制", b);
   }
 
   printf("\n== 分档 assign_pct（真实 sysfs 形态的临时目录） ==\n");
@@ -501,7 +870,7 @@ int sf_test_main(void) {
             "com.split.bad3=0/50\n"
             "com.split.bad4=70/50/60\n", w);
       fclose(w);
-      g_mode_mtime = -1;
+      g_mode_stamp = 0;
       n = load_app_modes_from(fp);
       char nb[16];
       snprintf(nb, sizeof nb, "实到 %d 条", n);
@@ -608,7 +977,7 @@ int sf_test_main(void) {
      * 这里不能再用 MODE_FILE 判——本机若真有用户数据，结果就取决于用户设没设过。
      * 所以指到一个确定不存在的临时路径。 */
     {
-      g_mode_mtime = -1;
+      g_mode_stamp = 0;
       int saved = g_nmode;
       g_nmode = 3;
       n = load_app_modes_from("/data/local/tmp/sf_app_modes.not.exist");
@@ -780,6 +1149,44 @@ int sf_test_main(void) {
     memcpy(g_pol, save, sizeof g_pol);
     g_npol = save_n;
     cfg.pct[0] = save_big; cfg.pct[3] = save_lit;
+  }
+
+  printf("\n== 核心离线/热插拔容错 ==\n");
+  {
+    struct policy save = g_pol[0];
+    int save_n = g_npol;
+    g_npol = 1;
+    memset(&g_pol[0], 0, sizeof g_pol[0]);
+    snprintf(g_pol[0].dir, sizeof g_pol[0].dir, "/data/local/tmp/sf_no_such_policy");
+    snprintf(g_pol[0].name, sizeof g_pol[0].name, "fake");
+    g_pol[0].cap = 1000000;
+    caps_patrol(0);
+    sf_check(g_pol[0].offline == 1, "节点读不到时标记离线，静默跳过", NULL);
+    caps_patrol(0);
+    sf_check(g_pol[0].offline == 1, "离线期间重复巡检不重复刷状态", NULL);
+
+    struct policy realp[MAX_POLICY];
+    int nr = detect_policies_raw(realp);
+    if (nr > 0) {
+      g_pol[0] = realp[0];
+      g_pol[0].offline = 1;
+      char mp[256];
+      snprintf(mp, sizeof mp, "%s/scaling_max_freq", g_pol[0].dir);
+      long cur = read_num(mp);
+      if (cur > 0) {
+        g_pol[0].cap = cur;
+        g_pol[0].last_cap = cur;
+        g_pol[0].last_got = cur;
+        caps_patrol(0);
+        sf_check(g_pol[0].offline == 0, "节点恢复后自动清离线并重新接管", NULL);
+      } else {
+        printf("  skip 节点恢复自检（读不到真实 policy）\n");
+      }
+    } else {
+      printf("  skip 节点恢复自检（探测不到 policy）\n");
+    }
+    g_pol[0] = save;
+    g_npol = save_n;
   }
 
   printf("\n== 交权态不抢回节点（游戏被实时偏移打断）==\n");
@@ -1342,6 +1749,9 @@ int sf_test_main(void) {
     }
   }
 
+#ifdef SF_ALGO_ONLY
+sf_algo_tests:
+#endif
   /* 智能模式：按各簇自己的天花板取比例，而不是写死 65/60。 */
   {
     sf_check(smart_pct_of(0, 50) == 22 && smart_pct_of(1, 50) == 32 &&
@@ -1349,12 +1759,60 @@ int sf_test_main(void) {
              "智能目标 = 天花板 × 45/65/85/100%", NULL);
     sf_check(smart_pct_of(2, 1) == 1 && smart_pct_of(0, 100) == 45,
              "天花板极小时仍至少 1%，100% 上限按比例", NULL);
+    /* m==2：主簇上浮 55/75/90、超大核收紧 40/60/80，重载都吃满天花板。 */
+    int sv = g_sm.state;
+    int sbig = cfg.pct[0], slit = cfg.pct[3];
+    cfg.pct[0] = 46; cfg.pct[3] = 51;
+    g_sm.state = 0;
+    sf_check(smart_pct_tier(3, 2) == 28 && smart_pct_tier(0, 2) == 18,
+             "双簇空闲：主簇 51×55%=28%，超大核 46×40%=18%", NULL);
+    g_sm.state = 1;
+    sf_check(smart_pct_tier(3, 2) == 38 && smart_pct_tier(0, 2) == 27,
+             "双簇轻载：主簇 75%、超大核 60%", NULL);
+    g_sm.state = 2;
+    sf_check(smart_pct_tier(3, 2) == 45 && smart_pct_tier(0, 2) == 36,
+             "双簇中载：主簇 90%、超大核 80%", NULL);
+    g_sm.state = 3;
+    sf_check(smart_pct_tier(3, 2) == 51 && smart_pct_tier(0, 2) == 46,
+             "双簇重载：都吃满天花板", NULL);
+    g_sm.state = 0;
+    cfg.pct[3] = 60;
+    sf_check(smart_pct_tier(3, 3) == 27 && smart_pct_tier(0, 3) == 20,
+             "三簇仍走通用 45%：60×45%=27%，46×45%=20%", NULL);
+    g_sm.state = sv;
+    cfg.pct[0] = sbig; cfg.pct[3] = slit;
+    sf_check(gov_rate_idx(0) == 0 && gov_rate_idx(1) == 1 &&
+             gov_rate_idx(2) == 1 && gov_rate_idx(3) == 2,
+             "限速分簇：BIG 单独、MID2/MID 共用、LITTLE 单独", NULL);
+    {/* 后台 cpuset 掩码解析与压缩：非法/空串一律不动节点。 */
+      unsigned char pl[MAX_CORES], fm[MAX_CORES];
+      char out[32];
+      int pok = cpulist_parse("0-2,5", pl, MAX_CORES);
+      sf_check(pok && pl[0] && pl[1] && pl[2] && pl[5] && !pl[3] && !pl[4],
+               "cpulist 解析：0-2,5 → 0/1/2/5", NULL);
+      memset(fm, 0, sizeof fm);
+      fm[0] = fm[1] = fm[2] = fm[5] = 1;
+      cpulist_format(fm, MAX_CORES, out, sizeof out);
+      sf_check(!strcmp(out, "0-2,5"), "cpulist 输出压缩成 0-2,5", NULL);
+      sf_check(cpulist_parse("", pl, MAX_CORES) == 0 &&
+               cpulist_parse("0-7\r", pl, MAX_CORES) == 0 &&
+               cpulist_parse("5-3", pl, MAX_CORES) == 0 &&
+               cpulist_parse("0-99", pl, MAX_CORES) == 0,
+               "空串/回车/倒序/越界都拒绝，不猜掩码", NULL);
+    }
     sf_check(smart_target(0, 8) == 1 && smart_target(0, 30) == 2 &&
              smart_target(0, 60) == 3,
              "智能升档阈值 8/30/60", NULL);
     sf_check(smart_target(1, 4) == 0 && smart_target(1, 5) == 1 &&
              smart_target(2, 24) == 1 && smart_target(3, 54) == 2,
              "退档迟滞：light 4%、medium 25%、heavy 55%", NULL);
+    sf_check(smart_boost_state(0, 2) == 2 && smart_boost_state(3, 2) == 3 &&
+             smart_boost_state(1, 0) == 1,
+             "切前台预热只升不降，0 = 不预热", NULL);
+    sf_check(freq_below_half(500, 1000) && !freq_below_half(501, 1000) &&
+             !freq_below_half(1000, 1000) && !freq_below_half(0, 1000) &&
+             !freq_below_half(100, 0),
+             "快降判据：严格低于半帽才成立，离线/无帽不算", NULL);
     int csum[3] = {100, 60, 0}, ccnt[3] = {2, 6, 0};
     sf_check(cluster_max_load(csum, ccnt, 3) == 50,
              "逐簇取最忙：两颗大核里一颗满载=50%", NULL);
@@ -1363,6 +1821,36 @@ int sf_test_main(void) {
              "六颗小核全忙=100%，空簇不参与", NULL);
     /* 动态封顶：三档天花板（最优解 / 中间 / 地板）。 */
     g_sup_level = 0; sf_check(sup_pct() == 100, "封顶档 0 = 最优解本身", NULL);
+    {
+      struct policy p;
+      memset(&p, 0, sizeof p);
+      snprintf(p.dir, sizeof p.dir, "/data/local/tmp/sf_no_policy");
+      p.hw_max = 4320000; p.hw_min = 1017600; p.cap = 1987200; p.tier = 0;
+      int sv = g_sup_level, ss = cfg.sup_style;
+      cfg.sup_style = 1; g_sup_level = SUP_FLOOR_LV;
+      long c1 = sup_cap_for(&p);
+      cfg.sup_style = 0;
+      long c2 = sup_cap_for(&p);
+      sf_check(c1 > p.hw_min && c2 > p.hw_min,
+               "动态压制按百分比收超大核，不再无条件钉到硬件最低", NULL);
+      g_sup_level = sv; cfg.sup_style = ss;
+    }
+    {
+      struct policy p;
+      int save = cfg.min_pct[0];
+      memset(&p, 0, sizeof p);
+      snprintf(p.dir, sizeof p.dir, "/data/local/tmp/sf_no_policy");
+      p.hw_max = 1000000; p.hw_min = 100000; p.cap = 800000; p.tier = 0;
+      cfg.min_pct[0] = 0;
+      sf_check(user_min_for(&p) == 0, "最低频 0 = 跟随系统", NULL);
+      cfg.min_pct[0] = 50;
+      sf_check(user_min_for(&p) == 500000, "最低频 50% → 500MHz", NULL);
+      cfg.min_pct[0] = 90;
+      sf_check(user_min_for(&p) == p.cap, "最低频不高于当前封顶", NULL);
+      cfg.min_pct[0] = 1;
+      sf_check(user_min_for(&p) == p.hw_min, "最低频不低于硬件最低", NULL);
+      cfg.min_pct[0] = save;
+    }
     cfg.sup_style = 0; g_sup_level = SUP_MID_LV;
     sf_check(sup_pct() == 90, "均衡中间档 = 90%", NULL);
     g_sup_level = SUP_FLOOR_LV;
@@ -1471,6 +1959,14 @@ int sf_test_main(void) {
     cfg.ad.th_step = save_step;
     cfg.ad.down_max = save_down;
   }
+
+  sf_test_smart_audit();
+
+#ifdef SF_ALGO_ONLY
+  printf("\n%s\n", sf_fails ? "有失败项" : "全部通过");
+  printf("通过 %d，失败 %d\n", sf_passes, sf_fails);
+  return sf_fails ? 1 : 0;
+#endif
 
   printf("\n%s\n", sf_fails ? "有失败项" : "全部通过");
   printf("通过 %d，失败 %d\n", sf_passes, sf_fails);

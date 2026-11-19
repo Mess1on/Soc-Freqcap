@@ -208,7 +208,7 @@ const host = s.get('p-th');
 ok(host.children.length === G.th.opts.length + 1,
    '温控那排按钮数 = 档位 + 「自己定的值」', '实际 ' + host.children.length);
 const labels = host.children.map(c => c.textContent);
-ok(labels[1] === '适中（推荐）' && labels[labels.length - 1] === '自己定的值',
+ok(labels[1] === '适中（默认）' && labels[labels.length - 1] === '自己定的值',
    '按钮上写的是行为，不是参数名', labels.join(' / '));
 // 模拟点第三档（尽量保性能）
 host.children[2].onclick();
@@ -292,7 +292,7 @@ ok(/\.seg\.fill button\{[^}]*flex:1 1 0/.test(html),
   }
 }
 
-/* ── 推荐预设按钮：必须"点得动" ─────────────────────────────────
+/* ── 省电 / 均衡预设按钮：必须"点得动" ─────────────────────────
    预设只填控件、不写盘：和滑杆一样必须按「保存并生效」。这里验证
    点一下之后控件被填上、diff 写出来，而且没有调用任何写接口。 */
 {
@@ -301,11 +301,11 @@ ok(/\.seg\.fill button\{[^}]*flex:1 1 0/.test(html),
   const calls = [], toasts = [];
   const mk = (v) => ({ value: v, setAttribute() {}, getAttribute() { return null; } });
   const ctl = {
-    'CPU_PCT_BIG': mk('46'), 'CPU_PCT_MID2': mk('64'),
-    'CPU_PCT_MID': mk('66'), 'CPU_PCT_LITTLE': mk('46'),
-    'gpu_pct': mk('45'), 'th_high': mk('70'), 'th_low': mk('64'),
+    'CPU_PCT_BIG': mk('62'), 'CPU_PCT_MID2': mk('64'),
+    'CPU_PCT_MID': mk('66'), 'CPU_PCT_LITTLE': mk('68'),
+    'gpu_pct': mk('46'), 'th_high': mk('70'), 'th_low': mk('64'),
     'psi_gain': mk('10'), 'th_max': mk('15'),
-    'psi_adapt': { checked: true }, 'chg_uncap': { checked: true },
+    'psi_adapt': { checked: true }, 'chg_uncap': { checked: false },
     'th_cap': { checked: true }, 'chg_pct': mk('85'),
     'suppress': { checked: false },
     'p-sup': { value: 'bal' }, 'gov_up_us': mk('1000'), 'gov_down_us': mk('1000'),
@@ -323,59 +323,56 @@ ok(/\.seg\.fill button\{[^}]*flex:1 1 0/.test(html),
   };
   vm.createContext(ctx);
   if (src) vm.runInContext(src, ctx);
-  vm.runInContext("PRESET = {none:'0', title:'测试', big:'80', mid2:'72', mid:'67', little:'75', gpu:'35', th_high:'75', th_low:'68', psi_gain:'10'};", ctx);
-  if (src && typeof ctx.applyChipPreset === 'function') {
-    ctx.applyChipPreset();
-    ok(ctl['CPU_PCT_BIG'].value === '80' && ctl['gpu_pct'].value === '35' &&
-       ctl['th_high'].value === '75' && ctl['th_low'].value === '68',
-       '套用后只改控件，不直接写配置', 'big=' + ctl['CPU_PCT_BIG'].value);
-    ok(ctl['th_cap'].checked === false && ctl['psi_adapt'].checked === false &&
-       ctl['chg_uncap'].checked === true && ctl['chg_pct'].value === '100',
-       '推荐预设随落三条策略：插电不封顶/发热不主动降/PSI 不放宽');
-    ok(calls.length === 0, '没有任何后端写入调用（必须按保存才落盘）',
-       calls.join(','));
-    ok(ctl['preset-diff'].style.display === '' &&
-       /尚未保存/.test(ctl['preset-diff'].textContent) &&
-       /超大核 46→80%/.test(ctl['preset-diff'].textContent),
-       'diff 写明改了哪些值和"尚未保存"', ctl['preset-diff'].textContent);
-  } else {
-    ok(false, 'applyChipPreset 能从页面里抠出来执行');
-  }
-  if (src && typeof ctx.applySmoothPreset === 'function') {
-    ctx.applySmoothPreset();
-    ok(ctl['CPU_PCT_BIG'].value === '90' && ctl['CPU_PCT_LITTLE'].value === '85' &&
-       ctl['CPU_PCT_MID2'].value === '82' && ctl['CPU_PCT_MID'].value === '77',
-       '偏流畅 = 推荐每簇 +10%（80→90 / 75→85 / 72→82 / 67→77）',
-       [ctl['CPU_PCT_BIG'].value, ctl['CPU_PCT_LITTLE'].value].join('/'));
-    ok(ctl['gpu_pct'].value === '35',
-       '偏流畅不动 GPU（仍是推荐预设填入的 35%）', ctl['gpu_pct'].value);
+  vm.runInContext("PRESET = {none:'0', title:'测试', " +
+    "sav_big:'46', sav_mid:'45', sav_little:'76', sav_gpu:'25', " +
+    "bal_big:'60', bal_mid:'60', bal_little:'97', bal_gpu:'32', " +
+    "th_high:'75', th_low:'68', psi_gain:'10'};", ctx);
+  if (src && typeof ctx.applySaverPreset === 'function') {
+    ctx.applySaverPreset();
+    ok(ctl['CPU_PCT_BIG'].value === '46' && ctl['CPU_PCT_MID'].value === '45' &&
+       ctl['CPU_PCT_LITTLE'].value === '76' && ctl['gpu_pct'].value === '25',
+       '省电预设填入 CPU/GPU 控件', [ctl['CPU_PCT_BIG'].value, ctl['gpu_pct'].value].join('/'));
     ok(ctl['th_cap'].checked === false && ctl['psi_adapt'].checked === false &&
        ctl['chg_uncap'].checked === true && ctl['chg_pct'].value === '100' &&
        ctl['p-strategy'].value === 'cap',
-       '偏流畅不碰温控/PSI/充电/调度');
-    ok(calls.length === 0, '偏流畅也不直接写盘（必须按保存才落盘）', calls.join(','));
-    ok(/偏流畅预设已填入/.test(ctl['preset-diff'].textContent) &&
+       '两档都随落策略：插电不封顶/发热不主动降/PSI 不放宽/调度回限频');
+    ok(ctl['suppress'].checked === true && ctl['p-sup'].value === 'sav',
+       '省电预设打开动态封顶并选省电风格（静置 960MHz）');
+    ok(calls.length === 0, '省电预设没有任何后端写入（必须按保存才落盘）', calls.join(','));
+    ok(/省电预设已填入/.test(ctl['preset-diff'].textContent) &&
        /尚未保存/.test(ctl['preset-diff'].textContent) &&
-       /超大核 80→90%/.test(ctl['preset-diff'].textContent) &&
-       !/GPU \d+→/.test(ctl['preset-diff'].textContent),
-       '偏流畅 diff 只列 CPU，不动 GPU', ctl['preset-diff'].textContent);
+       /超大核 62→46%/.test(ctl['preset-diff'].textContent),
+       '省电 diff 写明改了哪些值和"尚未保存"', ctl['preset-diff'].textContent);
+  } else {
+    ok(false, 'applySaverPreset 能从页面里抠出来执行');
+  }
+  if (src && typeof ctx.applyBalancedPreset === 'function') {
+    ctx.applyBalancedPreset();
+    ok(ctl['CPU_PCT_BIG'].value === '60' && ctl['CPU_PCT_MID'].value === '60' &&
+       ctl['CPU_PCT_LITTLE'].value === '97' && ctl['gpu_pct'].value === '32',
+       '均衡预设填入 CPU/GPU 控件', [ctl['CPU_PCT_BIG'].value, ctl['gpu_pct'].value].join('/'));
+    ok(/均衡预设已填入/.test(ctl['preset-diff'].textContent) &&
+       /超大核 46→60%/.test(ctl['preset-diff'].textContent),
+       '均衡 diff 与省电分开', ctl['preset-diff'].textContent);
+    ok(ctl['suppress'].checked === true && ctl['p-sup'].value === 'bal',
+       '均衡预设保持动态封顶并切回均衡风格');
     const before = [ctl['CPU_PCT_BIG'].value, ctl['gpu_pct'].value,
                     ctl['psi_adapt'].checked, ctl['p-strategy'].value].join('/');
-    ctx.applySmoothPreset();
+    ctx.applyBalancedPreset();
     ok([ctl['CPU_PCT_BIG'].value, ctl['gpu_pct'].value,
         ctl['psi_adapt'].checked, ctl['p-strategy'].value].join('/') === before &&
-       /已经是偏流畅预设/.test(ctl['preset-diff'].textContent),
-       '连点两次偏流畅结果不变（幂等）', ctl['preset-diff'].textContent);
-    /* 推荐预设没有的档位（例如 2 簇机的 mid/mid2）不写入。 */
-    vm.runInContext("PRESET = {none:'0', big:'80', little:'75', gpu:'35'};", ctx);
+       /已经是均衡预设/.test(ctl['preset-diff'].textContent),
+       '连点两次均衡结果不变（幂等）', ctl['preset-diff'].textContent);
+    /* 预设没有的档位（例如 2 簇机的 mid/mid2）不写入。 */
+    vm.runInContext("PRESET = {none:'0', sav_big:'46', sav_little:'51', sav_gpu:'37', bal_big:'62', bal_little:'78', bal_gpu:'46'};", ctx);
     ctl['CPU_PCT_MID'].value = '66';
     ctl['CPU_PCT_MID2'].value = '64';
     ctl['preset-diff'].textContent = '';
-    ctx.applySmoothPreset();
+    ctx.applySaverPreset();
     ok(ctl['CPU_PCT_MID'].value === '66' && ctl['CPU_PCT_MID2'].value === '64',
        '缺档位时不改中间档', ctl['preset-diff'].textContent);
   } else {
-    ok(false, 'applySmoothPreset 能从页面里抠出来执行');
+    ok(false, 'applyBalancedPreset 能从页面里抠出来执行');
   }
 }
 

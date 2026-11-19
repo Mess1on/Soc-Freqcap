@@ -38,6 +38,12 @@ if (!pctKeys) {
   console.log('  FAIL 页面里找不到 PCT_KEYS（paintHw 依赖它）');
   process.exit(1);
 }
+const minKeys = html.match(/const MIN_KEYS = \[[\s\S]*?\n\];/);
+const cpuCapFn = html.match(/function cpuCapKHz\(key, pct\)\{[\s\S]*?\n\}/);
+if (!minKeys) {
+  console.log('  FAIL 页面里找不到 MIN_KEYS（paintHw 依赖它）');
+  process.exit(1);
+}
 
 function mkEl(tag) {
   const el = {
@@ -61,6 +67,8 @@ function sandbox() {
   };
   vm.createContext(ctx);
   vm.runInContext(pctKeys[0], ctx);
+  vm.runInContext(minKeys[0], ctx);
+  if (cpuCapFn) vm.runInContext(cpuCapFn[0], ctx);
   vm.runInContext(chunk[0], ctx);
   return { ctx, get };
 }

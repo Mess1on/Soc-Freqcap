@@ -429,7 +429,7 @@ ok "$DS_FREEZE_ENABLED" "0" "freeze 恒为 0"
 : > "$STATE/calls"
 ds_active=0; ds_added=""; ds_white_seen=""; ds_doze_sent=0; ds_screen_off_ts=0
 ds_enter
-ok "$(grep -c 'whitelist +com.test.sms' "$STATE/calls")" "1" "开着深睡就照常加白"
+ok "$(grep -c 'whitelist +com.test.sms' "$STATE/calls")" "2" "开着深睡就照常加白（dumpsys + cmd 双写）"
 ds_active=1; ds_doze_sent=1
 : > "$STATE/calls"
 ds_exit "台架-开" >/dev/null 2>&1

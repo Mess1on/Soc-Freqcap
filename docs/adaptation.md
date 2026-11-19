@@ -45,12 +45,17 @@ GPU 的频率表和上限节点也是各自探不到才回落到 `gpu-freqs` / `
 
 ```
 adapt/PJZ110.conf:
-  #match brand=OnePlus        # 三种键都要命中才算命中
+  #match brand=OnePlus        # 四种键都要命中才算命中
   #match model=PJZ110
   #match soc=SM8750           # 比对 ro.soc.model，取不到时退回 ro.board.platform，按包含匹配
+  #match cores=8              # 按 /sys/devices/system/cpu/cpuN 个数，精确匹配
   cpu-dir /sys/devices/system/cpu/cpufreq/policy0 3532800
   gpu-max /sys/class/devfreq/1a00000.qcom,kgsl-3d0/max_freq
 ```
+
+多个文件都命中时取 `#match` 条数最多的那份（更具体），同分取先命中的。
+同 SoC 不同核数的机型用 `cores=` 区分，例如 Find N5 是 SM8750 但只有 7 核，
+单独走 `adapt/sm8750_7core.conf`；8 核的 SM8750 仍走 `adapt/sm8750.conf`。
 
 三条规矩都有台架盯着（`src/test_install_merge.sh` 场景 8）：
 

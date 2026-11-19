@@ -35,6 +35,8 @@ VENDORS="$DATA/vendors.txt"
 LOG="$DATA/socfreqd.log"
 RUN="$DATA/run"
 PAUSE="$DATA/pause"
+SAFEMODE="$DATA/safemode"
+BOOT_GUARD="$DATA/boot_guard"
 STATUS="$RUN/status"
 BIN="$ROOT/socfreqd"          # 二进制仍然在模块目录里（那是解包出来的，不是用户数据）
 
@@ -97,7 +99,7 @@ conf_read() {
 }
 
 # 可写的键。区间在 cfg_set 里按键名分支，键增删时这里必须同步。
-KEYS='STRATEGY INTERVAL GAME_GRACE_SEC SUP_STYLE SUPPRESS GOV_UP_US GOV_DOWN_US CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE GPU_PCT GPU_MIN_LOCK GPU_BOOST_OFF BIG_MIN CPU_MIN_LOCK SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT'
+KEYS='STRATEGY APP_SWITCH_TIER INTERVAL GAME_GRACE_SEC SUP_STYLE SUPPRESS GOV_UP_BIG GOV_DOWN_BIG GOV_UP_MID GOV_DOWN_MID GOV_UP_LITTLE GOV_DOWN_LITTLE CPU_PCT_BIG CPU_PCT_MID2 CPU_PCT_MID CPU_PCT_LITTLE CPU_MIN_PCT_BIG CPU_MIN_PCT_MID2 CPU_MIN_PCT_MID CPU_MIN_PCT_LITTLE GPU_PCT GPU_MIN_LOCK GPU_BOOST_OFF BG_LIGHT BIG_MIN CPU_MIN_LOCK CPU_FLOOR_M CAP_BACKEND SCREEN_UNCAP SCREEN_POLICY SOFF_INTERVAL SCREEN_STATE_PATH IDLE_CURRENT_MA IDLE_HOLD_CYCLE IDLE_INTERVAL WAKE_DELTA_MA BATT_CURRENT_PATH BATT_CURRENT_UNIT BOOT_FULL_S PSI_ADAPT PSI_GAIN PSI_STEP PSI_HOLD PSI_BACK TH_CAP TH_HIGH TH_LOW TH_STEP TH_MAX TH_BACK CHG_UNCAP CHG_PCT ADAPT_UP_MAX ADAPT_DOWN_MAX BATT_STEP BATT_LOW BATT_LOW_CUT BATT_CRIT BATT_CRIT_CUT'
 
 is_key() {
   for k in $KEYS; do [ "$1" = "$k" ] && return 0; done
@@ -107,7 +109,8 @@ is_key() {
 # 只接受十进制整数，位数封顶 5（100000 以上没有意义，顺带挡畸形输入）
 is_uint() {
   case "$1" in ''|*[!0-9]*) return 1 ;; esac
-  [ "${#1}" -gt 5 ] && return 1
+  # CPU_FLOOR_M 是 Hz，七位；其它键各自还有更窄的范围检查。
+  [ "${#1}" -gt 8 ] && return 1
   return 0
 }
 
@@ -211,7 +214,7 @@ st_status() {
   _st=""
   for _f in "$STATUS" "$ROOT/run/status"; do
     [ -f "$_f" ] || continue
-    _st=$(grep -E '^(state|screen|soff|soff_keep|game_pkg|reason|fg|app_mode|app_big|app_little|app_gpu|pid|dlt|batt|bcut|stall|psib|avg10|temp|chg|psi|th|psifrz|strat|smart|still|sup|tick|fgprobe|gminw|cminw|cminf|cminpaused|cming)=' "$_f" 2>/dev/null)
+    _st=$(grep -E '^(state|screen|soff|soff_keep|game_pkg|reason|fg|app_mode|app_big|app_little|app_gpu|pid|capbe|dlt|batt|bcut|stall|psib|avg10|temp|chg|psi|th|psifrz|strat|smart|prime|still|sup|supup|supfall|supminn|supbusy|supfloor|supstuck0|supstuck1|supstuck2|supstuck3|tick|fgprobe|gminw|cminw|cminf|cminpaused|cming)=' "$_f" 2>/dev/null)
     [ -n "$_st" ] && break
   done
   if [ -n "$_st" ]; then
@@ -220,8 +223,9 @@ st_status() {
     # 状态文件还没生成时也要给出可解析的字段。
     # 前端拿到缺字段的对象能显示"未运行"，拿到空串只会白屏。
     # 实时偏移那几项给 -1：读不到不等于 0，页面据此不显示"温控降了 0 档"这种假话。
-    printf 'state=unknown\nscreen=on\nsoff=30\nsoff_keep=0\ngame_pkg=-\nreason=-\nfg=-\napp_mode=\napp_big=0\napp_little=0\napp_gpu=\npid=\ndlt=-1\nbatt=-1\nbcut=0\nstall=-1\npsib=-1\navg10=-1\ntemp=-1\nchg=-1\npsi=-1\nth=-1\npsifrz=0\ncminw=0\ncminf=0\ncminpaused=0\n'
+    printf 'state=unknown\nscreen=on\nsoff=30\nsoff_keep=0\ngame_pkg=-\nreason=-\nfg=-\napp_mode=\napp_big=0\napp_little=0\napp_gpu=\npid=\ndlt=-1\nbatt=-1\nbcut=0\nstall=-1\npsib=-1\navg10=-1\ntemp=-1\nchg=-1\npsi=-1\nth=-1\npsifrz=0\ncminw=0\ncminf=0\ncminpaused=0\nsmart=-1\nprime=-1\n'
   fi
+  printf 'safemode=%s\n' "$([ -f "$SAFEMODE" ] && echo 1 || echo 0)"
 }
 
 st_log() {
@@ -376,6 +380,8 @@ cfg_set() {
     case "$_v" in ua|ma) ;; *) die "BAD_UNIT" ;; esac
   elif [ "$_k" = SUP_STYLE ]; then
     case "$_v" in bal|sav) ;; *) die "BAD_SUPSTYLE" ;; esac
+  elif [ "$_k" = CAP_BACKEND ]; then
+    case "$_v" in auto|sysfs|ppm|msm) ;; *) die "BAD_BACKEND" ;; esac
   else
     is_key "$_k" || die "BAD_KEY"
     is_uint "$_v" || die "NOT_NUM"
@@ -384,10 +390,13 @@ cfg_set() {
     case "$_k" in
       INTERVAL)       [ "$_v" -ge 2 ] && [ "$_v" -le 60 ] || die "RANGE" ;;
       GAME_GRACE_SEC) [ "$_v" -ge 2 ] && [ "$_v" -le 300 ] || die "RANGE" ;;
+      APP_SWITCH_TIER) [ "$_v" -ge 0 ] && [ "$_v" -le 3 ] || die "RANGE" ;;
       GPU_MIN_LOCK)   is_switch "$_v" || die "RANGE" ;;
       GPU_BOOST_OFF)  is_switch "$_v" || die "RANGE" ;;
+      BG_LIGHT)       is_switch "$_v" || die "RANGE" ;;
       BIG_MIN)        is_switch "$_v" || die "RANGE" ;;
       CPU_MIN_LOCK)   is_switch "$_v" || die "RANGE" ;;
+      CPU_FLOOR_M)    [ "$_v" -ge 0 ] && [ "$_v" -le 10000000 ] || die "RANGE" ;;
       SCREEN_UNCAP)   is_switch "$_v" || die "RANGE" ;;
       SOFF_INTERVAL)  [ "$_v" -ge 5 ] && [ "$_v" -le 300 ] || die "RANGE" ;;
       IDLE_CURRENT_MA) [ "$_v" -ge 20 ] && [ "$_v" -le 2000 ] || die "RANGE" ;;
@@ -398,8 +407,10 @@ cfg_set() {
       # 且会盖过厂商开机阶段的热管理。区间和守护的 clampi(0,600) 对齐。
       BOOT_FULL_S)    [ "$_v" -ge 0 ] && [ "$_v" -le 600 ] || die "RANGE" ;;
       SUPPRESS)       is_switch "$_v" || die "RANGE" ;;
-      GOV_UP_US)      [ "$_v" -ge 100 ] && [ "$_v" -le 50000 ] || die "RANGE" ;;
-      GOV_DOWN_US)    [ "$_v" -ge 100 ] && [ "$_v" -le 50000 ] || die "RANGE" ;;
+      GOV_UP_BIG|GOV_DOWN_BIG|GOV_UP_MID|GOV_DOWN_MID|GOV_UP_LITTLE|GOV_DOWN_LITTLE)
+                      [ "$_v" -ge 100 ] && [ "$_v" -le 50000 ] || die "RANGE" ;;
+      CPU_MIN_PCT_BIG|CPU_MIN_PCT_MID2|CPU_MIN_PCT_MID|CPU_MIN_PCT_LITTLE)
+                      [ "$_v" -ge 0 ] && [ "$_v" -le 100 ] || die "RANGE" ;;
       # 实时偏移。区间一律和守护 load_cfg 里的 clampi 对齐 ——
       # 两边不一致时，页面能填进一个守护会静默改掉的数。
       PSI_ADAPT|TH_CAP|CHG_UNCAP)  is_switch "$_v" || die "RANGE" ;;
@@ -505,10 +516,80 @@ cmd_conf_set_many() {
   printf 'OK %s\n' "$_n"
 }
 
-# ── 芯片推荐预设 ────────────────────────────────────────────────
+# 导入参数：先在一份临时副本上逐项验证/写入，全部成功才原子替换。
+# 和 conf_set_many 的区别是"失败不留半份"——导入一整份配置时，不能
+# 前 20 个键写进去、第 21 个值非法就停在那里。
+cmd_conf_import_many() {
+  [ "$#" -gt 0 ] || die "BAD_ARGS"
+  _tmp="$CONF.import.$$"
+  cp -f "$CONF" "$_tmp" 2>/dev/null || die "WRITE" 5
+  _orig="$CONF"
+  CONF="$_tmp"
+  _n=0
+  for _kv in "$@"; do
+    case "$_kv" in *=*) ;; *) CONF="$_orig"; rm -f "$_tmp"; die "BAD_KV" ;; esac
+    _k=${_kv%%=*}; _v=${_kv#*=}
+    [ -n "$_k" ] || { CONF="$_orig"; rm -f "$_tmp"; die "BAD_KV"; }
+    if ! is_key "$_k" && [ "$_k" != CPU_GOVERNOR ]; then
+      CONF="$_orig"; rm -f "$_tmp"; die "BAD_KEY"
+    fi
+    _err=$( ( cfg_set "$_k" "$_v" ) 2>&1 >/dev/null )
+    if [ $? -ne 0 ]; then
+      CONF="$_orig"; rm -f "$_tmp"
+      printf '%s %s\n' "${_err:-E/WRITE}" "$_k" >&2
+      return 7
+    fi
+    _n=$((_n + 1))
+  done
+  CONF="$_orig"
+  mv -f "$_tmp" "$CONF" 2>/dev/null || { rm -f "$_tmp"; die "WRITE" 5; }
+  printf 'OK %s\n' "$_n"
+}
+
+# ── 芯片预设（省电 / 均衡）─────────────────────────────────────
 # 预设只在"全新安装"时自动套用；覆盖安装不会动老配置。这里给页面一个
 # 手动入口：按当前 SoC 找 adapt/*.conf，读到什么就应用什么。
 # 匹配规则与 customize.sh 完全一致：每条 #match 都要命中，soc 用包含匹配。
+_cpu_count() {
+  _pc=$(cat /sys/devices/system/cpu/present 2>/dev/null)
+  if [ -z "$_pc" ]; then
+    ls -d /sys/devices/system/cpu/cpu[0-9]* 2>/dev/null | wc -l
+    return
+  fi
+  _pn=0
+  for _pseg in $(printf '%s' "$_pc" | tr ',' ' '); do
+    case "$_pseg" in
+      *-*)
+        _pa=${_pseg%-*}; _pb=${_pseg#*-}
+        case "$_pa$_pb" in ''|*[!0-9]*) continue ;; esac
+        _pn=$((_pn + _pb - _pa + 1))
+        ;;
+      *)
+        case "$_pseg" in ''|*[!0-9]*) continue ;; esac
+        _pn=$((_pn + 1))
+        ;;
+    esac
+  done
+  [ "$_pn" -gt 0 ] && printf '%s' "$_pn" || \
+    ls -d /sys/devices/system/cpu/cpu[0-9]* 2>/dev/null | wc -l
+}
+
+_soc_norm() {
+  _sv=$(printf '%s' "$1" | tr 'a-z' 'A-Z' | tr -d '\r')
+  _sv=${_sv%% *}
+  _sv=${_sv%%-*}
+  _sv=${_sv%%_*}
+  case "$_sv" in
+    PINEAPPLE|PINEAPPLEP) _sv=SM8650 ;;
+    SM8750P|SM8750S) _sv=SM8750 ;;
+    SM8850P|SM8850S) _sv=SM8850 ;;
+    SM8650P|SM8650S) _sv=SM8650 ;;
+    SM8550P|SM8550S) _sv=SM8550 ;;
+    SM8475P|SM8475S) _sv=SM8475 ;;
+  esac
+  printf '%s' "$_sv"
+}
+
 _preset_match() {
   PRESET_FILE=
   [ -d "$ROOT/adapt" ] || return 1
@@ -516,7 +597,11 @@ _preset_match() {
   _pm=$(getprop ro.product.model 2>/dev/null | tr 'a-z' 'A-Z')
   _ps=$(getprop ro.soc.model 2>/dev/null | tr 'a-z' 'A-Z')
   [ -z "$_ps" ] && _ps=$(getprop ro.board.platform 2>/dev/null | tr 'a-z' 'A-Z')
+  _ps=$(_soc_norm "$_ps")
   PRESET_SOC=$_ps
+  _pc=${SF_TEST_CORES:-$(_cpu_count)}
+  _best=
+  _bestn=0
   for _f in "$ROOT"/adapt/*.conf; do
     [ -f "$_f" ] || continue
     _ml=$(grep '^#match ' "$_f" 2>/dev/null)
@@ -529,17 +614,37 @@ _preset_match() {
         *model=*) [ "$_pm" = "$(printf '%s' "${_l#*model=}" | tr 'a-z' 'A-Z')" ] || _hit=0 ;;
         *brand=*) [ "$_pb" = "$(printf '%s' "${_l#*brand=}" | tr 'a-z' 'A-Z')" ] || _hit=0 ;;
         *soc=*)   case "$_ps" in *"$(printf '%s' "${_l#*soc=}" | tr 'a-z' 'A-Z')"*) : ;; *) _hit=0 ;; esac ;;
+        *cores=*) [ "$_pc" = "${_l#*cores=}" ] || _hit=0 ;;
         *) _hit=0 ;;
       esac
     done
     IFS=$_oifs
-    if [ "$_hit" = 1 ]; then PRESET_FILE=$_f; return 0; fi
+    [ "$_hit" = 1 ] || continue
+    _n=$(printf '%s\n' "$_ml" | grep -c '^#match ')
+    if [ "$_n" -gt "$_bestn" ]; then
+      _best="$_f"
+      _bestn=$_n
+    fi
   done
-  return 1
+  [ -n "$_best" ] || return 1
+  PRESET_FILE=$_best
+  return 0
 }
 
 _preset_val() {
   sed -n "s/^$1=//p" "$PRESET_FILE" 2>/dev/null | head -n 1 | tr -d ' \r\t'
+}
+
+# 某档（sav/bal）的 CPU/GPU 百分比；文件没写就回退到 default_*。
+_preset_cap() {
+  _v=$(_preset_val "preset_${1}_${2}")
+  if [ -z "$_v" ]; then
+    case "$2" in
+      gpu) _v=$(_preset_val default_gpu_pct) ;;
+      *)   _v=$(_preset_val "default_cpu_pct_$2") ;;
+    esac
+  fi
+  printf '%s' "$_v"
 }
 
 preset_get() {
@@ -550,34 +655,52 @@ preset_get() {
   _title=$(sed -n 's/^# *//p' "$PRESET_FILE" | head -n 1)
   printf 'none=0\nsoc=%s\nname=%s\ntitle=%s\n' \
     "${PRESET_SOC:-未知}" "$(basename "$PRESET_FILE" .conf)" "$_title"
-  for _pk in big mid2 mid little gpu th_high th_low psi_gain; do
+  # 两档分别输出：sav_* / bal_*。旧调用方读的 big/mid/… 仍保留，
+  # 语义固定为均衡档，避免老脚本拿到空值。
+  for _mode in sav bal; do
+    for _pk in big mid2 mid little gpu; do
+      _v=$(_preset_cap "$_mode" "$_pk")
+      case "$_v" in ''|*[!0-9]*) continue ;; esac
+      printf '%s_%s=%s\n' "$_mode" "$_pk" "$_v"
+    done
+  done
+  for _pk in big mid2 mid little gpu; do
+    _v=$(_preset_cap bal "$_pk")
+    case "$_v" in ''|*[!0-9]*) continue ;; esac
+    printf '%s=%s\n' "$_pk" "$_v"
+  done
+  for _pk in th_high th_low psi_gain floor_m; do
     case "$_pk" in
-      big)      _v=$(_preset_val default_cpu_pct_big) ;;
-      mid2)     _v=$(_preset_val default_cpu_pct_mid2) ;;
-      mid)      _v=$(_preset_val default_cpu_pct_mid) ;;
-      little)   _v=$(_preset_val default_cpu_pct_little) ;;
-      gpu)      _v=$(_preset_val default_gpu_pct) ;;
       th_high)  _v=$(_preset_val default_th_high) ;;
       th_low)   _v=$(_preset_val default_th_low) ;;
       psi_gain) _v=$(_preset_val default_psi_gain) ;;
+      floor_m)  _v=$(_preset_val default_cpu_floor_m) ;;
     esac
     case "$_v" in ''|*[!0-9]*) continue ;; esac
     printf '%s=%s\n' "$_pk" "$_v"
   done
 }
 
+# preset_apply [sav|bal]：默认均衡；写 CPU/GPU + 四条策略。
 preset_apply() {
+  _mode=${1:-bal}
+  case "$_mode" in sav|bal) ;; *) die "BAD_MODE" ;; esac
   _preset_match || die "NO_PRESET"
   _args=
   _add() { [ -n "$2" ] && _args="$_args $1=$2"; }
-  _add CPU_PCT_BIG      "$(_preset_val default_cpu_pct_big)"
-  _add CPU_PCT_MID2     "$(_preset_val default_cpu_pct_mid2)"
-  _add CPU_PCT_MID      "$(_preset_val default_cpu_pct_mid)"
-  _add CPU_PCT_LITTLE   "$(_preset_val default_cpu_pct_little)"
-  _add GPU_PCT          "$(_preset_val default_gpu_pct)"
+  _add CPU_PCT_BIG      "$(_preset_cap "$_mode" big)"
+  _add CPU_PCT_MID2     "$(_preset_cap "$_mode" mid2)"
+  _add CPU_PCT_MID      "$(_preset_cap "$_mode" mid)"
+  _add CPU_PCT_LITTLE   "$(_preset_cap "$_mode" little)"
+  _add GPU_PCT          "$(_preset_cap "$_mode" gpu)"
   _add TH_HIGH          "$(_preset_val default_th_high)"
   _add TH_LOW           "$(_preset_val default_th_low)"
   _add PSI_GAIN         "$(_preset_val default_psi_gain)"
+  _add CPU_FLOOR_M      "$(_preset_val default_cpu_floor_m)"
+  # 省电预设同时打开动态封顶（省电风格 = 静置 960MHz 静态低功耗）；
+  # 均衡预设用同一开关的均衡风格，不额外新增开关。
+  _add SUPPRESS         1
+  _add SUP_STYLE        "$_mode"
   # 四条策略随预设一起落（与 WebUI 的两个预设按钮同一语义）：
   # 插电不封顶、发热不主动降、PSI 不放宽、调度回限频。电量阶梯不归预设管。
   _add TH_CAP           0
@@ -1598,6 +1721,7 @@ _ds_dump() {
   printf 'enable=%s\n' "$(_ds_enable)"
   printf 'alive=%s\n' "$(_ds_alive)"
   printf 'paused=%s\n' "$([ -f "$PAUSE" ] && echo 1 || echo 0)"
+  printf 'noactive=%s\n' "$([ -d /data/adb/modules/NoActive ] || [ -d /data/adb/modules/noactive ] && echo 1 || echo 0)"
   if [ -f "$DS_STATE" ]; then
     grep -E '^(dsactive|wcsince|dsw|dswc)=' "$DS_STATE" 2>/dev/null
     grep -q '^dsactive=' "$DS_STATE" 2>/dev/null || printf 'dsactive=0\n'
@@ -1619,6 +1743,17 @@ _ds_dump() {
 cmd_ds_get() { _ds_dump full; }
 
 cmd_ds_state() { _ds_dump; }
+
+# 退出安全模式：删标记 + 清短启动计数，再把守护拉起来。
+# 不要求用户手删 /data 下文件或进 recovery。
+cmd_safemode_off() {
+  if [ -f "$ROOT/remove" ] || [ -f "$ROOT/disable" ]; then
+    die "DISABLED" 8
+  fi
+  rm -f "$SAFEMODE" "$BOOT_GUARD" 2>/dev/null
+  [ -x "$BIN" ] && "$BIN" restart >/dev/null 2>&1
+  printf 'OK\n'
+}
 
 cmd_ds_set() {
   _k=${1:-}; _v=${2:-}
@@ -1672,6 +1807,7 @@ cmd_ds_white_add() {
   # "永久豁免"要立刻落到系统 Doze 白名单；不能等 ds_enter，
   # 否则深睡关闭时名单只写模块配置，系统照样压通知。
   timeout 2 dumpsys deviceidle whitelist "+$_p" >/dev/null 2>&1
+  timeout 2 cmd deviceidle whitelist "+$_p" >/dev/null 2>&1
   printf 'OK %s\n' "$_p"
 }
 
@@ -1689,6 +1825,7 @@ cmd_ds_white_del() {
   # 深睡中交给守护退出时处理：那时它按当前配置判断这条还算不算用户白名单。
   if [ "$(_ds_state_val dsactive)" != "1" ]; then
     dumpsys deviceidle whitelist "-$_p" >/dev/null 2>&1
+    timeout 2 cmd deviceidle whitelist "-$_p" >/dev/null 2>&1
   fi
   printf 'OK %s\n' "$_p"
 }
@@ -1778,8 +1915,11 @@ case "${1:-}" in
   log_export) cmd_log_export ;;
   about)      st_about ;;
   conf_get)   cfg_get ;;
+  conf_keys)
+    for _k in $KEYS; do printf '%s\n' "$_k"; done ;;
   conf_set)   cfg_set "${2:-}" "${3:-}" ;;
   conf_set_many) shift; cmd_conf_set_many "$@" ;;
+  conf_import_many) shift; cmd_conf_import_many "$@" ;;
   # 默认只列"这台机上真装了的"。要用全量预设名单时传 all。
   games_list) [ "${2:-}" = all ] && list_all || list_installed ;;
   games_suggest) games_suggest ;;
@@ -1802,8 +1942,9 @@ case "${1:-}" in
   ovr_show)   cmd_ovr_show ;;
   ovr_clear)  cmd_ovr_clear ;;
   preset_get)   preset_get ;;
-  preset_apply) preset_apply ;;
+  preset_apply) preset_apply "${2:-}" ;;
   ds_get)     cmd_ds_get ;;
+  safemode_off) cmd_safemode_off ;;
   ds_state)   cmd_ds_state ;;
   ds_set)     cmd_ds_set "${2:-}" "${3:-}" ;;
   ds_white_add) cmd_ds_white_add "${2:-}" ;;

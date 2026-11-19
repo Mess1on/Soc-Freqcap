@@ -35,7 +35,7 @@ done
 # 第三方调度框架的总开关记录在应用私有配置里，模块目录改名也查不到，需单独检测
 SCENE_PREFS="/data/data/com.omarea.vtools/shared_prefs/global.xml"
 if [ -f "$SCENE_PREFS" ] && grep -q '"dynamic_control" value="true"' "$SCENE_PREFS" 2>/dev/null; then
-  ui_print "  Scene 调度总开关处于开启状态"
+  ui_print "  第三方调度总开关处于开启状态"
   CONFLICT=1
 fi
 
@@ -55,8 +55,26 @@ fi
 # ── 提示 ────────────────────────────────────────────────────────
 MODEL="$(getprop ro.product.model 2>/dev/null)"
 # 芯片代号统一转大写（原厂属性为小写），与机型名的显示风格一致。
+# 有些 ROM 会带 "-AB" / "P" 之类后缀，或只给平台别名；这里只做
+# 匹配用的归一化，不改用户看到的名字。别名只收已验证的映射，不猜。
+_soc_norm() {
+  _sv=$(printf '%s' "$1" | tr 'a-z' 'A-Z' | tr -d '\r')
+  _sv=${_sv%% *}
+  _sv=${_sv%%-*}
+  _sv=${_sv%%_*}
+  case "$_sv" in
+    PINEAPPLE|PINEAPPLEP) _sv=SM8650 ;;
+    SM8750P|SM8750S) _sv=SM8750 ;;
+    SM8850P|SM8850S) _sv=SM8850 ;;
+    SM8650P|SM8650S) _sv=SM8650 ;;
+    SM8550P|SM8550S) _sv=SM8550 ;;
+    SM8475P|SM8475S) _sv=SM8475 ;;
+  esac
+  printf '%s' "$_sv"
+}
 SOC="$(getprop ro.soc.model 2>/dev/null | tr 'a-z' 'A-Z')"
 [ -z "$SOC" ] && SOC="$(getprop ro.board.platform 2>/dev/null | tr 'a-z' 'A-Z')"
+SOC="$(_soc_norm "$SOC")"
 
 ui_print "━━━━━━━━━━━━━━━━━━━━"
 ui_print "  Soc智能限频"
@@ -72,7 +90,7 @@ ui_print "  日志：/data/adb/soc_freqcap/socfreqd.log"
 ui_print "  深度睡眠默认关闭，在 WebUI 的「睡眠」页打开"
 ui_print "  （都在模块目录之外，升级模块不会覆盖你的改动）"
 ui_print ""
-ui_print "  重启后自动生效"
+ui_print "  安装完成后按最后一行提示操作（重启 / 直接打开 WebUI）"
 ui_print "━━━━━━━━━━━━━━━━━━━━"
 ui_print " "
 
@@ -142,8 +160,35 @@ ui_print "  配置目录：$DATA"
 # 只对全新安装生效；升级一律不碰用户配置（用户值可能刚好等于默认值，
 # 不能用"值等于默认"的启发式去覆盖）。
 #
+# 内核 present 是 0-7 / 0-5,7 这类串；按它数“可能存在的核”，
+# 不用 cpuN 目录数（禁用核也可能留目录）。
+_cpu_count() {
+  _pc=$(cat /sys/devices/system/cpu/present 2>/dev/null)
+  if [ -z "$_pc" ]; then
+    ls -d /sys/devices/system/cpu/cpu[0-9]* 2>/dev/null | wc -l
+    return
+  fi
+  _pn=0
+  for _pseg in $(printf '%s' "$_pc" | tr ',' ' '); do
+    case "$_pseg" in
+      *-*)
+        _pa=${_pseg%-*}; _pb=${_pseg#*-}
+        case "$_pa$_pb" in ''|*[!0-9]*) continue ;; esac
+        _pn=$((_pn + _pb - _pa + 1))
+        ;;
+      *)
+        case "$_pseg" in ''|*[!0-9]*) continue ;; esac
+        _pn=$((_pn + 1))
+        ;;
+    esac
+  done
+  [ "$_pn" -gt 0 ] && printf '%s' "$_pn" || \
+    ls -d /sys/devices/system/cpu/cpu[0-9]* 2>/dev/null | wc -l
+}
+
 # 匹配规则与节点适配表一致：文件里每条 #match 都命中才算命中，
-# brand= / model= / soc= 三种键；没有 #match 的文件不参与。
+# brand= / model= / soc= / cores= 四种键；没有 #match 的文件不参与。
+# 多个文件都命中时取 #match 条数最多的那份（更具体），同分仍取先命中的。
 _adapt_match() {
   ADAPT_FILE=
   [ -d "$MODPATH/adapt" ] || return 0
@@ -151,6 +196,10 @@ _adapt_match() {
   _m=$(getprop ro.product.model 2>/dev/null | tr 'a-z' 'A-Z')
   _s=$(getprop ro.soc.model 2>/dev/null | tr 'a-z' 'A-Z')
   [ -z "$_s" ] && _s=$(getprop ro.board.platform 2>/dev/null | tr 'a-z' 'A-Z')
+  _s=$(_soc_norm "$_s")
+  _cores=${SF_TEST_CORES:-$(_cpu_count)}
+  _best=
+  _bestn=0
   for _f in "$MODPATH"/adapt/*.conf; do
     [ -f "$_f" ] || continue
     _ml=$(grep '^#match ' "$_f" 2>/dev/null)
@@ -162,15 +211,20 @@ _adapt_match() {
       case "$_l" in
         *model=*) [ "$_m" = "$(printf '%s' "${_l#*model=}" | tr 'a-z' 'A-Z')" ] || _hit=0 ;;
         *brand=*) [ "$_b" = "$(printf '%s' "${_l#*brand=}" | tr 'a-z' 'A-Z')" ] || _hit=0 ;;
-        *soc=*)   case "$_s" in *"$(printf '%s' "${_l#*soc=}" | tr 'a-z' 'A-Z')"*) : ;; *) _hit=0 ;; esac ;;
+        *soc=*)   _e=$(_soc_norm "${_l#*soc=}"); case "$_s" in *"$_e"*) : ;; *) _hit=0 ;; esac ;;
+        *cores=*) [ "$_cores" = "${_l#*cores=}" ] || _hit=0 ;;
         *) _hit=0 ;;
       esac
     done
     IFS=$_oifs
     [ "$_hit" = 1 ] || continue
-    ADAPT_FILE="$_f"
-    return 0
+    _n=$(printf '%s\n' "$_ml" | grep -c '^#match ')
+    if [ "$_n" -gt "$_bestn" ]; then
+      _best="$_f"
+      _bestn=$_n
+    fi
   done
+  ADAPT_FILE=$_best
 }
 
 # 全新安装时把命中文件里的 default_* 套进用户配置。只认白名单键，
@@ -191,6 +245,7 @@ _soc_defaults() {
       default_th_high)        _key=TH_HIGH;        _lo=35; _hi=110 ;;
       default_th_low)         _key=TH_LOW;         _lo=30; _hi=105 ;;
       default_psi_gain)       _key=PSI_GAIN;       _lo=0;  _hi=30 ;;
+      default_cpu_floor_m)    _key=CPU_FLOOR_M;    _lo=0;  _hi=10000000 ;;
       *) continue ;;
     esac
     [ "$_v" -ge "$_lo" ] && [ "$_v" -le "$_hi" ] || continue
@@ -237,8 +292,9 @@ fi
 # 当 override.conf。守护只在自动探测扑空时用它，所以正常机器完全不受影响。
 #
 # 三条规矩：
-#   1) 文件里每条 #match 都要命中才算命中（brand= / model= / soc= 三种键）；
+#   1) 文件里每条 #match 都要命中才算命中（brand= / model= / soc= / cores= 四种键）；
 #      一条 #match 都没有的文件不装 —— 没有条件就等于对所有机器适用，太危险。
+#      多个文件都命中时取 #match 条数最多的那份（更具体），同分取先命中的。
 #   2) 只认这四种键开头的行，别的一律不带进数据目录（打错前缀的行不会被静默装上）。
 #   3) 没命中任何文件时，只撤掉"上一版由 adapt 装进去的那份"（认 #from adapt/ 标记）。
 #      作者把某台机的适配下架了，用户升级后就该回到自动探测；
@@ -246,16 +302,26 @@ fi
 _soc_adapt() {
   [ -d "$MODPATH/adapt" ] || return 0
   if [ -n "$ADAPT_FILE" ] && [ -f "$ADAPT_FILE" ]; then
+    # 守护运行时要按 #match（brand/model/soc/cores）选中的那份读 cpuset/gov，
+    # 不能只按 SoC 文件名猜；把命中文件整份落到数据目录，守护优先读它。
+    { printf '#from adapt/%s\n' "${ADAPT_FILE##*/}"; cat "$ADAPT_FILE"; } \
+      > "$DATA/adapt.conf" 2>/dev/null
+    chmod 0644 "$DATA/adapt.conf" 2>/dev/null
     _body=$(grep -E '^(cpu-dir|gpu-max|gpu-min|gpu-freqs) ' "$ADAPT_FILE" 2>/dev/null)
     if [ -n "$_body" ]; then
       _n=$(printf '%s\n' "$_body" | grep -c .)
       { printf '#from adapt/%s\n' "${ADAPT_FILE##*/}"; printf '%s\n' "$_body"; } \
         > "$DATA/override.conf" 2>/dev/null
       chmod 0644 "$DATA/override.conf" 2>/dev/null
-      ui_print "  命中适配表 ${ADAPT_FILE##*/}：$_n 条已装进数据目录（重启后生效）"
+      ui_print "  命中适配表 ${ADAPT_FILE##*/}：$_n 条节点已装进数据目录（重启或热安装后生效）"
       return 0
     fi
-    ui_print "  命中 ${ADAPT_FILE##*/}：只有芯片默认，没有节点表"
+    ui_print "  命中 ${ADAPT_FILE##*/}：只有芯片默认/运行参数，没有节点表"
+  else
+    # 没命中：只撤 adapt 自己装过的那份运行时表，别动用户手工文件
+    if head -n 1 "$DATA/adapt.conf" 2>/dev/null | grep -q '^#from adapt/'; then
+      rm -f "$DATA/adapt.conf" 2>/dev/null
+    fi
   fi
   # 没命中 / 命中文件没有节点表：只撤 adapt 自己装过的那份
   if head -n 1 "$DATA/override.conf" 2>/dev/null | grep -q '^#from adapt/'; then
@@ -281,17 +347,23 @@ ensure_final_newline() {
 # 因此只追加用户那份里不存在的键整行，已存在的键一个都不碰。
 if [ -f "$DATA/socfreq.conf" ] && [ -f "$MODPATH/socfreq.conf" ]; then
   _added=0
-  # 迁移决策要看"补键之前"的原值：下面循环会把缺的 SCREEN_UNCAP=0 补进去，
-  # 补完再判断会把"两个键都没有"误判成旧的 keep 配置。
-  _had_policy=0
-  _had_uncap=0
-  _old_uncap=
-  grep -qE '^[[:space:]]*SCREEN_POLICY[[:space:]]*=' "$DATA/socfreq.conf" 2>/dev/null && _had_policy=1
-  if grep -qE '^[[:space:]]*SCREEN_UNCAP[[:space:]]*=' "$DATA/socfreq.conf" 2>/dev/null; then
-    _had_uncap=1
-    _old_uncap=$(sed -n 's/^[[:space:]]*SCREEN_UNCAP[[:space:]]*=//p' "$DATA/socfreq.conf" 2>/dev/null \
+  ensure_final_newline "$DATA/socfreq.conf"
+  # 分簇限速：旧版只有三簇统一的 GOV_UP_US / GOV_DOWN_US。升级时先把
+  # 旧值摊到三个新键，再走通用补键循环，免得用户调过的值被打回默认。
+  for _gk in UP DOWN; do
+    _old=$(sed -n "s/^[[:space:]]*GOV_${_gk}_US[[:space:]]*=//p" "$DATA/socfreq.conf" 2>/dev/null \
       | head -n 1 | sed 's/#.*//' | tr -d ' \r\t')
-  fi
+    case "$_old" in ''|*[!0-9]*) continue ;; esac
+    [ "${#_old}" -gt 5 ] && continue
+    [ "$_old" -lt 100 ] || [ "$_old" -gt 50000 ] && continue
+    # 旧默认就是 1000；没动过的话让它落新默认（超大核 3000 / 主簇 1000），
+    # 别把“从没设过”当成用户选择。真改过的值才原样摊到三簇。
+    [ "$_old" = "1000" ] && continue
+    grep -q "^GOV_${_gk}_BIG=" "$DATA/socfreq.conf" 2>/dev/null && continue
+    printf 'GOV_%s_BIG=%s\nGOV_%s_MID=%s\nGOV_%s_LITTLE=%s\n' \
+      "$_gk" "$_old" "$_gk" "$_old" "$_gk" "$_old" >> "$DATA/socfreq.conf" 2>/dev/null \
+      && _added=$((_added + 1))
+  done
   ensure_final_newline "$DATA/socfreq.conf"
   while read -r _line; do
     case "$_line" in ''|\#*) continue ;; esac
@@ -302,19 +374,26 @@ if [ -f "$DATA/socfreq.conf" ] && [ -f "$MODPATH/socfreq.conf" ]; then
     grep -q "^${_k}=" "$DATA/socfreq.conf" 2>/dev/null && continue
     printf '%s\n' "$_line" >> "$DATA/socfreq.conf" 2>/dev/null && _added=$((_added + 1))
   done < "$MODPATH/socfreq.conf"
-  # 旧配置没有 SCREEN_POLICY 时：SCREEN_UNCAP=0 会被守护映射成 keep
-  # （熄屏每 5 秒全量巡检，整夜跑）。只修这一种，补成 cap；
-  # SCREEN_UNCAP=1 或两个键都没有的，保持原来的 uncap 行为。
+  # 熄屏轻巡检改为常开：存量用户不管原来选的是交还系统还是 keep，覆盖
+  # 更新后统一写 SCREEN_POLICY=cap。只强制一次（标记文件），之后手改 conf
+  # 不会被每次升级打回。
   ensure_final_newline "$DATA/socfreq.conf"
-  if [ "$_had_policy" -eq 0 ]; then
-    if [ "$_had_uncap" -eq 1 ] && [ "$_old_uncap" = "0" ]; then
-      printf 'SCREEN_POLICY=cap\n' >> "$DATA/socfreq.conf" 2>/dev/null
-      ui_print "  熄屏策略补成 cap（旧配置 SCREEN_UNCAP=0 会落进 keep 全量巡检）"
+  _CAP_MARK="$DATA/.screen_cap_default"
+  if [ ! -f "$_CAP_MARK" ]; then
+    if grep -qE '^[[:space:]]*SCREEN_POLICY[[:space:]]*=' "$DATA/socfreq.conf" 2>/dev/null; then
+      sed -i 's/^[[:space:]]*SCREEN_POLICY[[:space:]]*=.*/SCREEN_POLICY=cap/' \
+        "$DATA/socfreq.conf" 2>/dev/null
     else
-      printf 'SCREEN_POLICY=uncap\n' >> "$DATA/socfreq.conf" 2>/dev/null
-      ui_print "  熄屏策略补成 uncap（保持原来的熄屏交还行为）"
+      printf 'SCREEN_POLICY=cap\n' >> "$DATA/socfreq.conf" 2>/dev/null
     fi
+    # 旧键同步成 0，避免以后看配置时误以为还在熄屏交还。
+    if grep -qE '^[[:space:]]*SCREEN_UNCAP[[:space:]]*=' "$DATA/socfreq.conf" 2>/dev/null; then
+      sed -i 's/^[[:space:]]*SCREEN_UNCAP[[:space:]]*=.*/SCREEN_UNCAP=0/' \
+        "$DATA/socfreq.conf" 2>/dev/null
+    fi
+    : > "$_CAP_MARK" 2>/dev/null
     _added=$((_added + 1))
+    ui_print "  熄屏轻巡检已设为常开（SCREEN_POLICY=cap）"
   fi
   [ "$_added" -gt 0 ] && ui_print "  配置补齐新增项：$_added 条"
   # 删掉模块目录内原件：并存两份配置时改模块目录那份不会有任何效果
@@ -525,6 +604,12 @@ fi
 export MODULE_HOT_INSTALL_REQUEST=true
 export MODULE_HOT_RUN_SCRIPT=scripts/hotinstall.sh
 case "${KSU_HAS_HOT_INSTALL:-}" in
-  true|1) ui_print "  已申请热安装：装完可直接打开 WebUI，无需重启" ;;
-  *)      ui_print "!  当前管理器不支持热安装（KernelSU / SukiSU 需 v4.2.1+），本次仍需重启" ;;
+  true|1)
+    ui_print "  安装完成：已热安装，直接打开 WebUI 即可，无需重启"
+    ui_print "  （想立刻让深睡/开机脚本也走新版本时，再重启一次也可以）"
+    ;;
+  *)
+    ui_print "  安装完成：请重启手机后再使用"
+    ui_print "  （当前管理器不支持热安装；KernelSU / SukiSU 需 v4.2.1+）"
+    ;;
 esac
