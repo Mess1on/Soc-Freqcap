@@ -37,11 +37,11 @@ const ID2KEY = { chg_uncap: 'CHG_UNCAP', chg_pct: 'CHG_PCT', th_cap: 'TH_CAP',
    分两段抠出来拼一起：整段吞掉的话会把 pointerdown 那套事件绑定也拖进沙箱，
    替身就得假装自己有完整 DOM —— 那测的就不再是这段逻辑了。
    起点用 function ddEl( 而不是那段注释：同样的注释文字在 <style> 里也有一份。 */
-const wBlock = html.match(/function ddEl\([\s\S]*?(?=\/\* ── 滑杆只认)/);
-const fBlock = html.match(/\/\* ── 功能页：人话档位[\s\S]*?(?=async function saveAll\(\)\{)/);
+const wBlock = html.match(/function ddEl\([\s\S]*?(?=\nconst GRAB_PX)/);
+const fBlock = html.match(/const FUNC_PRESETS = \{[\s\S]*?(?=async function saveAll\(\)\{)/);
 /* 分应用档位那两个下拉的构造函数。只要常量 + 拆/拼 + 两个 select，
    不要后面的 loadModes/setMode（它们要 api、pkgRow 一整套替身）。 */
-const mBlock = html.match(/const MODE_OPTS = \[[\s\S]*?(?=\n\/\* modes_list)/);
+const mBlock = html.match(/const MODE_OPTS = \[[\s\S]*?(?=\nasync function loadModes\()/);
 const block = wBlock && fBlock ? [wBlock[0], fBlock[0]] : null;
 
 function mkEl(tag) {
@@ -96,7 +96,7 @@ function sandbox() {
 
 console.log('== 功能页档位（下拉 = 一组具体值）==');
 if (!block) {
-  ok(false, '从 index.html 里抠出功能页那段', '锚点：/* ── 功能页：人话档位');
+  ok(false, '从 index.html 里抠出功能页那段', '锚点：const FUNC_PRESETS');
   console.log(fail + ' 项失败 / ' + pass + ' 项通过');
   process.exit(1);
 }

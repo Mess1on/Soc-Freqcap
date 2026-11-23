@@ -6,9 +6,7 @@ SKIPUNZIP=0
 # ui_print 由管理器提供；缺失时退化为 echo，避免调用报错淹没安装输出。
 command -v ui_print >/dev/null 2>&1 || ui_print() { echo "$@"; }
 
-# ── 冲突检测 ────────────────────────────────────────────────────
-# 同时启用多个改 CPU 频率/调速器的模块会互相覆盖来回拉扯。
-# 这里只检测并提示，不修改、不删除、不标记任何其他模块，是否共存由用户决定。
+# 冲突检测
 
 conflict_found() {
   local name="$1"
@@ -42,7 +40,7 @@ fi
 [ "$CONFLICT" = "0" ] && ui_print "  未检测到冲突"
 ui_print " "
 
-# ── 环境自检 ────────────────────────────────────────────────────
+# 环境自检
 if [ ! -d /sys/devices/system/cpu/cpufreq ]; then
   ui_print "  未找到 cpufreq 目录，本机内核不支持 CPU 限频"
   abort
@@ -52,11 +50,9 @@ if ! ls /sys/devices/system/cpu/cpufreq/policy*/cpuinfo_max_freq >/dev/null 2>&1
   abort
 fi
 
-# ── 提示 ────────────────────────────────────────────────────────
+# 提示
 MODEL="$(getprop ro.product.model 2>/dev/null)"
 # 芯片代号统一转大写（原厂属性为小写），与机型名的显示风格一致。
-# 有些 ROM 会带 "-AB" / "P" 之类后缀，或只给平台别名；这里只做
-# 匹配用的归一化，不改用户看到的名字。别名只收已验证的映射，不猜。
 _soc_norm() {
   _sv=$(printf '%s' "$1" | tr 'a-z' 'A-Z' | tr -d '\r')
   _sv=${_sv%% *}
@@ -94,7 +90,7 @@ ui_print "  安装完成后按最后一行提示操作（重启 / 直接打开 W
 ui_print "━━━━━━━━━━━━━━━━━━━━"
 ui_print " "
 
-# ── 权限 ────────────────────────────────────────────────────────
+# 权限
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/socfreqd"       0 0 0755
 set_perm "$MODPATH/service.sh"     0 0 0755
@@ -112,13 +108,11 @@ set_perm "$MODPATH/socfreq.conf" 0 0 0644
 set_perm "$MODPATH/games.txt"    0 0 0644
 
 # WebUI：index.html 只需读；api.sh 必须可执行。
-# set_perm_recursive 已经把整个目录刷成 0644，这里要显式补回 0755，
 # 否则不同管理器的 WebUI 直接 ./api.sh 调用会 permission denied。
 set_perm "$MODPATH/webroot/index.html" 0 0 0644
 set_perm "$MODPATH/webroot/api.sh"     0 0 0755
 
 # 名单统一成 LF：CRLF 行尾的 \r 会让 api.sh 的 grep -x 整行比对全部失配且不报错。
-# 包内名单是 LF，但用户可能用 Windows 编辑器改过再推回来。
 if [ -f "$MODPATH/games.txt" ]; then
   if tr -d '\r' < "$MODPATH/games.txt" > "$MODPATH/games.txt.lf" 2>/dev/null; then
     mv -f "$MODPATH/games.txt.lf" "$MODPATH/games.txt"
@@ -128,16 +122,11 @@ if [ -f "$MODPATH/games.txt" ]; then
   fi
 fi
 
-# ── 可变状态搬到模块目录之外 ────────────────────────────────────
-# 管理器升级模块的做法是"先删 /data/adb/modules/<id> 再解包"，
+# 可变状态搬到模块目录之外
 # 配置和名单留在模块目录里会在每次升级时被包内默认值覆盖。
 # /data/adb/soc_freqcap 与之同级但在升级范围之外，是 root 私有的普通目录。
-#
-# 只在新位置不存在时才搬运，避免覆盖用户已改过的配置。
 DATA=/data/adb/soc_freqcap
 # 同名文件 / 悬空软链会让 mkdir 静默失败，直到写标记文件时才报
-# “nonexistent directory”，错误信息完全指错地方。先移开障碍再建；
-# 建不出来就提前说清原因，不要带着半个数据目录继续装。
 if [ -L "$DATA" ] || { [ -e "$DATA" ] && [ ! -d "$DATA" ]; }; then
   mv -f "$DATA" "$DATA.bad.$$" 2>/dev/null \
     && ui_print "  数据目录位置被占用，已移到 $DATA.bad.$$"
@@ -155,13 +144,11 @@ if [ ! -d "$DATA/run" ]; then
 fi
 ui_print "  配置目录：$DATA"
 
-# ── 按芯片套预设档位（单一来源：adapt/*.conf 的 default_*）──────
+# 按芯片套预设档位（单一来源：adapt/*.conf 的 default_*）
 # 芯片默认值和节点适配表放在同一份 adapt/<soc>.conf 里，装机脚本不再写死第二套。
 # 只对全新安装生效；升级一律不碰用户配置（用户值可能刚好等于默认值，
 # 不能用"值等于默认"的启发式去覆盖）。
-#
 # 内核 present 是 0-7 / 0-5,7 这类串；按它数“可能存在的核”，
-# 不用 cpuN 目录数（禁用核也可能留目录）。
 _cpu_count() {
   _pc=$(cat /sys/devices/system/cpu/present 2>/dev/null)
   if [ -z "$_pc" ]; then
@@ -187,8 +174,6 @@ _cpu_count() {
 }
 
 # 匹配规则与节点适配表一致：文件里每条 #match 都命中才算命中，
-# brand= / model= / soc= / cores= 四种键；没有 #match 的文件不参与。
-# 多个文件都命中时取 #match 条数最多的那份（更具体），同分仍取先命中的。
 _adapt_match() {
   ADAPT_FILE=
   [ -d "$MODPATH/adapt" ] || return 0
@@ -263,10 +248,101 @@ _soc_defaults() {
   fi
 }
 
+# 应用分类默认值按芯片省电预设生成：
+_cat_pct() {
+  _v=$(($1 + $2))
+  [ "$_v" -lt 1 ] && _v=1
+  [ "$_v" -gt 100 ] && _v=100
+  printf '%s' "$_v"
+}
+
+_cat_make_block() {
+  _sav_big=$(sed -n 's/^preset_sav_big=//p' "$ADAPT_FILE" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+  _sav_mid2=$(sed -n 's/^preset_sav_mid2=//p' "$ADAPT_FILE" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+  _sav_mid=$(sed -n 's/^preset_sav_mid=//p' "$ADAPT_FILE" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+  _sav_little=$(sed -n 's/^preset_sav_little=//p' "$ADAPT_FILE" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+  case "$_sav_big" in ''|*[!0-9]*) return 1 ;; esac
+  # 同档预设没写时用相邻簇兜底，避免 4 簇机少一档就没默认值
+  [ -n "$_sav_mid2" ] || _sav_mid2=$_sav_mid
+  [ -n "$_sav_mid" ] || _sav_mid=$_sav_mid2
+  [ -n "$_sav_little" ] || _sav_little=$_sav_mid
+  _cat_block="$DATA/.cat_defaults.$$"
+  : > "$_cat_block"
+  for _c in video social reading; do
+    case "$_c" in
+      video)   _ba=-5; _oa=-8 ;;
+      social)  _ba=-5; _oa=7 ;;
+      reading) _ba=-7; _oa=-11 ;;
+    esac
+    _v=$(_cat_pct "$_sav_big" "$_ba")
+    printf '%s_cpu_big=%s\n' "$_c" "$_v" >> "$_cat_block"
+    for _spec in "mid2:$_sav_mid2" "mid:$_sav_mid" "little:$_sav_little"; do
+      _t=${_spec%%:*}; _b=${_spec#*:}
+      case "$_b" in ''|*[!0-9]*) continue ;; esac
+      _v=$(_cat_pct "$_b" "$_oa")
+      printf '%s_cpu_%s=%s\n' "$_c" "$_t" "$_v" >> "$_cat_block"
+    done
+    printf '%s_gpu=0\n' "$_c" >> "$_cat_block"
+  done
+}
+
+_cat_old_defaults() {
+  _f=$1
+  [ -f "$_f" ] || return 1
+  _ok=1
+  for _spec in video:44 social:55 reading:50; do
+    _c=${_spec%%:*}; _d=${_spec#*:}
+    _v=$(sed -n "s/^${_c}_cpu=//p" "$_f" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+    [ -n "$_v" ] && [ "$_v" != "$_d" ] && _ok=0
+    for _t in big mid2 mid little; do
+      _v=$(sed -n "s/^${_c}_cpu_${_t}=//p" "$_f" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+      [ -n "$_v" ] && [ "$_v" != "$_d" ] && _ok=0
+    done
+  done
+  [ "$_ok" = 1 ]
+}
+
+_cat_rewrite() {
+  _f=$1
+  [ -f "$_f" ] || return 0
+  _block=$_cat_block
+  if [ "${2:-0}" = 1 ]; then
+    _block="$_cat_block.keep"
+    cp -f "$_cat_block" "$_block" 2>/dev/null
+    for _c in video social reading; do
+      _g=$(sed -n "s/^${_c}_gpu=//p" "$_f" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+      case "$_g" in ''|*[!0-9]*) _g=0 ;; esac
+      sed "s/^${_c}_gpu=.*/${_c}_gpu=$_g/" "$_block" > "$_block.n" 2>/dev/null \
+        && mv -f "$_block.n" "$_block"
+    done
+  fi
+  {
+    printf '# 应用分类：只压不抬。0 = 不启用/跟随全局。\n'
+    cat "$_block" 2>/dev/null
+    awk '
+      /^[ \t]*(video|social|reading)_(cpu|cpu_big|cpu_mid2|cpu_mid|cpu_little|gpu)[ \t]*=/ { next }
+      /^[ \t]*# 应用分类/ { next }
+      { print }
+    ' "$_f" 2>/dev/null
+  } > "$_f.cat.$$" 2>/dev/null && mv -f "$_f.cat.$$" "$_f"
+  chmod 0644 "$_f" 2>/dev/null
+  [ "$_block" = "$_cat_block" ] || rm -f "$_block"
+}
+
+_cat_soc_defaults() {
+  [ -n "$ADAPT_FILE" ] && [ -f "$ADAPT_FILE" ] || return 0
+  _cat_make_block || return 0
+  _cat_rewrite "$DATA/defaults/app_categories.conf" 0
+  if [ "$_FRESH_CONF" = 1 ] || _cat_old_defaults "$DATA/app_categories.conf"; then
+    _cat_rewrite "$DATA/app_categories.conf" 1
+  fi
+  rm -f "$_cat_block" "$_cat_block.keep" "$_cat_block.keep.n" 2>/dev/null
+}
+
 # 出厂默认留一份：模块目录里的 socfreq.conf 随后会被搬到数据目录/删掉，
 # 页面上的「恢复全部默认」需要一份不会被用户改到的原件。
 mkdir -p "$DATA/defaults" 2>/dev/null
-for _f in socfreq.conf app_modes.conf; do
+for _f in socfreq.conf app_modes.conf app_categories.conf; do
   [ -f "$MODPATH/$_f" ] && cp -f "$MODPATH/$_f" "$DATA/defaults/$_f" 2>/dev/null
 done
 chmod 0644 "$DATA/defaults"/*.conf 2>/dev/null
@@ -275,30 +351,20 @@ chmod 0644 "$DATA/defaults"/*.conf 2>/dev/null
 _FRESH_CONF=0
 [ -f "$DATA/socfreq.conf" ] || _FRESH_CONF=1
 
-for _f in socfreq.conf app_modes.conf vendors.txt socfreqd.log; do
+for _f in socfreq.conf app_modes.conf app_categories.conf vendors.txt socfreqd.log; do
   if [ -f "$MODPATH/$_f" ] && [ ! -f "$DATA/$_f" ]; then
     mv -f "$MODPATH/$_f" "$DATA/$_f" 2>/dev/null
   fi
 done
 _adapt_match
+_cat_soc_defaults
 if [ "$_FRESH_CONF" = 1 ]; then
   _soc_defaults "$DATA/socfreq.conf"
 fi
 
-# ── 机型适配表（adapt/）────────────────────────────────────────
+# 机型适配表（adapt/）
 # 有些机器的节点长得不在预期路径上：一个 policy* 目录都读不到、
 # 或找不到可写的 GPU 上限节点。这种机器由作者照着用户发来的适配包改好一张表，
-# 放进包里的 adapt/ 随版本发布；装机时按 #match 认机器，命中就装进数据目录
-# 当 override.conf。守护只在自动探测扑空时用它，所以正常机器完全不受影响。
-#
-# 三条规矩：
-#   1) 文件里每条 #match 都要命中才算命中（brand= / model= / soc= / cores= 四种键）；
-#      一条 #match 都没有的文件不装 —— 没有条件就等于对所有机器适用，太危险。
-#      多个文件都命中时取 #match 条数最多的那份（更具体），同分取先命中的。
-#   2) 只认这四种键开头的行，别的一律不带进数据目录（打错前缀的行不会被静默装上）。
-#   3) 没命中任何文件时，只撤掉"上一版由 adapt 装进去的那份"（认 #from adapt/ 标记）。
-#      作者把某台机的适配下架了，用户升级后就该回到自动探测；
-#      而用户自己用命令行导进去的表没有这个标记，不该被装机删掉。
 _soc_adapt() {
   [ -d "$MODPATH/adapt" ] || return 0
   if [ -n "$ADAPT_FILE" ] && [ -f "$ADAPT_FILE" ]; then
@@ -332,8 +398,6 @@ _soc_adapt() {
 _soc_adapt
 
 # 追加写入前保证目标文件以换行结尾：末行无换行时 >> 会把新行与末行粘成一行
-# （如 CPU_GOVERNOR=""SCREEN_UNCAP=0、com.a.gamecom.b.game），
-# 键和包名看似都在但 grep 一条都匹配不上，所以所有追加写入前都过一遍这个函数。
 ensure_final_newline() {
   [ -s "$1" ] || return 0
   if [ -n "$(tail -c 1 "$1" 2>/dev/null | tr -d '\n')" ]; then
@@ -341,10 +405,8 @@ ensure_final_newline() {
   fi
 }
 
-# ── 配置：补入新增的键 ──────────────────────────────────────────
+# 配置：补入新增的键
 # 数据目录已有 conf 时不整体覆盖，避免用户改过的参数被打回默认。
-# 包内新增的键若用户那份里没有，页面上会多出没有对应行的开关，
-# 因此只追加用户那份里不存在的键整行，已存在的键一个都不碰。
 if [ -f "$DATA/socfreq.conf" ] && [ -f "$MODPATH/socfreq.conf" ]; then
   _added=0
   ensure_final_newline "$DATA/socfreq.conf"
@@ -357,7 +419,6 @@ if [ -f "$DATA/socfreq.conf" ] && [ -f "$MODPATH/socfreq.conf" ]; then
     [ "${#_old}" -gt 5 ] && continue
     [ "$_old" -lt 100 ] || [ "$_old" -gt 50000 ] && continue
     # 旧默认就是 1000；没动过的话让它落新默认（超大核 3000 / 主簇 1000），
-    # 别把“从没设过”当成用户选择。真改过的值才原样摊到三簇。
     [ "$_old" = "1000" ] && continue
     grep -q "^GOV_${_gk}_BIG=" "$DATA/socfreq.conf" 2>/dev/null && continue
     printf 'GOV_%s_BIG=%s\nGOV_%s_MID=%s\nGOV_%s_LITTLE=%s\n' \
@@ -375,8 +436,6 @@ if [ -f "$DATA/socfreq.conf" ] && [ -f "$MODPATH/socfreq.conf" ]; then
     printf '%s\n' "$_line" >> "$DATA/socfreq.conf" 2>/dev/null && _added=$((_added + 1))
   done < "$MODPATH/socfreq.conf"
   # 熄屏轻巡检改为常开：存量用户不管原来选的是交还系统还是 keep，覆盖
-  # 更新后统一写 SCREEN_POLICY=cap。只强制一次（标记文件），之后手改 conf
-  # 不会被每次升级打回。
   ensure_final_newline "$DATA/socfreq.conf"
   _CAP_MARK="$DATA/.screen_cap_default"
   if [ ! -f "$_CAP_MARK" ]; then
@@ -400,12 +459,9 @@ if [ -f "$DATA/socfreq.conf" ] && [ -f "$MODPATH/socfreq.conf" ]; then
   rm -f "$MODPATH/socfreq.conf" 2>/dev/null
 fi
 
-# ── 荣耀 / 华为 / 三星：清掉旧默认写入的 conservative ───────────
-# V2.1 出厂把 CPU_GOVERNOR 写成了 conservative。部分荣耀 / 华为 / 三星
+# 荣耀 / 华为 / 三星：清掉旧默认写入的 conservative
 # 内核切到通用 conservative 后直接 kernel panic：装完约一分钟（开机满血
-# 窗口结束）硬重启，之后管理器把模块判成坏模块、root 看起来"没了"。
 # 新版默认已改成"不干预"；这里把存量机器上由旧默认写进去的那一行
-# 也清掉。只跑一次（标记文件），用户之后自己选的 conservative 不受影响。
 _GOV_MARK="$DATA/.gov_default_fix"
 if [ ! -f "$_GOV_MARK" ]; then
   _br=$(getprop ro.product.brand 2>/dev/null | tr 'a-z' 'A-Z')
@@ -430,13 +486,7 @@ if [ ! -f "$_GOV_MARK" ]; then
   : > "$_GOV_MARK" 2>/dev/null
 fi
 
-# ── 名单：升级时把精选名单的新条目合进来 ────────────────────────
-# 三方合并，基准是上次装机时包内的名单（games.base.txt）：
-#   包内比基准多的 → 补进用户名单
-#   基准比包内多的 → 从用户名单移除（上游下架的条目）
-#   用户自己加的（基准和包内都没有）→ 不在两个差集里，不动
-#   用户自己删的（包内和基准都还有）→ 不算新增，不会被塞回去
-# 没有基准的旧装机只补新增、不删条目：此时无法区分用户新增和上游删除。
+# 名单：升级时把精选名单的新条目合进来
 G_NEW="$MODPATH/games.txt"
 G_USER="$DATA/games.txt"
 G_BASE="$DATA/games.base.txt"
@@ -481,15 +531,11 @@ if [ -f "$G_NEW" ]; then
   fi
 fi
 
-# ── 内置满血清单：相机类 ────────────────────────────────────────
-# 只给**本机已安装**的包追加 `pkg=full  #builtin`，用户已有任意一行就跳过。
-# 升级只补"上一版清单里没有"的包：基准存 builtin_modes.base.txt，
-# 用户删掉的内置项在下次升级不会被塞回来（它在基准里，不属于新增）。
+# 内置满血清单：相机类
 B_NEW="$MODPATH/scripts/builtin_modes.txt"
 B_BASE="$DATA/builtin_modes.base.txt"
 if [ -f "$B_NEW" ] && [ -f "$DATA/app_modes.conf" ]; then
   # pm 拿不到已安装列表时整段跳过，并且**不推进基准**：
-  # 宁可这次不加，也别让这些相机以后永远补不进来。
   pm list packages 2>/dev/null | sed 's/^package://' | tr -d '\r' \
     | grep -v '^$' | sort -u > "$DATA/.binst" 2>/dev/null
   if [ -s "$DATA/.binst" ]; then
@@ -520,10 +566,7 @@ if [ -f "$B_NEW" ] && [ -f "$DATA/app_modes.conf" ]; then
   rm -f "$DATA/.binst" "$DATA/.bnew" "$DATA/.bold" "$DATA/.badd" 2>/dev/null
 fi
 
-# ── 内置深睡永久豁免：常用通讯 / 运动健康 ───────────────────────
-# 深睡会强制进 Doze；通讯和健康应用被压住就是"锁屏收不到消息/步数不动"。
-# 只给本机已安装的包写 white=；用户删掉的不会被下次升级塞回来
-# （基准 builtin_white.base.txt 只补"新版清单新增"的包）。
+# 内置深睡永久豁免：常用通讯 / 运动健康
 W_NEW="$MODPATH/scripts/builtin_white.txt"
 W_BASE="$DATA/builtin_white.base.txt"
 W_CONF="$DATA/dsleep.conf"
@@ -577,16 +620,11 @@ chmod 0700 "$DATA" "$DATA/run" 2>/dev/null
 chmod 0644 "$DATA/socfreq.conf" "$DATA/games.txt" 2>/dev/null
 # 不往模块目录回填：并存两份配置时改模块目录那份无效，且比没有配置更难排查。
 
-# ── 安装期自检：确认守护可以执行 ──────────────────────────────────
+# 安装期自检：确认守护可以执行
 # 权限设完后试一次 exec。loader 的拒绝发生在 exec 之前（PT_TLS 对齐、
-# 目标架构、ELF 头损坏），此时守护根本没启动，日志里一行都不会有。
-# version 是最轻的子命令：不碰 sysfs、不写文件，失败也不留残留。
 CHK=$("$MODPATH/socfreqd" version 2>&1)
 RC=$?
 # 成败要按退出码判，不能按"输出为空"判：loader 的拒绝信息（CANNOT LINK
-# EXECUTABLE / cannot locate symbol…）被 2>&1 一起收进了 CHK，
-# 真正失败的时候 CHK 反而是非空的。原来那条 [ -z "$CHK" ] 正好判反了：
-# 装不上时打印"自检通过：守护 CANNOT LINK…"，能跑起来时打印一句空的原话。
 if [ "$RC" != 0 ] || [ -z "$CHK" ]; then
   ui_print "!  守护无法执行（退出码 $RC），loader 原话："
   ui_print "   $CHK"
@@ -596,11 +634,7 @@ else
   ui_print "  自检通过：守护 $CHK"
 fi
 
-# ── 申请 KernelSU 热安装 ─────────────────────────────────────────
-# 本模块不写 system/、也没有只能在开机阶段做的操作，装完就能用：
-# KernelSU 会用新目录替换模块，并执行 scripts/hotinstall.sh（停旧守护 → 起新版）。
-# 支持热安装的管理器不会留 update 标记，也不会再提示重启；
-# 不支持的管理器会忽略这两个变量，回到"重启后生效"的老路，不会更糟。
+# 申请 KernelSU 热安装
 export MODULE_HOT_INSTALL_REQUEST=true
 export MODULE_HOT_RUN_SCRIPT=scripts/hotinstall.sh
 case "${KSU_HAS_HOT_INSTALL:-}" in

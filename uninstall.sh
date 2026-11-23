@@ -17,6 +17,7 @@ _had_journal=0
 for _b in "$DATA" "$MODDIR"; do
   { [ -f "$_b/run/nodes.saved" ] || [ -f "$_b/run/cpuset.saved" ] ||
     [ -f "$_b/run/uclamp.saved" ] || [ -f "$_b/run/bgcgroup.saved" ] ||
+    [ -f "$_b/run/bigoffline.saved" ] ||
     [ -f "$_b/run/ppm.saved" ] || [ -f "$_b/run/msm.saved" ]; } && _had_journal=1
 done
 
@@ -212,6 +213,27 @@ restore_bgcgroup() {
   if [ "$_rf" = 0 ]; then rm -f "$B"; else echo "  保留账本：$B"; fi
 }
 
+# 超大核离线账本：每行 "<online 节点> <原值> <mode>"，原值只会是 1。
+restore_bigoff() {
+  O="$1/run/bigoffline.saved"
+  [ -f "$O" ] || return 0
+  _rf=0
+  while read -r NODE VAL MODE; do
+    [ -e "$NODE" ] || continue
+    case "$VAL" in 0|1) ;; *) continue ;; esac
+    chmod 0644 "$NODE" 2>/dev/null
+    echo "$VAL" > "$NODE" 2>/dev/null
+    _now=$(cat "$NODE" 2>/dev/null | tr -d ' \r\n')
+    [ "$_now" = "$VAL" ] || {
+      _rf=1
+      echo "  超大核未上线：$NODE（期望 $VAL，实际 ${_now:-读不到}）"
+    }
+    case "$MODE" in ''|*[!0-7]*) MODE=644 ;; esac
+    chmod "$MODE" "$NODE" 2>/dev/null
+  done < "$O"
+  if [ "$_rf" = 0 ]; then rm -f "$O"; else echo "  保留账本：$O"; fi
+}
+
 # PPM / msm 第二道锁的兜底。守护正常退出会自己还原；这里只在
 # 二进制缺失/被杀时按账本恢复。PPM 的 ppm.saved 每行 "<idx> <原值>"，
 # msm.saved 是原始整串（可能为空）。
@@ -273,6 +295,7 @@ for BASE in "$DATA" "$MODDIR"; do
   restore_cpuset "$BASE"
   restore_uclamp "$BASE"
   restore_bgcgroup "$BASE"
+  restore_bigoff "$BASE"
   restore_ppm "$BASE"
   restore_msm "$BASE"
 done
@@ -332,10 +355,10 @@ stop_procs KILL
 _rem=0
 for _j in "$DATA/run/nodes.saved" "$DATA/run/perms.saved" "$DATA/run/govs.saved" \
           "$DATA/run/cpuset.saved" "$DATA/run/uclamp.saved" "$DATA/run/bgcgroup.saved" \
-          "$DATA/run/ppm.saved" "$DATA/run/msm.saved" \
+          "$DATA/run/bigoffline.saved" "$DATA/run/ppm.saved" "$DATA/run/msm.saved" \
           "$MODDIR/run/nodes.saved" "$MODDIR/run/perms.saved" "$MODDIR/run/govs.saved" \
           "$MODDIR/run/cpuset.saved" "$MODDIR/run/uclamp.saved" "$MODDIR/run/bgcgroup.saved" \
-          "$MODDIR/run/ppm.saved" "$MODDIR/run/msm.saved"; do
+          "$MODDIR/run/bigoffline.saved" "$MODDIR/run/ppm.saved" "$MODDIR/run/msm.saved"; do
   [ -f "$_j" ] && _rem=1
 done
 if [ "$_rem" = 1 ]; then

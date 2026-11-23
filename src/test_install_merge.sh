@@ -664,6 +664,57 @@ chk "$(sed -n 's/^GOV_DOWN_BIG=//p' "$T/data/socfreq.conf")" "1000" \
 chk "$(sed -n 's/^GOV_DOWN_MID=//p' "$T/data/socfreq.conf")" "1500" \
     "旧默认降频落新默认（大核 1500）"
 
+echo "== 场景 29：分类默认值按芯片省电预设生成 =="
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+cp "$MOD/app_categories.conf" "$T/mod/app_categories.conf"
+cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
+cp "$T/pkg_v1.txt" "$T/mod/games.txt"
+eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8750;; ro.board.platform) echo X;; esac; }"
+mk_case; runcase
+# SM8750 省电 46/51 → 视频 41/43，社交 41/58，阅读 39/40
+chk "$(_g "$T/data/app_categories.conf" video_cpu_big)" "41" "视频超大核 = 省电 46 - 5"
+chk "$(_g "$T/data/app_categories.conf" video_cpu_little)" "43" "视频小核 = 省电 51 - 8"
+chk "$(_g "$T/data/app_categories.conf" social_cpu_big)" "41" "社交超大核 = 省电 46 - 5"
+chk "$(_g "$T/data/app_categories.conf" social_cpu_little)" "58" "社交小核 = 省电 51 + 7"
+chk "$(_g "$T/data/app_categories.conf" reading_cpu_big)" "39" "阅读超大核 = 省电 46 - 7"
+chk "$(_g "$T/data/app_categories.conf" reading_cpu_little)" "40" "阅读小核 = 省电 51 - 11"
+chk "$(_g "$T/data/app_categories.conf" video_cpu_mid2)" "" "两簇机不写不存在的中核键"
+chk "$(_g "$T/data/defaults/app_categories.conf" video_cpu_big)" "41" \
+    "恢复默认那份也写入芯片分类默认值"
+has "$T/data/app_categories.conf" "video=com.ss.android.ugc.aweme" && _k=yes || _k=no
+chk "$_k" "yes" "生成默认值时保留视频包名"
+
+echo "== 场景 30：升级迁移旧固定默认，保留用户改过的 GPU =="
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
+cp "$MOD/socfreq.conf" "$T/data/socfreq.conf"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+cp "$MOD/app_categories.conf" "$T/mod/app_categories.conf"
+cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
+cp "$MOD/app_categories.conf" "$T/data/app_categories.conf"
+sed 's/^video_gpu=0$/video_gpu=33/' "$T/data/app_categories.conf" > "$T/data/cat.tmp"
+mv -f "$T/data/cat.tmp" "$T/data/app_categories.conf"
+eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8750;; ro.board.platform) echo X;; esac; }"
+mk_case; runcase
+chk "$(_g "$T/data/app_categories.conf" video_cpu_big)" "41" "旧固定默认升级后换成芯片默认"
+chk "$(_g "$T/data/app_categories.conf" video_gpu)" "33" "迁移不丢用户改过的分类 GPU"
+
+echo "== 场景 31：用户改过分类 CPU 时不迁移 =="
+rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
+cp "$MOD/socfreq.conf" "$T/data/socfreq.conf"
+cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
+cp "$MOD/app_categories.conf" "$T/mod/app_categories.conf"
+cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
+{
+  printf 'video_cpu=40\nvideo_gpu=0\nsocial_cpu=55\nsocial_gpu=0\n'
+  printf 'reading_cpu=50\nreading_gpu=0\n\n'
+  grep -E '^(video|social|reading)=' "$MOD/app_categories.conf"
+} > "$T/data/app_categories.conf"
+eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8750;; ro.board.platform) echo X;; esac; }"
+mk_case; runcase
+chk "$(_g "$T/data/app_categories.conf" video_cpu)" "40" "用户改过的 legacy 分类值保留"
+chk "$(_g "$T/data/app_categories.conf" video_cpu_big)" "" "不迁移就不额外写四簇键"
+
 echo
 if [ "$fail" -eq 0 ]; then echo "装机迁移段台架：全部通过 ($pass)"; else echo "装机迁移段台架：$fail 项失败 / $pass 项通过"; fi
 exit "$fail"

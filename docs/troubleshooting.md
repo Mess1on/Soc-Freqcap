@@ -33,7 +33,7 @@ UI 渲染，也不随文件变大而变慢。
 在手机终端确认 zip 结构（把路径换成实际文件）：
 
 ```sh
-unzip -l /sdcard/Download/Soc智能限频_V2.3.zip | head
+unzip -l /sdcard/Download/Soc智能限频_V2.4_Beta1.zip | head
 # 必须直接看到 module.prop / META-INF/com/google/android/update-binary
 ```
 
