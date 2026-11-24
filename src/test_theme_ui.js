@@ -14,7 +14,7 @@ function ok(c, n, e) {
   else { console.log('  FAIL ' + n + (e ? ': ' + e : '')); fail++; }
 }
 
-const chunk = html.match(/\/\* ── 主题：浅色 \/ 深色[\s\S]*?(?=\/\*[\r\n]+ \* 调用 root shell)/);
+const chunk = html.match(/\/\* 主题：浅色 \/ 深色 \*\/[\s\S]*?(?=\/\* 调用 root shell)/);
 if (!chunk) {
   console.log('  FAIL 页面里找不到主题脚本');
   process.exit(1);

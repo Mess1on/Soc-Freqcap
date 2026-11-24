@@ -93,7 +93,7 @@ function readPool(buf, at) {
 }
 
 /* ── AndroidManifest.xml（AXML）──────────────────────────────── */
-/* 实测到的布局（gnirehtet / 酷安 / Kin 三个包一致）：
+/* 实测布局（多个样本包一致）：
  *   文件头 8 字节（type=3, headerSize=8, size）
  *   RES_STRING_POOL_TYPE 0x0001     —— 元素名、属性名、字面量值都在这里面
  *   RES_XML_RESOURCE_MAP_TYPE 0x0180 —— 一组 u32 资源 ID，下标 = 属性名在池里的下标
@@ -166,7 +166,7 @@ function parseManifest(ax) {
 function attrOf(el, key) { return el ? (el.attrs.find(a => a.key === key && a.id) || null) : null; }
 
 /* ── resources.arsc ──────────────────────────────────────────── */
-/* 实测布局（gnirehtet=老 aapt、酷安/Kin/WakeUp=aapt2，两边一致）：
+/* 实测布局（老 aapt 与 aapt2 两边一致）：
  *   ResTable_header : type=2, headerSize=12, size, packageCount(u32 @8)
  *   紧跟一个**全局字符串池**(0x0001) —— label 的文本、drawable 的文件路径都在这里
  *   ResTable_package(0x0200) : headerSize=288
@@ -302,7 +302,7 @@ function appInfo(file) {
   /* 桌面入口是谁：
    * <activity> / <activity-alias> 里带 intent-filter，且 action=MAIN、
    * category=LAUNCHER 同时出现的那个；<application> 上的 label/icon 是兜底。
-   * 两边都要看：Kin.apk 的名字同时写在两处，而有些包只在 activity 上写。 */
+   * 两边都要看：有的包把名字同时写在两处，有些包只在 activity 上写。 */
   const app = mf.els.find(e => e.tag === 'application') || null;
   const manifest = mf.els.find(e => e.tag === 'manifest') || null;
   const pkg = manifest ? (manifest.attrs.find(a => !a.id && a.key === 'package') || {}).str || '' : '';

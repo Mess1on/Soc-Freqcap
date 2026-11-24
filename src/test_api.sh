@@ -48,6 +48,25 @@ ok "$(A about | sed -n 's/^COUNT=//p')" "$(grep -vc '^[[:space:]]*\(#.*\)\?$' ga
 echo "== 合法写入 =="
 A conf_set CPU_PCT_BIG 60 >/dev/null
 ok "$(grep '^CPU_PCT_BIG=' socfreq.conf)" "CPU_PCT_BIG=60" "合法百分比已落盘"
+A conf_set FSM_CPU_DEEP_BIG 50 >/dev/null
+ok "$(grep '^FSM_CPU_DEEP_BIG=' socfreq.conf)" "FSM_CPU_DEEP_BIG=50" \
+   "FSM 状态 CPU 上限可写"
+A conf_set FSM_MIN_DEEP_OTHER 0 >/dev/null
+ok "$(grep '^FSM_MIN_DEEP_OTHER=' socfreq.conf)" "FSM_MIN_DEEP_OTHER=0" \
+   "FSM 状态下限 0 = 不设"
+reject conf_set FSM_CPU_DEEP_BIG 101
+A conf_set FSM_PSI_MOD 25 >/dev/null
+ok "$(grep '^FSM_PSI_MOD=' socfreq.conf)" "FSM_PSI_MOD=25" "FSM PSI 阈值可写"
+reject conf_set FSM_PSI_MOD 101
+A conf_set FSM_TEMP_IN 54 >/dev/null
+A conf_set FSM_TEMP_OUT 48 >/dev/null
+ok "$(grep '^FSM_TEMP_IN=' socfreq.conf)/$(grep '^FSM_TEMP_OUT=' socfreq.conf)" \
+   "FSM_TEMP_IN=54/FSM_TEMP_OUT=48" "FSM 压频起始/松手温度可写"
+reject conf_set FSM_TEMP_IN 44
+reject conf_set FSM_TEMP_IN 81
+reject conf_set FSM_TEMP_OUT 39
+reject conf_set FSM_TEMP_OUT 71
+reject conf_set FSM_UP_S 1
 A conf_set CPU_GOVERNOR walt >/dev/null
 ok "$(grep '^CPU_GOVERNOR=' socfreq.conf)" "CPU_GOVERNOR=walt" "合法调速器已落盘"
 A conf_set CPU_GOVERNOR "" >/dev/null
@@ -141,8 +160,13 @@ reject conf_set BATT_CRIT 0
 reject conf_set BATT_CRIT 96
 reject conf_set BATT_CRIT_CUT 31
 reject conf_set GPU_MIN_LOCK 2
+ok "$(A conf_set GOV_DOWN_BIG 0 | head -1)" "OK GOV_DOWN_BIG=0" "降频限速允许 0"
+reject conf_set GOV_UP_BIG 0
 ok "$(A conf_set BIG_MIN 1 | head -1)" "OK BIG_MIN=1" "超大核最低频开关能写"
 reject conf_set BIG_MIN 2
+ok "$(A conf_set BIG_OFFLINE 1 | head -1)" "OK BIG_OFFLINE=1" "超大核离线开关能写"
+reject conf_set BIG_OFFLINE 2
+ok "$(A conf_set BIG_OFFLINE 0 >/dev/null; grep '^BIG_OFFLINE=' socfreq.conf)" "BIG_OFFLINE=0" "超大核离线开关能关"
 ok "$(A conf_set BIG_MIN 0 >/dev/null; grep '^BIG_MIN=' socfreq.conf)" "BIG_MIN=0" \
    "超大核最低频恢复默认"
 ok "$(A conf_set CPU_MIN_LOCK 1 | head -1)" "OK CPU_MIN_LOCK=1" "CPU 下限锁开关能写"
@@ -1368,6 +1392,19 @@ rm -f ds_state
 ok "$(DSA ds_white_del com.example.sleep | head -n 1)" "OK com.example.sleep" "移除豁免"
 ok "$(DSA ds_white_del com.example.sleep | head -n 1)" "MISS com.example.sleep" "重复移除报 MISS"
 ok "$(DSA ds_get | grep -c '^white=')" "0" "移除后名单为空"
+
+echo "== 应用分类：缺省值按芯片表合并 =="
+mkdir -p "$TMP/defaults"
+printf 'video_cpu_big=41\nvideo_cpu_little=43\nvideo_gpu=0\nsocial_cpu_big=41\nsocial_cpu_little=58\nsocial_gpu=0\nreading_cpu_big=39\nreading_cpu_little=40\nreading_gpu=0\n' \
+  > "$TMP/defaults/app_categories.conf"
+printf 'video=com.example.video\nsocial=com.example.social\n' > app_categories.conf
+ok "$(A cat_get | sed -n 's/^video_cpu_big=//p')" "41" "用户文件缺四簇值时合并芯片默认值"
+ok "$(A cat_get | grep -c '^video=com.example.video$')" "1" "合并默认值不覆盖用户包名"
+A cat_set video cpu_big 38 >/dev/null
+ok "$(A cat_get | sed -n 's/^video_cpu_big=//p')" "38" "用户写过的四簇值优先于默认值"
+printf 'video_cpu=40\nsocial=com.example.social\n' > app_categories.conf
+ok "$(A cat_get | grep -c '^video_cpu_big=')" "0" "旧版统一值存在时不再混入四簇默认"
+rm -rf "$TMP/defaults" app_categories.conf
 
 echo "== 芯片预设（省电/均衡）=="
 # 没有 adapt 目录时页面要显示"无"，apply 必须拒绝而不是写一堆空值。

@@ -33,7 +33,7 @@ UI 渲染，也不随文件变大而变慢。
 在手机终端确认 zip 结构（把路径换成实际文件）：
 
 ```sh
-unzip -l /sdcard/Download/Soc智能限频_V2.3.zip | head
+unzip -l /sdcard/Download/Soc智能限频_V2.4_Beta1.zip | head
 # 必须直接看到 module.prop / META-INF/com/google/android/update-binary
 ```
 
@@ -168,9 +168,9 @@ done
 - 新版卸载脚本会先停看门狗（`service.sh` 子 shell）、守护和深睡，再还原三本账，
   还原完再杀一遍防复活；两处 `modules_update` 都会清。若仍有节点写不进去，
   账本会备份到 `/data/local/tmp/soc_freqcap_restore`，不会随数据目录一起删掉。
-- **Scene 的弹窗**（“检测到系统中可能限制性能的组件”）是 Scene 看到有人在改 CPU/性能节点；
-  Scene 自己也有 CPU 频率 / 开机情景模式。检查 Scene 的「开机应用 / 情景模式 / 性能模式」
-  是否设了上限，并看它弹窗里要禁用的那个“组件”到底是系统组件还是 `soc_freqcap`。
+- **第三方性能工具的弹窗**（“检测到系统中可能限制性能的组件”）是因为它看到有人在改
+  CPU/性能节点；它自己也有频率和开机情景模式。检查它的「开机应用 / 情景模式 / 性能模式」
+  是否设了上限，并看弹窗里要禁用的那个“组件”到底是系统组件还是 `soc_freqcap`。
   本模块没有任何对话框，也不会在卸载后保留进程。
 - 临时把上限放回硬件最高（重启也会重置，先应急用）：
   ```sh
@@ -181,7 +181,7 @@ done
   settings delete global device_idle_constants
   ```
 - **截图里“检测到系统中可能限制性能的组件，是否将其禁用(重启手机后还原)?”不是本模块的 UI**：
-  本模块没有任何对话框。点「取消」后看它属于哪个 App（常见是 Scene、爱玩机、游戏助手一类的性能工具），
+  本模块没有任何对话框。点「取消」后看它属于哪个 App（常见是第三方性能工具或游戏助手），
   把那个 App 的名字/版本发过来才能继续定位。
 - 本模块的卸载流程：停守护 → 按 journal 还原 → 没有 journal 时把 CPU 上限放回硬件最高 →
   停深睡并解冻、撤临时白名单、退出强制空闲 → 删数据目录。卸载脚本在 `uninstall.sh`，可直接读。
@@ -243,7 +243,7 @@ su -c 'c=/data/adb/soc_freqcap/socfreq.conf; sed "s/^CPU_GOVERNOR=.*/CPU_GOVERNO
 
 ## 已知的边界
 
-- 和其他改频率/调度器的模块（Scene、Scene5 等）不要同时用，
+- 和其他改频率/调度器的模块不要同时用，
   两个都想当"节流阀"会互相打架。安装时会检测并提示，但不阻止。
 - 部分新 SoC 的 GPU 没有暴露频率表节点，这时只限 CPU，日志里会告警。
 - 读写范围只有两处：`/data/adb/soc_freqcap` 这一份数据目录，和自己封顶的那几个

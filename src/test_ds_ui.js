@@ -17,7 +17,7 @@ function ok(c, n, e) {
   else { console.log('  FAIL ' + n + (e ? ': ' + e : '')); fail++; }
 }
 
-const chunk = html.match(/\/\* ── 深度睡眠 ──[\s\S]*?(?=\/\* ── 维护 ── \*\/)/);
+const chunk = html.match(/\/\* 深度睡眠 \*\/[\s\S]*?(?=\/\* 功能页「维护)/);
 if (!chunk) {
   console.log('  FAIL 页面里找不到深睡那段代码');
   process.exit(1);

@@ -1,17 +1,6 @@
 /*
- * icon.c — 从 APK 里取应用图标，输出 data URI
- *
- * 主路径是守护自己解析 zip；unzip 只当兜底：
-   * 部分 ROM 的 toybox 没有 unzip，自带 unzip 的 ROM 之间
-   * 版本和列格式也不一致，不能当唯一路径。
-   *
-   * 兜底不另写一套挑图规则：
-   * api.sh 把 `unzip -l` 的条目名喂给守护的 `score` 子命令，
-   * 打分只有 icon.c 里 score_name 这一个实现。
- *
- * zip 的中央目录在文件末尾，直接读，不用解包整个 APK（游戏的 res 常上百 MB）。
- * 条目数据用 zlib 的 inflate 解——静态链 NDK sysroot 自带的 libz.a，
- * 不依赖系统 .so。
+ * 从 APK 直接读图标：zip 中央目录在文件末尾，不整包解压。
+ * unzip 只作 ROM 缺工具时的兜底；挑图规则只有 score_name 一份实现。
  */
 #define _GNU_SOURCE
 #include <stdio.h>

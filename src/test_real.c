@@ -1,17 +1,7 @@
 /*
- * test_real.c — 直接跑守护真实代码的单元自检。
- *
- * 为什么不再自带一份实现：
- * 之前 test_logic.c 把 grab_pkg 抄了一遍，于是 4 条"解析 focus"全绿，
- * 而线上那版有个反向判断，把刚解析出来的包名立刻擦掉 —— 游戏态根本不触发。
- * 测试里抄一份就永远抓不到这类错。本文件被 socfreqd.c 以 SF_TEST 包含，
- * 调的就是守护自己的函数，一个字符都没改。
- *
- * 构建（需要 NDK 与设备）：
- *   aarch64-linux-android21-clang -D SF_TEST -static -O1 -o test_real src/socfreqd.c
- *   adb push test_real /data/local/tmp && adb shell su -c /data/local/tmp/test_real
- *
- * 注意：sf_test_main 由 socfreqd.c 在 main 位置调用，所以本文件不写 main。
+ * 自检直接调用守护自身函数，不复制实现。
+ * 构建：aarch64-linux-android21-clang -DSF_TEST -static -O1 -lz \
+ *       -o test_real src/socfreqd.c src/icon.c src/appinfo.c src/adapt.c
  */
 #include <stdio.h>
 #include <string.h>
@@ -258,10 +248,10 @@ static void sf_test_smart_audit(void) {
       g_npol = save_n;
     }
 
-    int sv = g_sm.state, sbig = cfg.pct[0], slit = cfg.pct[3];
+    int sv = g_sm.fsm, sbig = cfg.pct[0], slit = cfg.pct[3];
     int save_prime = g_prime_state;
     cfg.pct[0] = 46; cfg.pct[3] = 51;
-    g_sm.state = 3;
+    g_sm.fsm = 3; g_sm.state = 3;
     g_prime_state = 0;
     sf_check(smart_pct_tier(0, 2) == 18 && smart_pct_tier(3, 2) == 51,
              "AC-5：m=2 全局重载+超大核空闲：超大核按空闲 46×40%，主簇仍满幅", NULL);
@@ -271,7 +261,7 @@ static void sf_test_smart_audit(void) {
     g_prime_state = -1;
     sf_check(smart_pct_tier(0, 2) == 46,
              "AC-5：无有效样本时 smart_pct_tier 不钳超大核", NULL);
-    g_sm.state = sv; cfg.pct[0] = sbig; cfg.pct[3] = slit;
+    g_sm.fsm = sv; cfg.pct[0] = sbig; cfg.pct[3] = slit;
     g_prime_state = save_prime;
   }
 
@@ -302,17 +292,17 @@ static void sf_test_smart_audit(void) {
     cfg.pct[0] = sbig; cfg.pct[3] = slit;
     g_prime_state = save_prime;
 
-    g_sm.state = 3;
+    g_sm.fsm = 3; g_sm.state = 3;
     sf_check(smart_on_enter_screen_off(0) == 0 && g_sm.state == 3,
              "AC-3：非 keep（uncap）不把智能档收到空闲", NULL);
     cfg.strategy = 0;
-    g_sm.state = 2;
+    g_sm.fsm = 2; g_sm.state = 2;
     sf_check(smart_on_enter_screen_off(1) == 0 && g_sm.state == 2,
              "AC-3：STRATEGY=cap 不改智能状态", NULL);
 
     cfg.strategy = 1;
     cfg.app_switch_tier = 2;
-    g_sm.state = 0; g_sm.pending = 0; g_sm.pend_n = 0;
+    g_sm.fsm = 0; g_sm.state = 0; g_sm.pending = 0; g_sm.pend_n = 0;
     g_cpu_prev_ok = 1;
     g_smart_warmup = 0;
     snprintf(g_state, sizeof g_state, "normal");
@@ -325,13 +315,13 @@ static void sf_test_smart_audit(void) {
     sf_check(ch == 1 && g_sm.state == 2 && g_smart_warmup == 0,
              "AC-2：预热只升不降到默认中载 2", NULL);
 
-    g_sm.state = 3; g_smart_warmup = 1;
+    g_sm.fsm = 3; g_sm.state = 3; g_smart_warmup = 1;
     g_test_busy = -1;
     smart_tick(0);
     sf_check(g_sm.state == 3, "AC-2：当前档更高则不压回", NULL);
 
     cfg.app_switch_tier = 0;
-    g_sm.state = 0;
+    g_sm.fsm = 0; g_sm.state = 0;
     g_cpu_prev_ok = 1;
     g_smart_warmup = 0;
     smart_on_leave_screen_off();
@@ -341,7 +331,7 @@ static void sf_test_smart_audit(void) {
     cfg.app_switch_tier = 2;
     snprintf(g_state, sizeof g_state, "game");
     g_smart_warmup = 0;
-    g_sm.state = 0;
+    g_sm.fsm = 0; g_sm.state = 0;
     smart_on_leave_screen_off();
     sf_check(g_smart_warmup == 0 && g_sm.state == 0,
              "AC-2：游戏交权态亮屏不预热", NULL);
@@ -379,64 +369,166 @@ static void sf_test_smart_audit(void) {
     snprintf(g_state, sizeof g_state, "%s", save_gstate);
   }
 
-  /* AC-7 smart_tick 集成（可注入 busy / 预热 / 半帽，不改算法数字） */
+  /* 六态 FSM 核心：窗口、迟滞、温控、游戏门槛 */
   {
     int save_st = cfg.strategy, save_tier = cfg.app_switch_tier;
-    int save_state = g_sm.state, save_pend = g_sm.pending, save_n = g_sm.pend_n;
+    int save_th = cfg.ad.th, save_hi = cfg.ad.th_high, save_lo = cfg.ad.th_low;
+    int save_tin = cfg.fsm_temp_in, save_tout = cfg.fsm_temp_out;
+    int save_state = g_sm.state, save_fsm = g_sm.fsm;
     int save_fast = g_sm_fast_n, save_warm = g_smart_warmup;
     int save_prime = g_prime_state;
     cfg.strategy = 1;
-    cfg.app_switch_tier = 2;
+    cfg.app_switch_tier = 0;
+    cfg.ad.th = 1;
+    cfg.ad.th_high = 40;
+    cfg.ad.th_low = 30;
+    cfg.fsm_temp_in = 40;
+    cfg.fsm_temp_out = 30;
     g_smart_warmup = 0;
     g_test_busy = -1;
+    g_test_gpu = -1;
+    g_test_temp = -1;
+    g_test_screen = 1;
+    g_test_fg_not_game = 0;
     g_test_half = 0;
 
-    g_sm.state = 0; g_sm.pending = 0; g_sm.pend_n = 3; g_sm_fast_n = 1;
-    sf_check(smart_tick_ex(0, 1, 0) == 1 && g_sm.state == 2 && g_sm.pend_n == 0 &&
-             g_sm_fast_n == 0,
-             "AC-7：预热只升不降，计数清零", NULL);
-    sf_check(smart_tick_ex(0, 1, 0) == 0 && g_sm.state == 2,
-             "AC-7：已在预热档则不降", NULL);
+#define SM_RESET() do { \
+    g_sm.fsm = SMART_LIGHT_IDLE; g_sm.fsm_pending = SMART_LIGHT_IDLE; \
+    g_sm.fsm_pend_n = 0; g_sm.fsm_enter_tick = 0; g_sm.tick = 0; \
+    g_sm.session_tick = 1; g_sm.cpu_est = -1; g_sm.fsm = SMART_LIGHT_IDLE; \
+    g_sm.gaming_streak = 0; g_sm.state = 1; g_sm_fast_n = 0; \
+  } while (0)
 
-    g_sm.state = 0; g_prime_state = 0;
-    smart_tick(1);
-    sf_check(g_sm.state == 2 && g_prime_state == -1,
-             "AC-7：预热拍不拿旧超大核档位钳制", NULL);
+    SM_RESET();
+    sf_check(smart_tick_ex(70, -1, -1, 1, 0, 0, 0) == 0 &&
+             smart_tick_ex(70, -1, -1, 1, 0, 0, 0) == 0 &&
+             smart_tick_ex(70, -1, -1, 1, 0, 0, 0) == 1 &&
+             g_sm.fsm == SMART_MODERATE && g_sm.state == 2,
+             "FSM：LIGHT→MODERATE 升档窗口 2 拍，第 3 拍切换", NULL);
 
-    g_sm.state = 0; g_sm.pending = 0; g_sm.pend_n = 0; g_sm_fast_n = 0;
-    sf_check(smart_tick_ex(30, 0, 0) == 1 && g_sm.state == 2,
-             "AC-7：升档 1 拍", NULL);
+    SM_RESET();
+    g_sm.fsm = SMART_MODERATE; g_sm.fsm_pending = SMART_MODERATE;
+    sf_check(smart_tick_ex(90, -1, -1, 1, 0, 0, 0) == 0 &&
+             smart_tick_ex(90, -1, -1, 1, 0, 0, 0) == 0 &&
+             smart_tick_ex(90, -1, -1, 1, 0, 0, 0) == 0 &&
+             smart_tick_ex(90, -1, -1, 1, 0, 0, 0) == 1 &&
+             g_sm.fsm == SMART_HEAVY,
+             "FSM：MODERATE→HEAVY 相邻档位多要一拍确认", NULL);
 
-    g_sm.state = 2; g_sm.pending = 0; g_sm.pend_n = 0;
-    sf_check(smart_tick_ex(0, 0, 0) == 0 && g_sm.state == 2 && g_sm.pend_n == 1,
-             "AC-7：降档第 1 拍不切", NULL);
-    sf_check(smart_tick_ex(0, 0, 0) == 1 && g_sm.state == 0,
-             "AC-7：降档第 2 拍才切", NULL);
+    SM_RESET();
+    g_sm.session_tick = -100;
+    sf_check(smart_tick_ex(90, -1, 50, 1, 0, 0, 0) == 0 &&
+             smart_tick_ex(90, -1, 50, 1, 0, 0, 0) == 0 &&
+             smart_tick_ex(90, -1, 50, 1, 0, 0, 0) == 1 &&
+             g_sm.fsm == SMART_SUSTAINED && g_sm.state == SMART_SUSTAINED,
+             "FSM：高温重载进 SUSTAINED，百分比回落到中载", NULL);
 
-    g_sm.state = 1; g_sm.pending = 2; g_sm.pend_n = 1;
-    sf_check(smart_tick_ex(10, 0, 0) == 0 && g_sm.state == 1 && g_sm.pend_n == 0,
-             "AC-7：want==state 清 pend_n", NULL);
+    cfg.fsm_temp_in = 60; cfg.fsm_temp_out = 50;
+    SM_RESET(); g_sm.session_tick = -100;
+    sf_check(smart_fsm_desired(90, -1, 55, 0, 1) == SMART_HEAVY &&
+             smart_fsm_desired(90, -1, 60, 0, 1) == SMART_SUSTAINED,
+             "FSM：压频起始/松手温度用独立两项，不跟 TH_HIGH/TH_LOW", NULL);
+    cfg.fsm_temp_in = 40; cfg.fsm_temp_out = 30;
 
-    g_sm.state = 2; g_sm.pending = 2; g_sm.pend_n = 0; g_sm_fast_n = 0;
-    sf_check(smart_tick_ex(0, 0, 1) == 0 && g_sm.state == 2 && g_sm_fast_n == 1,
-             "AC-7：静置快降第 1 拍计数", NULL);
-    sf_check(smart_tick_ex(0, 0, 1) == 1 && g_sm.state == 0 && g_sm_fast_n == 0,
-             "AC-7：静置快降连续 2 拍回 0 并复位计数", NULL);
+    SM_RESET();
+    for (int i = 0; i < 10; i++) smart_tick_ex(20, 95, 30, 1, 0, 0, 1);
+    sf_check(g_sm.fsm == SMART_MODERATE,
+             "FSM：分类为非游戏时 GPU 95% 不进 GAMING", NULL);
 
-    g_sm.state = 2; g_sm_fast_n = 1;
-    smart_tick_ex(0, 0, 0);
-    sf_check(g_sm_fast_n == 0 && g_sm.state == 2,
-             "AC-7：快降条件不满足时计数清零", NULL);
+    SM_RESET();
+    for (int i = 0; i < 10; i++) smart_tick_ex(90, 95, 30, 1, 0, 0, 1);
+    sf_check(g_sm.fsm == SMART_HEAVY,
+             "FSM：非游戏但 CPU 吃满仍给 HEAVY", NULL);
+
+    SM_RESET();
+    for (int i = 0; i < 12; i++) smart_tick_ex(70, 95, 30, 1, 0, 0, 0);
+    sf_check(g_sm.fsm == SMART_GAMING && g_sm.state == SMART_GAMING,
+             "FSM：未分类前台 GPU 连续 6 拍高位进 GAMING", NULL);
+
+    SM_RESET();
+    g_sm.fsm = SMART_MODERATE; g_sm.state = 2;
+    sf_check(smart_tick_ex(0, -1, -1, 1, 0, 1, 0) == 0 && g_sm_fast_n == 1,
+             "FSM：静置快降第 1 拍计数", NULL);
+    sf_check(smart_tick_ex(0, -1, -1, 1, 0, 1, 0) == 1 &&
+             g_sm.fsm == SMART_LIGHT_IDLE && g_sm.state == 1,
+             "FSM：静置快降连续 2 拍回浅空闲", NULL);
+
+    SM_RESET();
+    g_prime_state = 0;
+    g_smart_warmup = 1;
+    cfg.app_switch_tier = 2;
+    smart_tick(0);
+    sf_check(g_sm.fsm == SMART_MODERATE && g_sm.state == 2 &&
+             g_prime_state == -1 && g_smart_warmup == 0,
+             "FSM：切前台预热到中载并清超大核旧档", NULL);
+    int save_psi_mod = cfg.fsm_psi_mod, save_psi_hi = cfg.fsm_psi_hi;
+    int save_skin_hi = cfg.fsm_skin_hi, save_skin_lo = cfg.fsm_skin_lo;
+    int save_adpf_hi = cfg.fsm_adpf_hi;
+    cfg.fsm_psi_mod = 30; cfg.fsm_psi_hi = 50;
+    cfg.fsm_skin_hi = 46; cfg.fsm_skin_lo = 42; cfg.fsm_adpf_hi = 85;
+    SM_RESET();
+    g_sm.session_tick = -100;
+    g_fsm_psi = 60;
+    smart_tick_ex(20, -1, -1, 1, 0, 0, 0);
+    smart_tick_ex(20, -1, -1, 1, 0, 0, 0);
+    sf_check(smart_tick_ex(20, -1, -1, 1, 0, 0, 0) == 1 &&
+             g_sm.fsm == SMART_HEAVY, "FSM：PSI 高时 CPU 低也升重载", NULL);
+    g_fsm_psi = -1;
+    SM_RESET();
+    g_sm.session_tick = -100;
+    g_fsm_skin = 50;
+    smart_tick_ex(90, -1, -1, 1, 0, 0, 0);
+    smart_tick_ex(90, -1, -1, 1, 0, 0, 0);
+    sf_check(smart_tick_ex(90, -1, -1, 1, 0, 0, 0) == 1 &&
+             g_sm.fsm == SMART_SUSTAINED, "FSM：皮肤温高进 SUSTAINED", NULL);
+    g_fsm_skin = -1;
+    SM_RESET();
+    g_sm.session_tick = -100;
+    g_fsm_adpf = 90;
+    smart_tick_ex(90, -1, -1, 1, 0, 0, 0);
+    smart_tick_ex(90, -1, -1, 1, 0, 0, 0);
+    sf_check(smart_tick_ex(90, -1, -1, 1, 0, 0, 0) == 1 &&
+             g_sm.fsm == SMART_SUSTAINED, "FSM：ADPF 热余量高进 SUSTAINED", NULL);
+    g_fsm_adpf = -1;
+    cfg.fsm_psi_mod = save_psi_mod; cfg.fsm_psi_hi = save_psi_hi;
+    cfg.fsm_skin_hi = save_skin_hi; cfg.fsm_skin_lo = save_skin_lo;
+    cfg.fsm_adpf_hi = save_adpf_hi;
+    sf_check(kSmartTickSec == 2 && kSmartGpuPct[SMART_DEEP_IDLE] == 40 &&
+             kSmartGpuPct[SMART_HEAVY] == 85 &&
+             kSmartGpuPct[SMART_GAMING] == 100,
+             "智能模式 2 秒一拍，状态 GPU 只压不抬", NULL);
+    {
+      int save_ov = cfg.fsm_cpu[SMART_MODERATE][0];
+      int save_ceil = cfg.pct[0];
+      cfg.pct[0] = 100;
+      cfg.fsm_cpu[SMART_MODERATE][0] = 55;
+      g_sm.fsm = SMART_MODERATE;
+      g_prime_state = -1;
+      sf_check(smart_pct_tier(0, 1) == 55,
+               "FSM：BIG 状态上限按配置覆盖", NULL);
+      cfg.fsm_cpu[SMART_MODERATE][0] = save_ov;
+      cfg.pct[0] = save_ceil;
+    }
+
+#undef SM_RESET
 
     cfg.strategy = save_st;
     cfg.app_switch_tier = save_tier;
+    cfg.ad.th = save_th;
+    cfg.ad.th_high = save_hi;
+    cfg.ad.th_low = save_lo;
+    cfg.fsm_temp_in = save_tin;
+    cfg.fsm_temp_out = save_tout;
     g_sm.state = save_state;
-    g_sm.pending = save_pend;
-    g_sm.pend_n = save_n;
+    g_sm.fsm = save_fsm;
     g_sm_fast_n = save_fast;
     g_smart_warmup = save_warm;
     g_prime_state = save_prime;
     g_test_busy = -2;
+    g_test_gpu = -1;
+    g_test_temp = -1;
+    g_test_screen = 1;
+    g_test_fg_not_game = 0;
     g_test_half = -1;
   }
 
@@ -469,6 +561,81 @@ static void sf_test_smart_audit(void) {
       g_npkg = save_n;
     }
   }
+}
+
+static void sf_test_app_categories(void) {
+  memset(g_pol, 0, sizeof g_pol);
+  g_npol = 4;
+  long hw[4] = {4000000, 3000000, 2000000, 1000000};
+  for (int i = 0; i < 4; i++) {
+    snprintf(g_pol[i].name, sizeof g_pol[i].name, "policy%d", i * 2);
+    g_pol[i].hw_max = hw[i];
+    g_pol[i].vendor_max = hw[i];
+    g_pol[i].tier = i;
+  }
+  g_cat_cpu[CAT_VIDEO][0] = 40;
+  g_cat_cpu[CAT_VIDEO][1] = 45;
+  g_cat_cpu[CAT_VIDEO][2] = 50;
+  g_cat_cpu[CAT_VIDEO][3] = 55;
+  g_cat_gpu[CAT_VIDEO] = 30;
+  g_ncatpkg = 1;
+  snprintf(g_catpkgs[0].pkg, PKG_LEN, "com.ss.android.ugc.aweme");
+  g_catpkgs[0].cat = CAT_VIDEO;
+  category_apply("com.ss.android.ugc.aweme");
+  sf_check(g_cat_idx == CAT_VIDEO &&
+           g_pol[0].cat_cap == 1600000 && g_pol[1].cat_cap == 1350000 &&
+           g_pol[2].cat_cap == 1000000 && g_pol[3].cat_cap == 550000,
+           "分类上限按 BIG/MID2/MID/LITTLE 四簇分别落值", NULL);
+  sf_check(g_cat_gpu_cur == 30, "分类 GPU 上限取配置值", NULL);
+  struct policy cp;
+  memset(&cp, 0, sizeof cp);
+  cp.cat_cap = 1600000;
+  sf_check(cap_with_cat(&cp, 2000000) == 1600000 &&
+           cap_with_cat(&cp, 1000000) == 1000000,
+           "分类上限只压不抬", NULL);
+  g_cat_cpu[CAT_VIDEO][2] = 0;
+  category_apply("com.ss.android.ugc.aweme");
+  sf_check(g_pol[2].cat_cap == 0 && g_pol[0].cat_cap == 1600000,
+           "某一簇填 0 只关这一簇", NULL);
+  category_clear();
+  sf_check(g_cat_idx == -1 && g_pol[0].cat_cap == 0 &&
+           g_pol[1].cat_cap == 0 && g_pol[2].cat_cap == 0 && g_pol[3].cat_cap == 0,
+           "离开分类应用时清空四簇上限", NULL);
+
+  const char *uf = "/data/local/tmp/soc_cat_user.conf";
+  const char *df = "/data/local/tmp/soc_cat_defs.conf";
+  FILE *f = fopen(df, "w");
+  if (f) {
+    fputs("video_cpu_big=41\nvideo_cpu_little=43\n"
+          "social_cpu_big=41\nsocial_cpu_little=58\n"
+          "reading_cpu_big=39\nreading_cpu_little=40\n"
+          "video=com.default.pkg\n", f);
+    fclose(f);
+  }
+  f = fopen(uf, "w");
+  if (f) {
+    fputs("video=com.user.pkg\nvideo_cpu_little=47\n", f);
+    fclose(f);
+  }
+  cat_load_paths(uf, df);
+  sf_check(g_cat_cpu[CAT_VIDEO][0] == 41 && g_cat_cpu[CAT_VIDEO][3] == 47 &&
+           g_ncatpkg == 1 && !strcmp(g_catpkgs[0].pkg, "com.user.pkg"),
+           "分类默认文件只补数值，包名仍只认用户文件", NULL);
+  f = fopen(uf, "w");
+  if (f) {
+    fputs("video_cpu=40\nvideo=com.legacy.pkg\n", f);
+    fclose(f);
+  }
+  cat_load_paths(uf, df);
+  sf_check(g_cat_cpu[CAT_VIDEO][0] == 40 && g_cat_cpu[CAT_VIDEO][1] == 40 &&
+           g_cat_cpu[CAT_VIDEO][2] == 40 && g_cat_cpu[CAT_VIDEO][3] == 40,
+           "旧版统一分类值覆盖四簇默认值", NULL);
+  cat_load_paths(NULL, df);
+  sf_check(g_cat_cpu[CAT_SOCIAL][0] == 41 && g_cat_cpu[CAT_SOCIAL][3] == 58 &&
+           g_ncatpkg == 0,
+           "用户文件缺失时仍能读到芯片分类默认值", NULL);
+  remove(uf);
+  remove(df);
 }
 
 int sf_test_main(void) {
@@ -565,10 +732,18 @@ int sf_test_main(void) {
                 "  mTopFullscreenOpaqueWindowState=Window{9f2b1a u0 com.mt.game/com.mt.game.Main}",
                 "com.mt.game");
 
-  sf_expect_pkg("小窗抢焦点但全屏游戏仍在",
-                "  mCurrentFocus=Window{a1b2c3 u0 com.tencent.mm/com.tencent.mm.ui.LauncherUI}\n"
-                "  mTopFullscreenOpaqueWindowState=Window{9f2b1a u0 com.tencent.tmgp.sgame/com.tencent.tmgp.sgame.Main}",
-                "com.tencent.tmgp.sgame");
+  {
+    int save_n = g_npkg;
+    if (save_n < MAX_PKG) {
+      snprintf(g_pkgs[save_n], PKG_LEN, "%s", "com.tencent.tmgp.sgame");
+      g_npkg = save_n + 1;
+    }
+    sf_expect_pkg("小窗抢焦点但全屏游戏仍在",
+                  "  mCurrentFocus=Window{a1b2c3 u0 com.tencent.mm/com.tencent.mm.ui.LauncherUI}\n"
+                  "  mTopFullscreenOpaqueWindowState=Window{9f2b1a u0 com.tencent.tmgp.sgame/com.tencent.tmgp.sgame.Main}",
+                  "com.tencent.tmgp.sgame");
+    g_npkg = save_n;
+  }
 
   printf("\n== 解析失败必须报错而不是留垃圾 ==\n");
 
@@ -1420,11 +1595,8 @@ int sf_test_main(void) {
        都调它、没有前置过滤，所以一条 "LICENSES" 就能让整个命令崩、
        页面全色块——不是"少一张图"。
 
-       这三个名字不是编的，是三个真包里数出来的：
-         coolapk.apk  CD 5913 条，无点号 7 条（LICENSES、assets/…）
-         base.apk     CD 3227 条，无点号 5 条
-         Kin.apk      CD  105 条，无点号 2 条
-       LICENSES 这类位置很靠前，扫到就崩。 */
+       三个实测样本的中央目录：5913 条里 7 条无点号、3227 条里 5 条、
+       105 条里 2 条。LICENSES 这类位置很靠前，扫到就崩。 */
     sf_check(sf_test_score_name("LICENSES") == -1, "LICENSES（无点号）不崩且不收", NULL);
     sf_check(sf_test_score_name("META-INF/services/vq1") == -1,
              "META-INF/services/vq1（无点号）不崩且不收", NULL);
@@ -1713,7 +1885,7 @@ int sf_test_main(void) {
     core_hist_push(&h, 100, 10);
     sf_check(h.n == CORE_HIST_N && h.freq[0] == 100 &&
              h.freq[CORE_HIST_N - 1] == 100 && h.load[0] == 10,
-             "首拍铺满 8 格，页面不会只有一根柱", NULL);
+             "首拍铺满 5 格，页面不会只有一根柱", NULL);
     core_hist_push(&h, 200, 20);
     sf_check(h.freq[CORE_HIST_N - 1] == 200 &&
              h.freq[CORE_HIST_N - 2] == 100 && h.load[CORE_HIST_N - 1] == 20,
@@ -1724,7 +1896,7 @@ int sf_test_main(void) {
     sf_check(h.freq[CORE_HIST_N - 1] == 900 && h.load[CORE_HIST_N - 1] == 90,
              "连续刷新后最右始终是最新样本", NULL);
     core_hist_range(&h, &lo, &hi);
-    sf_check(lo == 200 && hi == 900, "8 格滚动后最旧样本被挤掉", NULL);
+    sf_check(lo == 500 && hi == 900, "5 格滚动后最旧样本被挤掉", NULL);
   }
 
   /* 大中央目录：名字/图标读取必须能走完"重读中央目录"这条路而不是崩溃。
@@ -1755,31 +1927,35 @@ sf_algo_tests:
   /* 智能模式：按各簇自己的天花板取比例，而不是写死 65/60。 */
   {
     sf_check(smart_pct_of(0, 50) == 22 && smart_pct_of(1, 50) == 32 &&
-             smart_pct_of(2, 50) == 42 && smart_pct_of(3, 50) == 50,
-             "智能目标 = 天花板 × 45/65/85/100%", NULL);
+             smart_pct_of(2, 50) == 42 && smart_pct_of(3, 50) == 50 &&
+             smart_pct_of(4, 50) == 40 && smart_pct_of(5, 50) == 50,
+             "智能目标 = 天花板 × 45/65/85/100/80/100%", NULL);
     sf_check(smart_pct_of(2, 1) == 1 && smart_pct_of(0, 100) == 45,
              "天花板极小时仍至少 1%，100% 上限按比例", NULL);
     /* m==2：主簇上浮 55/75/90、超大核收紧 40/60/80，重载都吃满天花板。 */
-    int sv = g_sm.state;
+    int sv = g_sm.fsm;
     int sbig = cfg.pct[0], slit = cfg.pct[3];
     cfg.pct[0] = 46; cfg.pct[3] = 51;
-    g_sm.state = 0;
+    g_sm.fsm = 0;
     sf_check(smart_pct_tier(3, 2) == 28 && smart_pct_tier(0, 2) == 18,
              "双簇空闲：主簇 51×55%=28%，超大核 46×40%=18%", NULL);
-    g_sm.state = 1;
+    g_sm.fsm = 1;
     sf_check(smart_pct_tier(3, 2) == 38 && smart_pct_tier(0, 2) == 27,
              "双簇轻载：主簇 75%、超大核 60%", NULL);
-    g_sm.state = 2;
+    g_sm.fsm = 2;
     sf_check(smart_pct_tier(3, 2) == 45 && smart_pct_tier(0, 2) == 36,
              "双簇中载：主簇 90%、超大核 80%", NULL);
-    g_sm.state = 3;
+    g_sm.fsm = 3;
     sf_check(smart_pct_tier(3, 2) == 51 && smart_pct_tier(0, 2) == 46,
              "双簇重载：都吃满天花板", NULL);
-    g_sm.state = 0;
+    g_sm.fsm = 4;
+    sf_check(smart_pct_tier(3, 2) == 43 && smart_pct_tier(0, 2) == 32,
+             "双簇持续高载：主簇 85%、超大核 70%", NULL);
+    g_sm.fsm = 0;
     cfg.pct[3] = 60;
     sf_check(smart_pct_tier(3, 3) == 27 && smart_pct_tier(0, 3) == 20,
              "三簇仍走通用 45%：60×45%=27%，46×45%=20%", NULL);
-    g_sm.state = sv;
+    g_sm.fsm = sv;
     cfg.pct[0] = sbig; cfg.pct[3] = slit;
     sf_check(gov_rate_idx(0) == 0 && gov_rate_idx(1) == 1 &&
              gov_rate_idx(2) == 1 && gov_rate_idx(3) == 2,
@@ -1806,9 +1982,6 @@ sf_algo_tests:
     sf_check(smart_target(1, 4) == 0 && smart_target(1, 5) == 1 &&
              smart_target(2, 24) == 1 && smart_target(3, 54) == 2,
              "退档迟滞：light 4%、medium 25%、heavy 55%", NULL);
-    sf_check(smart_boost_state(0, 2) == 2 && smart_boost_state(3, 2) == 3 &&
-             smart_boost_state(1, 0) == 1,
-             "切前台预热只升不降，0 = 不预热", NULL);
     sf_check(freq_below_half(500, 1000) && !freq_below_half(501, 1000) &&
              !freq_below_half(1000, 1000) && !freq_below_half(0, 1000) &&
              !freq_below_half(100, 0),
@@ -1923,6 +2096,90 @@ sf_algo_tests:
                cpuset_parse_line("cpuset_fg_lv1=abc", &lv, &g, m, sizeof m) == 0,
                "cpuset 非法档位/组名/掩码拒绝", NULL);
     }
+    /* 动态 cpuset：8/7/10 核按档位生成，只依赖实际 policy 号。 */
+    {
+      struct topo_entry tt[10];
+      char top[64], fg[64], sys[64], bg[64], re[64];
+      memset(tt, 0, sizeof tt);
+      for (int i = 0; i < 8; i++) { tt[i].cpu = i; tt[i].tier = i < 6 ? 3 : 0; }
+      cpuset_masks_from_topo(tt, 8, top, fg, sys, bg, re, sizeof top);
+      sf_check(!strcmp(top, "0-7") && !strcmp(fg, "0-5") &&
+               !strcmp(re, "0-5") && !strcmp(sys, "0-3") && !strcmp(bg, "0-2"),
+               "动态 cpuset：8 核 top/fg/restricted/sysbg/bg", NULL);
+      memset(tt, 0, sizeof tt);
+      for (int i = 0; i < 7; i++) { tt[i].cpu = i; tt[i].tier = i < 5 ? 3 : 0; }
+      cpuset_masks_from_topo(tt, 7, top, fg, sys, bg, re, sizeof top);
+      sf_check(!strcmp(top, "0-6") && !strcmp(fg, "0-4") &&
+               !strcmp(re, "0-4") && !strcmp(sys, "0-3") && !strcmp(bg, "0-2"),
+               "动态 cpuset：7 核 8 Elite 自动去掉两颗 Prime", NULL);
+      memset(tt, 0, sizeof tt);
+      for (int i = 0; i < 10; i++) {
+        tt[i].cpu = i;
+        tt[i].tier = i < 4 ? 3 : i < 6 ? 2 : i < 8 ? 1 : 0;
+      }
+      cpuset_masks_from_topo(tt, 10, top, fg, sys, bg, re, sizeof top);
+      sf_check(!strcmp(top, "0-9") && !strcmp(fg, "0-7") &&
+               !strcmp(re, "0-7") && !strcmp(sys, "0-3") && !strcmp(bg, "0-2"),
+               "动态 cpuset：10 核只排除最高档，后台仍取能效核", NULL);
+
+      /* Tensor G5/G6、8s Gen4：最低档只有 2 核，用次低档补到 4/3。 */
+      memset(tt, 0, sizeof tt);
+      for (int i = 0; i < 8; i++) {
+        tt[i].cpu = i;
+        tt[i].tier = i < 2 ? 3 : i < 7 ? 1 : 0;
+      }
+      cpuset_masks_from_topo(tt, 8, top, fg, sys, bg, re, sizeof top);
+      sf_check(!strcmp(top, "0-7") && !strcmp(fg, "0-6") &&
+               !strcmp(sys, "0-3") && !strcmp(bg, "0-2"),
+               "动态 cpuset：2 小核用次低档补到 sysbg 4 / bg 3", NULL);
+      memset(tt, 0, sizeof tt);
+      for (int i = 0; i < 8; i++) {
+        tt[i].cpu = i;
+        tt[i].tier = i < 3 ? 3 : i < 6 ? 2 : 0;
+      }
+      cpuset_masks_from_topo(tt, 8, top, fg, sys, bg, re, sizeof top);
+      sf_check(!strcmp(top, "0-7") && !strcmp(fg, "0-5") &&
+               !strcmp(sys, "0-3") && !strcmp(bg, "0-2"),
+               "动态 cpuset：3 小核时只给 sysbg 补 1 颗", NULL);
+      memset(tt, 0, sizeof tt);
+      for (int i = 0; i < 7; i++) {
+        tt[i].cpu = i;
+        tt[i].tier = i < 2 ? 3 : i < 6 ? 2 : 0;
+      }
+      cpuset_masks_from_topo(tt, 7, top, fg, sys, bg, re, sizeof top);
+      sf_check(!strcmp(top, "0-6") && !strcmp(fg, "0-5") &&
+               !strcmp(sys, "0-3") && !strcmp(bg, "0-2"),
+               "动态 cpuset：Tensor G6 7 核补核后仍是 4/3", NULL);
+
+      /* 骁龙 888 / 8 Gen1、Tensor G1~G4、玄戒 O3：4 颗低档核。 */
+      memset(tt, 0, sizeof tt);
+      for (int i = 0; i < 8; i++) {
+        tt[i].cpu = i;
+        tt[i].tier = i < 4 ? 3 : i < 7 ? 2 : 0;
+      }
+      cpuset_masks_from_topo(tt, 8, top, fg, sys, bg, re, sizeof top);
+      sf_check(!strcmp(top, "0-7") && !strcmp(fg, "0-6") &&
+               !strcmp(sys, "0-3") && !strcmp(bg, "0-2"),
+               "动态 cpuset：1+3+4 机型后台取 4 颗低档核", NULL);
+      memset(tt, 0, sizeof tt);
+      for (int i = 0; i < 4; i++) {
+        tt[i].cpu = i;
+        tt[i].tier = i < 2 ? 3 : i < 3 ? 1 : 0;
+      }
+      cpuset_masks_from_topo(tt, 4, top, fg, sys, bg, re, sizeof top);
+      sf_check(!strcmp(top, "0-3") && !strcmp(fg, "0-2") &&
+               !strcmp(sys, "0-2") && !strcmp(bg, "0-2"),
+               "动态 cpuset：补核不够时也不把 BIG 放进后台", NULL);
+      memset(tt, 0, sizeof tt);
+      for (int i = 0; i < 10; i++) {
+        tt[i].cpu = i;
+        tt[i].tier = i < 4 ? 3 : i < 8 ? 2 : 0;
+      }
+      cpuset_masks_from_topo(tt, 10, top, fg, sys, bg, re, sizeof top);
+      sf_check(!strcmp(top, "0-9") && !strcmp(fg, "0-7") &&
+               !strcmp(sys, "0-3") && !strcmp(bg, "0-2"),
+               "动态 cpuset：玄戒 O3 2+4+4 只排除两颗超大核", NULL);
+    }
     sf_check(g_sup_umax_nodes[0].optimal == 85 && g_sup_umax_nodes[0].mid == 70 &&
              g_sup_umax_nodes[0].floor == 60 &&
              g_sup_umax_nodes[1].optimal == 65 && g_sup_umax_nodes[1].mid == 50 &&
@@ -1953,14 +2210,26 @@ sf_algo_tests:
     a.psi_steps = 2;
     a.delta = 10;
     sf_check(effective_delta(&a) == 0, "智能模式不叠 PSI 向上借额度", NULL);
-    a.th_steps = 1;
-    sf_check(effective_delta(&a) == -5, "智能模式仍保留温控收紧", NULL);
+    a.th_steps = 2;
+    sf_check(effective_delta(&a) == 0, "智能模式温控交给 FSM，实时偏移不再扣温控", NULL);
+    a.batt_cut = 7;
+    sf_check(effective_delta(&a) == -7, "智能模式仍保留电量阶梯收紧", NULL);
+    cfg.strategy = 0;
+    a.delta = -17;
+    sf_check(effective_delta(&a) == -17, "限频模式直接使用实时偏移合计", NULL);
+    cfg.suppress = 1;
+    cfg.strategy = 0;
+    int cap_sup = suppress_on();
+    cfg.strategy = 1;
+    sf_check(cap_sup && !suppress_on(), "智能模式打开时动态封顶不生效", NULL);
+    cfg.suppress = 0;
     cfg.strategy = save_strategy;
     cfg.ad.th_step = save_step;
     cfg.ad.down_max = save_down;
   }
 
   sf_test_smart_audit();
+  sf_test_app_categories();
 
 #ifdef SF_ALGO_ONLY
   printf("\n%s\n", sf_fails ? "有失败项" : "全部通过");

@@ -1,23 +1,6 @@
 /*
- * adapt.c — 三个实时传感器与"封顶偏移"的步进机
- *
- * 和智能调度的分工：智能模式按负载给目标，这里看的是**这一刻**的
- * 传感器，只在封顶确实不够用时借一点额度出去。
- *
- * 三条偏移合成一个数（百分点），加在用户设的百分比上：
- *   充电态   插着电时把常态封顶抬到 CHG_PCT（发热由充电器承担，没必要压）
- *   温控     最热 cpu/gpu 传感器超阈值就逐档往下压，凉下来逐档还回去
- *   PSI      stall 率明显高于这台机自己的基线时逐档借出额度，不卡了就收回
- *
- * 两条硬规矩：
- *   1) 偏移只加在生效值上，**从不写配置文件**。页面上的滑杆就是用户设的那个值，
- *      不会因为某个循环在背后改掉它。
- *   2) PSI 只能"借"（往 100% 方向），不能"拿"（往下压）——
- *      收紧是学习的活，它有自己的样本和门槛。真机上量过：这台机静置就有
- *      4~5 个 avg10、满载时有没有帽 stall 率几乎一样（129 vs 129 ms/s），
- *      拿绝对值判"卡了"会把模块自己顶到 100% 停在那儿。
- *
- * 传感器路径开成可替换的（环境变量），这样自检版能喂假数据把步进机单独验一遍。
+ * 实时传感器偏移只改生效封顶，不写配置；PSI 只借不压。
+ * 传感器路径可用环境变量替换，便于自检喂假数据。
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -188,7 +171,7 @@ void adapt_init(void) {
 static void step_psi(struct adapt *a, const struct adapt_cfg *c, int stall, int dt,
                      int allow_base) {
   /* 0 = 整条环路不动；GAIN < STEP 连一档都凑不齐，也不许借。
-     以前这里兜底成"至少 1 档"，把界面上的 0 变成了实际 +5。 */
+     不能兜底成"至少 1 档"：界面上的 0 会变成实际 +5。 */
   if (!c->psi || c->psi_gain <= 0 || c->psi_step <= 0) {
     a->psi_steps = 0;
     return;
@@ -269,7 +252,7 @@ static void step_psi(struct adapt *a, const struct adapt_cfg *c, int stall, int 
  * 迟滞带（high/low 之间）不动，避免在阈值附近来回抖。 */
 static void step_thermal(struct adapt *a, const struct adapt_cfg *c, int temp_m) {
   /* 0 = 不主动降；TH_MAX < TH_STEP 连一档都凑不齐，也不许压。
-     以前兜底成"至少 1 档"，界面写 0 实际仍会 -5。 */
+     不能兜底成"至少 1 档"：界面写 0 实际仍会 -5。 */
   if (!c->th || c->th_max <= 0 || c->th_step <= 0) {
     a->th_steps = 0;
     return;
@@ -406,7 +389,7 @@ int adapt_tick_ex(const struct adapt_cfg *c, int dt, int allow_base, int advance
   }
 
   /* 交权态（游戏/满血/熄屏）：传感器照采，但步进机不推进、借期不续。
-     以前这里照样每拍借档，游戏 8 拍攒下 +10%，出游戏后白拿 30~60 秒。 */
+     否则游戏里 8 拍攒下 +10%，出游戏后会白拿 30~60 秒。 */
   if (!advance) {
     g.stall = stall < 0 ? 0 : stall;
     g.psi_steps = 0;

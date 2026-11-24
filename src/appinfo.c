@@ -1,22 +1,6 @@
 /*
- * appinfo.c — 从 APK 里读「应用名」和「桌面图标声明的那张图」
- *
- * 应用名在 Android 上没有便宜的外壳来源：
- *   - pm list packages 没有显示标签的选项；
- *   - dumpsys package 里没有标签；
- *   - label 只存在于 APK 里：AndroidManifest.xml 的
- *     android:label，而且它通常是个**引用**（@string/app_name），
- *     文本还要再去 resources.arsc 的字符串池里查一次。
- * 所以只能在守护里把这两个二进制格式读出来。
- *
- * 顺带把图标也钉准：resources.arsc 里 drawable/mipmap 条目的值就是
- * 文件路径（res/xx.png），manifest 的 android:icon 指到哪就是哪张，
- * 比 icon.c 那套"按名字打分 + 按尺寸猜"准得多 —— 那套继续留着当兜底，
- * 因为**声明的常常是一张 .xml（自适应图标 / 矢量图）**，WebView 解不了，
- * 还得回去猜位图。
- *
- * 边界：所有读都带长度上界。这个进程是 root，越界读不是"显示不对"，
- * 是守护被杀。宁可返回"没读到"。
+ * APK 内的应用名与声明图标：直接读 AXML 和 resources.arsc。
+ * 所有读取都带长度上界；越界在 root 进程里会直接杀守护，宁可返回没读到。
  */
 #define _GNU_SOURCE
 #include <stdio.h>

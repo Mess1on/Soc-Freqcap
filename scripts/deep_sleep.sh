@@ -845,7 +845,7 @@ ds_freeze_restore_if_any() {
 }
 
 # 排除名单：用户永久豁免、输入法、桌面、无障碍、VPN、当前前台、满血/熄屏也封顶、
-# 正在放媒体的应用、本模块/管理器和 Scene（后者负责耗电统计，冻了就断档）。
+# 正在放媒体的应用、本模块/管理器和耗电统计工具（冻了就断档）。
 DS_FREEZE_SKIP=""
 
 
@@ -1054,7 +1054,7 @@ ds_policy_migrate() {
     return 0
 }
 
-# V3：音乐/健康/Scene 之前整包 white= 也被注入 Doze 白名单；force-idle 后这些
+# 音乐/健康/耗电统计工具不能整包 white= 注入 Doze 白名单；force-idle 后这些
 # 应用仍能跑，抵消了 Doze。迁到 nice=：不冻结，但不进 Doze；正在播放的音乐由
 # 媒体检测临时加白。系统关键包（com.android./厂商前缀）仍保留 white= + Doze。
 ds_policy_migrate_v3() {
@@ -1103,7 +1103,7 @@ ds_policy_migrate_v3() {
     done
     printf '%s\n' "policy_v3 $(now)" > "$marker" 2>/dev/null
     ds_conf_raw=""
-    log_ds "深睡策略已迁移：音乐/健康/Scene 移出 Doze 白名单（改为保活）"
+    log_ds "深睡策略已迁移：音乐/健康/耗电统计工具移出 Doze 白名单（改为保活）"
     return 0
 }
 
