@@ -616,6 +616,20 @@ console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电�
   ok(/long wf = window_floor\(&g_pol\[i\], want\);[\s\S]{0,700}?下限让到 %ld（留 %d 档下降空间）/.test(csrc) &&
      /if \(floor > 0 && want < floor\) \{[\s\S]{0,700}?want = floor;/.test(csrc),
      '封顶低于下限时先让下限，再写封顶；压不动才退回按平台值抬封顶');
+  /* 平台帽：写入被压在更低处时学下来，按 5/15/60/180 秒退避重探，不再每拍硬写 */
+  ok(/long vcap;/.test(csrc) && /static long vcap_backoff_sec\(int fails\)/.test(csrc) &&
+     /\{5, 15, 60, 180\}/.test(csrc),
+     '平台帽有独立字段与 5/15/60/180 秒退避阶梯');
+  ok(/got > 0 && got < want[\s\S]{0,260}?g_pol\[i\]\.vcap = got;/.test(csrc) &&
+     /平台帽 %ld（目标 %ld 写不上去）/.test(csrc) &&
+     /平台帽 %ld 已放开/.test(csrc),
+     '写不动且回读更低时学成平台帽，放开时补一行');
+  ok(/cap_vendor_reset\("亮屏"\)/.test(csrc) &&
+     /cap_vendor_reset\(chg \? "插电" : "拔电"\)/.test(csrc) &&
+     /cap_vendor_reset\(NULL\)/.test(csrc),
+     '亮屏 / 插拔电 / 改配置都清平台帽重探');
+  ok(/CAP_BACKEND=msm/.test(csrc),
+     '高通只走 sysfs 时提示可用 CAP_BACKEND=msm 接管厂商节点');
   ok(/\| `MIN_WINDOW_STEPS` \| 3 \|/.test(DOC) && /MIN_WINDOW_STEPS/.test(apiSrc) &&
      /MIN_WINDOW_STEPS\) \[ "\$_v" -ge 0 \]/.test(apiSrc),
      '文档与接口层都收录窗口守护（含 0~8 越界校验）');

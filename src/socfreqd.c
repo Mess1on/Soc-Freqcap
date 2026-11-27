@@ -801,6 +801,12 @@ struct policy {
   long unreach_cap;
   long unreach_got;
   long unreach_at;
+  /* 平台帽（学到）：往高处写被夹回来时记下回读值。厂商 perf HAL /
+     msm_performance / 温控会在策略层限制 max，模块写 sysfs 会被夹回来，
+     反复硬写只会刷"写入未生效"。学到后按 vcap_at 阶梯重探。 */
+  long vcap;
+  long vcap_at;
+  int  vcap_fails;
   /* 第二道锁（PPM/MSM）：用哪条后端、PPM cluster 号、最后写入值和连续失败数。 */
   int be;          /* CAP_BE_SYSFS / CAP_BE_PPM / CAP_BE_MSM */
   int ppm_idx;     /* PPM cluster 号，-1 = 不使用 */
@@ -3591,7 +3597,9 @@ static void cap_backend_init(void) {
   }
   int want = cfg.cap_backend;
   if (want == CAP_BE_AUTO) {
-    /* auto 只自动启用 MTK PPM。高通 msm_performance 的写语义是 */
+    /* auto 只自动启用 MTK PPM：高通 msm_performance 的写语义各家 ROM 不一致
+       （有的是 "cpu:freq" 列表，有的只是开关 + 另外的节点），自动接管风险高，
+       所以保持只写 sysfs，检测到节点就提示用户可手动设 CAP_BACKEND=msm。 */
     if (g_ppm_ok) want = CAP_BE_PPM;
     else {
       want = CAP_BE_SYSFS;
@@ -3611,6 +3619,9 @@ static void cap_backend_init(void) {
     log("PPM 不可用（目录/开关/节点不满足），回退 sysfs");
     want = CAP_BE_SYSFS;
   }
+  if (want == CAP_BE_SYSFS && g_msm_ok && !is_mtk)
+    log("发现 msm_performance 节点：厂商可能在这里压上限（日志里的\"平台帽\"）；"
+        "要接管请设 CAP_BACKEND=msm 后重启守护");
   if (want == CAP_BE_MSM && !g_msm_ok) {
     log("msm_performance 节点不可用，回退 sysfs");
     want = CAP_BE_SYSFS;
@@ -5560,6 +5571,13 @@ static long g_capfloor_log_at = -600;  /* 初值 -600：开机头 10 分钟也�
 /* 厂商 perf/热控每隔几秒把 max 顶回去时，巡检每拍都会写一次 */
 static long g_restore_log_at[MAX_POLICY];
 
+/* 平台帽退避阶梯：5 → 15 → 60 → 180 秒，封顶 3 分钟。 */
+static long vcap_backoff_sec(int fails) {
+  static const long step[] = {5, 15, 60, 180};
+  if (fails <= 1) return step[0];
+  return step[fails >= 4 ? 3 : fails - 1];
+}
+
 static void caps_patrol(int force) {
   for (int i = 0; i < g_npol; i++) {
     char path[224];
@@ -5579,6 +5597,17 @@ static void caps_patrol(int force) {
       log("  %-8s 已恢复，重新压回封顶", g_pol[i].name);
     }
     long want = cap_with_cat(&g_pol[i], g_pol[i].cap);
+    long now = mono_sec();
+    /* 已知平台帽还在生效期：往上写只会被夹回来，这一拍直接按帽算。 */
+    if (g_pol[i].vcap > 0 && want > g_pol[i].vcap && now < g_pol[i].vcap_at) {
+      long eff = g_pol[i].vcap;
+      if (g_pol[i].last_cap != eff && now - g_capfloor_log_at >= 300) {
+        g_capfloor_log_at = now;
+        log("%s 平台帽 %ld：目标 %ld 先按 %ld 生效（%ld 秒后重探）",
+            g_pol[i].name, eff, want, eff, g_pol[i].vcap_at - now);
+      }
+      want = eff;
+    }
     /* 常态巡检：厂商把上限顶高了就压回去 */
     if (!force && cur <= want) continue;
     /* force 升帽时先确认当前值就是模块上一轮写的那个。 */
@@ -5589,7 +5618,6 @@ static void caps_patrol(int force) {
             want > g_pol[i].last_cap))
         continue;
     }
-    long now = mono_sec();
     /* 同一目标、同一回读值刚刚已经证明写不动：10 分钟内不再重试。 */
     if (want == g_pol[i].unreach_cap && cur == g_pol[i].unreach_got &&
         now - g_pol[i].unreach_at < 600)
@@ -5655,10 +5683,32 @@ static void caps_patrol(int force) {
         g_pol[i].unreach_cap = want;
         g_pol[i].unreach_got = got;
         g_pol[i].unreach_at = now;
+        /* 要往上、却被压在更低处 = 平台帽。学下来，按 5/15/60/180 秒退避重探，
+           不再每拍硬写（那只会刷"写入未生效"）。 */
+        if (got > 0 && got < want) {
+          int f = (got != g_pol[i].vcap) ? 1 : g_pol[i].vcap_fails + 1;
+          long w = vcap_backoff_sec(f);
+          g_pol[i].vcap = got;
+          g_pol[i].vcap_fails = f;
+          g_pol[i].vcap_at = now + w;
+          if (f == 1)
+            log("%s 平台帽 %ld（目标 %ld 写不上去），%ld 秒后重探",
+                g_pol[i].name, got, want, w);
+          else
+            log("%s 平台帽 %ld 仍未放开（第 %d 次），%ld 秒后再试",
+                g_pol[i].name, got, f, w);
+        }
       } else {
         g_pol[i].unreach_cap = 0;
         g_pol[i].unreach_got = 0;
         g_pol[i].unreach_at = 0;
+        if (g_pol[i].vcap > 0 && got >= g_pol[i].vcap) {
+          log("%s 平台帽 %ld 已放开（写到 %ld）", g_pol[i].name,
+              g_pol[i].vcap, got);
+          g_pol[i].vcap = 0;
+          g_pol[i].vcap_at = 0;
+          g_pol[i].vcap_fails = 0;
+        }
         if (force)
           log("  %-8s 上限 -> %ld%s", g_pol[i].name, got,
               got < want ? "（厂商已压更低）" : "");
@@ -5961,9 +6011,22 @@ static void min_note_clamp(int i, long target, long got, int charging) {
   }
 }
 
+/* 平台帽（max 侧）清零：配置/状态/亮屏/插拔电一变就重探，别把旧帽带过去。 */
+static void cap_vendor_reset(const char *why) {
+  int any = 0;
+  for (int i = 0; i < g_npol; i++) {
+    if (g_pol[i].vcap > 0) any = 1;
+    g_pol[i].vcap = 0;
+    g_pol[i].vcap_at = 0;
+    g_pol[i].vcap_fails = 0;
+  }
+  if (any && why) log("CPU 上限：%s，平台帽记忆清零重探", why);
+}
+
 /* 配置/状态刚变过：清掉 30 秒节流与退避，下一拍立刻按新下限写一次。 */
 static void cpu_min_refresh(void) {
   cpu_min_reset_backoff(NULL);
+  cap_vendor_reset(NULL);
 }
 
 /* 只还原本模块按“进阶最低频/下限锁”压过的簇，不动 suppression 或厂商 */
@@ -6005,8 +6068,10 @@ static void cpu_min_patrol(void) {
     struct adapt a;
     adapt_snapshot(&a);
     int chg = a.charging ? 1 : 0;
-    if (g_min_chg >= 0 && chg != g_min_chg)
+    if (g_min_chg >= 0 && chg != g_min_chg) {
       cpu_min_reset_backoff(chg ? "插电" : "拔电");
+      cap_vendor_reset(chg ? "插电" : "拔电");
+    }
     g_min_chg = chg;
   }
   /* 先复核上一轮写完的簇：隔一拍再读，写成功但被平台当场夹回、和写成功
@@ -6182,8 +6247,9 @@ static void leave_screen_off(void) {
   sup_exit();
   g_soff_pkg[0] = 0;
   log("亮屏，恢复常态巡检");
-  /* 熄屏期间平台下限可能已经变了（充电满/温控回落），亮屏直接清零重探 */
+  /* 熄屏期间平台下限/上限帽可能已经变了（充电满/温控回落），亮屏直接清零重探 */
   cpu_min_reset_backoff("亮屏");
+  cap_vendor_reset("亮屏");
   /* 重立占用基线；smart 且预热档打开且非游戏时，本圈 smart_tick 只升不降预热。 */
   smart_on_leave_screen_off();
   /* cap：下限还原、封顶重算（充电地板重新生效）。 */

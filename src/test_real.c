@@ -906,6 +906,15 @@ int sf_test_main(void) {
     }
   }
 
+  printf("\n== 平台帽退避阶梯 ==\n");
+  {
+    sf_check(vcap_backoff_sec(1) == 5, "第 1 次 5 秒", NULL);
+    sf_check(vcap_backoff_sec(2) == 15, "第 2 次 15 秒", NULL);
+    sf_check(vcap_backoff_sec(3) == 60, "第 3 次 60 秒", NULL);
+    sf_check(vcap_backoff_sec(4) == 180, "第 4 次 180 秒", NULL);
+    sf_check(vcap_backoff_sec(99) == 180, "再往后封顶 180 秒", NULL);
+  }
+
   printf("\n== 老 MTK GPU OPP 解析 ==\n");
   {
     const char *txt =
