@@ -3002,8 +3002,8 @@ function paintCpuMin(s){
   const f = Number(s.cminf) || 0;
   const g = Number(s.cming) || 0;
   el.textContent = '已写 ' + w + ' 次 · 被夹回 ' + f + ' 次'
-    + (g > 0 ? ' · ' + g + ' 簇被系统钉死（30 分钟复探一次）' : '')
-    + (s.cminpaused === '1' && g === 0 ? ' · 退避中（10 分钟后重试）' : '');
+    + (g > 0 ? ' · ' + g + ' 簇被平台下限钉住（60s→10min 逐次放宽重探）' : '')
+    + (s.cminpaused === '1' && g === 0 ? ' · 退避中（60s→10min 重探）' : '');
 }
 
 async function loadStatus(){

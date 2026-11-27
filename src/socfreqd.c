@@ -5802,19 +5802,92 @@ static void cpu_min_to_floor(void) {
   if (n) log("熄屏：CPU 下限已压到目标（%d 个簇）", n);
 }
 
-/* 亮屏常态的 CPU 下限巡检（CPU_MIN_LOCK）。 */
+/* 亮屏常态的 CPU 下限巡检（CPU_MIN_LOCK）。
+ *
+ * 平台侧（MTK PPM / 厂商 powerhint / perfd）在插电、boost 期间会把 cpufreq
+ * 的硬下限抬到 1.8~2.2GHz。这时写 scaling_min_freq 是"写成功但被当场夹回"：
+ * store_scaling_min_freq() 返回写入长度（不算错），policy->min 却停在平台的
+ * 下限上，回读拿到的那个数不是"内核拒绝写入"，而是平台此刻的下限，会随
+ * 插拔电/温控漂移（本机 policy7 在 1.85M / 2.0M / 2.15M 之间跳）。
+ *
+ * 所以夹回不再算"失败"：记下"被平台钉在 X"，按簇退避 60→180→300→600 秒
+ * 封顶，永不"本启动放弃"；插拔电、亮屏、改配置/状态立刻清零重探。
+ * 写完隔一拍（约 1 秒）再复核，区分"当场被夹"和"写成功后被人覆盖"。 */
 static long g_min_writes, g_min_last, g_min_fail_at;
-static int  g_min_fails;
-/* 每簇的下限战况：累计被夹回 9 次（约 3 轮退避）判定"系统把下限钉死" */
-static int  g_min_pfails[MAX_POLICY];
-static int  g_min_giveup[MAX_POLICY];
-static long g_min_pinned[MAX_POLICY];
+static int  g_min_fails;                  /* 夹回累计，只在 status 里展示 */
+static int  g_min_pfails[MAX_POLICY];     /* 每簇连续夹回次数，决定退避长度 */
+static int  g_min_giveup[MAX_POLICY];     /* 1 = 该簇正被平台下限钉住 */
+static long g_min_pinned[MAX_POLICY];     /* 最近一次夹回值（平台下限） */
+static long g_min_logpin[MAX_POLICY];     /* 上次打过日志的钉住值，同值不重复报 */
 static long g_min_target[MAX_POLICY];
-static long g_min_give_at;
+static long g_min_next[MAX_POLICY];       /* 该簇下次允许重探的时间 */
+static long g_min_pend_at[MAX_POLICY];    /* > now：写完还没复核 */
+static long g_min_pend_val[MAX_POLICY];
+static int  g_min_pend_soft[MAX_POLICY];  /* 1 = 只要"不低于目标"就算成功 */
+static int  g_min_pend_chg[MAX_POLICY];   /* 写入时的充电态，只给日志用 */
+static int  g_min_chg = -1;               /* 上一拍充电态，-1 = 还没读过 */
 
-/* 配置刚改过：清掉 30 秒节流，下一拍立刻按新下限写一次。 */
-static void cpu_min_refresh(void) {
+/* 退避阶梯：封顶 10 分钟，绝不"本启动放弃"。 */
+static long min_backoff_sec(int fails) {
+  static const long step[] = {60, 180, 300, 600};
+  int n = (int)(sizeof step / sizeof step[0]);
+  if (fails <= 1) return step[0];
+  return step[fails >= n ? n - 1 : fails - 1];
+}
+
+/* 清掉所有退避/夹回记忆，下一拍立刻重探（why 只用于日志）。 */
+static void cpu_min_reset_backoff(const char *why) {
+  int any = 0;
+  for (int i = 0; i < g_npol; i++) {
+    if (g_min_pfails[i] || g_min_giveup[i] || g_min_next[i]) any = 1;
+    g_min_pfails[i] = 0;
+    g_min_giveup[i] = 0;
+    g_min_next[i] = 0;
+    g_min_pinned[i] = 0;
+    g_min_logpin[i] = 0;
+    g_min_pend_at[i] = 0;
+  }
+  if (g_min_fails) any = 1;
+  g_min_fails = 0;
+  g_min_fail_at = 0;
   g_min_last = 0;
+  if (any && why) log("CPU 下限：%s，退避清零重新探底", why);
+}
+
+/* 一簇"达成"：清掉该簇退避；之前被钉过的补一行放开日志。 */
+static void min_note_ok(int i, long cur) {
+  if (g_min_giveup[i] || g_min_pfails[i])
+    log("CPU 下限：%s 已生效（%ld），平台下限放开",
+        g_pol[i].name, cur > 0 ? cur : g_min_target[i]);
+  g_min_pfails[i] = 0;
+  g_min_giveup[i] = 0;
+  g_min_next[i] = 0;
+  g_min_pinned[i] = 0;
+  g_min_logpin[i] = 0;
+  g_min_fails = 0;
+}
+
+/* 一簇"没达成"：记平台下限 + 按簇退避，日志带上充电态便于定位。 */
+static void min_note_clamp(int i, long target, long got, int charging) {
+  int n = ++g_min_pfails[i];
+  long wait = min_backoff_sec(n);
+  long now = mono_sec();
+  g_min_giveup[i] = 1;
+  g_min_pinned[i] = got;
+  g_min_next[i] = now + wait;
+  g_min_fails++;
+  g_min_fail_at = now;
+  /* 同一个钉住值只报一次；平台换档（回读值变了）再报一次，避免刷屏 */
+  if (got > 0 && got != g_min_logpin[i]) {
+    g_min_logpin[i] = got;
+    log("CPU 下限：%s 目标 %ld，平台下限夹在 %ld（%s，第 %d 次，%ld 秒后重探）",
+        g_pol[i].name, target, got, charging ? "插电中" : "未插电", n, wait);
+  }
+}
+
+/* 配置/状态刚变过：清掉 30 秒节流与退避，下一拍立刻按新下限写一次。 */
+static void cpu_min_refresh(void) {
+  cpu_min_reset_backoff(NULL);
 }
 
 /* 只还原本模块按“进阶最低频/下限锁”压过的簇，不动 suppression 或厂商 */
@@ -5850,11 +5923,30 @@ static void cpu_min_patrol(void) {
   /* 省电静态档的下限已由压制写入；用户显式设了最低频时仍要巡检。 */
   if (suppress_on() && cfg.sup_style && g_sup_level == SUP_FLOOR_LV && !user_any) return;
   long now = mono_sec();
-  if (g_min_fails >= 3) {
-    if (now - g_min_fail_at < 600) return;
-    /* 退避到期必须清零，否则 g_min_fails 永远 >=3，之后每拍都写 */
-    g_min_fails = 0;
-    g_min_fail_at = 0;
+  /* 插拔电是平台下限的主要开关：状态一变就清零重探，别把插电时的
+     夹回次数记到拔电头上（issue #1 里 21:37 那两条就是这么来的）。 */
+  {
+    struct adapt a;
+    adapt_snapshot(&a);
+    int chg = a.charging ? 1 : 0;
+    if (g_min_chg >= 0 && chg != g_min_chg)
+      cpu_min_reset_backoff(chg ? "插电" : "拔电");
+    g_min_chg = chg;
+  }
+  /* 先复核上一轮写完的簇：隔一拍再读，写成功但被平台当场夹回、和写成功
+     之后被别的进程覆盖，这两种都会在这里二次定性。 */
+  for (int i = 0; i < g_npol; i++) {
+    if (!g_min_pend_at[i] || now < g_min_pend_at[i]) continue;
+    char path[256];
+    snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
+    long got = read_num(path);
+    long target = g_min_pend_val[i];
+    int soft = g_min_pend_soft[i], chg = g_min_pend_chg[i];
+    g_min_pend_at[i] = 0;
+    if (got > 0 && (got == target || (soft && got > target)))
+      min_note_ok(i, got);
+    else
+      min_note_clamp(i, target, got, chg);
   }
   if (g_min_last && now - g_min_last < 30) return;
   for (int i = 0; i < g_npol; i++) {
@@ -5878,50 +5970,32 @@ static void cpu_min_patrol(void) {
     }
     long target = fsm_target > 0 ? fsm_target
                  : user_target > 0 ? user_target : g_pol[i].hw_min;
+    /* 用户最低频只要“不低于目标”就算成功；CPU_MIN_LOCK 的下限是硬件最低 */
+    int soft = user_target > 0 || fsm_target > 0;
     if (target != g_min_target[i]) {
       g_min_target[i] = target;
       g_min_giveup[i] = 0;
       g_min_pfails[i] = 0;
+      g_min_next[i] = 0;
+      g_min_pend_at[i] = 0;
     }
     char path[256];
     snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
     long cur = read_num(path);
-    if (cur <= 0 || cur == target) continue;
-    if (g_min_giveup[i]) {
-      /* 钉死簇：30 分钟复探一次，其余时间跳过。 */
-      if (now - g_min_give_at < 1800) continue;
-      g_min_give_at = now;
+    if (cur <= 0) continue;
+    if (cur == target || (soft && cur > target)) {
+      if (g_min_giveup[i] || g_min_pfails[i]) min_note_ok(i, cur);
+      continue;
     }
+    if (g_min_pend_at[i]) continue;                      /* 上一写还没复核 */
+    if (g_min_next[i] && now < g_min_next[i]) continue;  /* 平台钉着，退避中 */
     if (write_journaled(NODES_JOURNAL, path, target)) continue;
     g_min_writes++;
     g_min_last = now;
-    long got = read_num(path);
-    /* 用户最低频只要“不低于目标”就算成功；CPU_MIN_LOCK 的下限是最低频 */
-    int ok = got == target || ((user_target > 0 || fsm_target > 0) && got > target);
-    if (!ok) {
-      if (++g_min_pfails[i] >= 9 && !g_min_giveup[i]) {
-        g_min_giveup[i] = 1;
-        g_min_pinned[i] = got;
-        g_min_give_at = now;
-        log("CPU 下限：%s 被系统钉在 %ld，本启动不再尝试（30 分钟复探一次）",
-            g_pol[i].name, got);
-      }
-      int before = g_min_fails;
-      if (++g_min_fails >= 3) {
-        g_min_fail_at = now;
-        /* 一轮里多个簇先后被夹回时只在刚跨过阈值那一下打一行 */
-        if (before < 3)
-          log("CPU 下限目标 %ld（%s）连续 3 次没达成，暂停 10 分钟",
-              target, g_pol[i].name);
-      }
-    } else {
-      g_min_fails = 0;
-      g_min_pfails[i] = 0;
-      if (g_min_giveup[i]) {
-        g_min_giveup[i] = 0;
-        log("CPU 下限：%s 系统已放开，恢复下限巡检", g_pol[i].name);
-      }
-    }
+    g_min_pend_val[i] = target;
+    g_min_pend_soft[i] = soft;
+    g_min_pend_chg[i] = g_min_chg;
+    g_min_pend_at[i] = now + 1;
   }
 }
 
@@ -6029,6 +6103,8 @@ static void leave_screen_off(void) {
   sup_exit();
   g_soff_pkg[0] = 0;
   log("亮屏，恢复常态巡检");
+  /* 熄屏期间平台下限可能已经变了（充电满/温控回落），亮屏直接清零重探 */
+  cpu_min_reset_backoff("亮屏");
   /* 重立占用基线；smart 且预热档打开且非游戏时，本圈 smart_tick 只升不降预热。 */
   smart_on_leave_screen_off();
   /* cap：下限还原、封顶重算（充电地板重新生效）。 */
@@ -6449,8 +6525,13 @@ static void publish_status(void) {
       if (g_pol[i].tier >= 0 && g_pol[i].tier < 4) used[g_pol[i].tier] = 1;
     for (int t = 0; t < 4; t++) ntier += used[t];
   }
-  int cmin_paused = cfg.cpu_min_lock && g_min_fails >= 3 &&
-                    mono_sec() - g_min_fail_at < 600;
+  /* 有簇正被平台下限钉着（还没到重探时间）就算“退避中” */
+  int cmin_paused = 0;
+  {
+    long t = mono_sec();
+    for (int i = 0; i < g_npol; i++)
+      if (g_min_giveup[i] && t < g_min_next[i]) { cmin_paused = 1; break; }
+  }
   int cmin_give = 0;
   for (int i = 0; i < g_npol; i++) cmin_give += g_min_giveup[i];
   const char *cat_name = g_cat_idx >= 0 ? g_cat_names[g_cat_idx] : "-";

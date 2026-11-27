@@ -574,16 +574,26 @@ console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电�
      '装机注释与文档不再把升级情形写成 uncap / keep（实际是保留原值）');
   ok(/熄屏只看那一刻前台/.test(html) && /满血交还系统/.test(html),
      '页面写清 soff 只看熄屏瞬间前台');
-  /* CPU 下限锁：默认关；亮屏只读偏离才写、30s 节流、夹回 3 次停 10 分钟 */
+  /* CPU 下限锁：默认关；亮屏只读偏离才写、30s 节流；被平台下限夹回按簇
+     退避 60→180→300→600s 封顶，永不“本启动放弃” */
   ok(/^CPU_MIN_LOCK=0$/m.test(conf) && /cfg\.cpu_min_lock = 0;/.test(csrc),
      'CPU 下限锁默认关，缺键兜底也是 0');
-  ok(/static void cpu_min_patrol\(void\)[\s\S]{0,1600}now - g_min_last < 30/.test(csrc) &&
-     /g_min_fails >= 3\) \{[\s\S]{0,160}?now - g_min_fail_at < 600\) return;/.test(csrc),
-     'CPU 下限巡检有 30s 节流和"被夹回 3 次停 10 分钟"的退避');
-  /* 退避到期必须清零：否则 g_min_fails 永远 >=3，600s 后每 30s 写一次、
-     每 30s 被夹回，再也不进退避。 */
-  ok(/g_min_fails >= 3\) \{[\s\S]{0,160}?now - g_min_fail_at < 600\) return;[\s\S]{0,160}?g_min_fails = 0;/.test(csrc),
-     '10 分钟退避到期后清零重来（不会退化成永久 30s 无效写入）');
+  ok(/static void cpu_min_patrol\(void\)[\s\S]{0,3200}now - g_min_last < 30/.test(csrc) &&
+     /static long min_backoff_sec\(int fails\)/.test(csrc) &&
+     /\{60, 180, 300, 600\}/.test(csrc),
+     'CPU 下限巡检 30s 节流；夹回退避 60→180→300→600s 封顶');
+  /* 夹回是“平台下限此刻更高”，不是内核拒绝：只退避重探，不清掉本启动功能 */
+  ok(!/本启动不再尝试/.test(csrc) &&
+     /g_min_next\[i\] && now < g_min_next\[i\]/.test(csrc) &&
+     /g_min_giveup\[i\] = 1;/.test(csrc),
+     '被夹回只按簇退避重探，不再“本启动不再尝试”');
+  /* 写完隔一拍复核：当场被夹 vs 写成功后被人覆盖，两种都在复核里定性 */
+  ok(/g_min_pend_at\[i\] = now \+ 1/.test(csrc) &&
+     /got == target \|\| \(soft && got > target\)/.test(csrc),
+     '写完隔一拍复核，区分当场被夹和写成功后被人覆盖');
+  ok(/cpu_min_reset_backoff\(chg \? "插电" : "拔电"\)/.test(csrc) &&
+     /cpu_min_reset_backoff\("亮屏"\)/.test(csrc),
+     '插拔电 / 亮屏清零退避立刻重探（不把插电时的夹回记到拔电头上）');
   ok(/cminw=%ld\\ncminf=%d\\ncminpaused=%d/.test(csrc),
      'status 导出 cminw / cminf / cminpaused');
   ok(/function paintCpuMin\(s\)/.test(html) && /s\.cminw/.test(html) &&
@@ -592,8 +602,8 @@ console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电�
   ok(/id="cmin-stat"/.test(html) && /paintCpuMin\(s\)/.test(html) &&
      /paintCpuMin\(lastSt\)/.test(html),
      '状态刷新和配置载入都会重画 cmin 统计');
-  ok(/int before = g_min_fails;[\s\S]{0,180}?if \(before < 3\)/.test(csrc),
-     '多簇同一轮被夹回只打一行日志');
+  ok(/if \(got > 0 && got != g_min_logpin\[i\]\)/.test(csrc),
+     '同一钉住值只打一次日志，平台换档（回读值变了）才再报');
   ok(!/15s 轻巡检/.test(html) && !/默认 15s/.test(DOC) && !/从 15s 拉到/.test(DOC) &&
      !/熄屏 15s/.test(DOC),
      '展示文案不再写 15s（新装默认 30s / 深空闲 60s）');
@@ -3816,10 +3826,11 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      !/g_sup_extra_level != prof[\s\S]{0,120}?cpuset_restore_all\(\)/.test(csrc) &&
      /if \(suppress_on\(\) && cfg\.ad\.chg\)[\s\S]{0,260}?g_sup_chg_pause = 1;[\s\S]{0,120}?sup_exit\(\)/.test(csrc),
      'cpuset 换档直接覆盖；插电暂停在压制前判定并还原');
-  /* CPU 下限锁到底：钉死判定后不再无限退避循环。 */
-  ok(/g_min_pfails\[i\] >= 9/.test(csrc) && /g_min_giveup\[i\] = 1/.test(csrc) &&
-     /now - g_min_give_at < 1800/.test(csrc) && /cming=%d/.test(csrc),
-     '下限锁：累计 9 次被夹回判定系统钉死，放弃该簇 30 分钟复探，status 报 cming');
+  /* CPU 下限锁到底：夹回只按簇退避，status 如实报“被钉住” */
+  ok(/static int  g_min_giveup\[MAX_POLICY\]/.test(csrc) &&
+     /static long g_min_next\[MAX_POLICY\]/.test(csrc) &&
+     /cming=%d/.test(csrc),
+     '下限锁：每簇独立退避（g_min_next），status 报 cming');
   /* 工作点参数层：adapt 逐芯片 gov_ 数据 + 通用应用/还原。 */
   {
     const sm8750 = fs.readFileSync(MOD0 + '/adapt/sm8750.conf', 'utf8');
@@ -4343,11 +4354,17 @@ console.log('\n== restart 不吊住调用者 ==');
   /* 版本：module.prop / 页面模块版本 / README / 守护二进制一起改；
      页面 #ver2 在 status 回来后会用守护的 SF_VERSION 覆盖，两边必须一致。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2.4 Beta5$/m.test(mp) && /^versionCode=24050$/m.test(mp),
-     'module.prop 是 V2.4 Beta5 / 24050');
-  ok(/SF_VERSION "2.4 Beta5"/.test(csrc), '守护源码里的版本号同步到 2.4 Beta5');
-  ok(/id="ver">V2.4 Beta5</.test(html) && /id="ver2">V2.4 Beta5</.test(html),
-     '页面：模块版本与守护版本都是 V2.4 Beta5');
+  const ver = ((mp.match(/^version=(.+)$/m) || [])[1] || '').trim();
+  const verCode = ((mp.match(/^versionCode=(\d+)$/m) || [])[1] || '').trim();
+  ok(/^V\d+\.\d+ Beta\d+$/.test(ver) && /^\d+$/.test(verCode),
+     `module.prop 版本号格式正常（${ver} / ${verCode}）`);
+  /* 守护里的 SF_VERSION 不带 V 前缀，页面与 README 带；都以 module.prop 为准，
+     发版只改一处，测试跟着版本走，不用每次改断言 */
+  const verNoV = ver.replace(/^V/, '');
+  ok(csrc.includes(`SF_VERSION "${verNoV}"`),
+     `守护源码版本号 = module.prop（${verNoV}）`);
+  ok(html.includes(`id="ver">${ver}<`) && html.includes(`id="ver2">${ver}<`),
+     `页面模块/守护版本 = module.prop（${ver}）`);
   ok(/\.sub\{[^}]*white-space:normal/.test(html),
      '标题副行允许换行，窄屏不会把版本号省略成 "…"');
   ok(/<html lang="zh-CN" data-style="glass">/.test(html),
@@ -4375,8 +4392,8 @@ console.log('\n== restart 不吊住调用者 ==');
      '动效关/减少动态效果时控件过渡和指下光斑也停');
   ok(/\[data-theme="dark"\][\s\S]{0,700}?--acc:#2563eb/.test(html),
      '深色主色压到 #2563eb，白字达到 4.5:1');
-  ok(/版本：V2.4 Beta5/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
-     'README 标题行同步到 V2.4 Beta5');
+  ok(fs.readFileSync(MOD0 + '/README.md', 'utf8').includes(`版本：${ver}`),
+     `README 标题行版本 = module.prop（${ver}）`);
   {
     /* 管理器按 update.json 的 versionCode 提示更新，和 module.prop 漂移会
        出现"提示了但装不上"或"明明有新版却不提示"，两边必须同源。 */
