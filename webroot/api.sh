@@ -328,7 +328,7 @@ cfg_set() {
   elif [ "$_k" = SCREEN_STATE_PATH ] || [ "$_k" = BATT_CURRENT_PATH ]; then
     case "$_v" in ''|/sys/*) ;; *) die "BAD_PATH" ;; esac
   elif [ "$_k" = BATT_CURRENT_UNIT ]; then
-    case "$_v" in ua|ma) ;; *) die "BAD_UNIT" ;; esac
+    case "$_v" in auto|ua|ma) ;; *) die "BAD_UNIT" ;; esac
   elif [ "$_k" = SUP_STYLE ]; then
     case "$_v" in bal|sav) ;; *) die "BAD_SUPSTYLE" ;; esac
   elif [ "$_k" = CAP_BACKEND ]; then
@@ -738,11 +738,11 @@ games_suggest() {
 # 列出已安装应用。默认第三方；all = 连系统包一起（含服务/组件）。
 apps_list() {
   if [ "${1:-}" = "all" ]; then
-    pm list packages 2>/dev/null | sed -n 's/^package://p' \
-      | awk '{print $1}' | tr -d '\r' | grep -v '^$' | sort
+    { pm list packages 2>/dev/null; pm list packages --user all 2>/dev/null; } \
+      | sed -n 's/^package://p' | awk '{print $1}' | tr -d '\r' | grep -v '^$' | sort -u
   else
-    pm list packages -3 2>/dev/null | sed -n 's/^package://p' \
-      | awk '{print $1}' | tr -d '\r' | grep -v '^$' | sort
+    { pm list packages -3 2>/dev/null; pm list packages -3 --user all 2>/dev/null; } \
+      | sed -n 's/^package://p' | awk '{print $1}' | tr -d '\r' | grep -v '^$' | sort -u
   fi
   # pm 失败或无包：输出为空，这里不 die——
   return 0
@@ -766,6 +766,7 @@ mode_apps() {
   fi
   {
     pm list packages -3 2>/dev/null | sed -n 's/^package://p' | awk '{print $1}' | tr -d '\r'
+    pm list packages -3 --user all 2>/dev/null | sed -n 's/^package://p' | awk '{print $1}' | tr -d '\r'
     printf '%s\n' "$_sys"
   } | grep -v '^$' | sort -u
   # 没有 cmd / 查询失败时至少还有第三方；不 die。

@@ -672,15 +672,15 @@ cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
 cp "$T/pkg_v1.txt" "$T/mod/games.txt"
 eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8750;; ro.board.platform) echo X;; esac; }"
 mk_case; runcase
-# SM8750 省电 46/51 → 视频 41/51，社交 41/61，阅读 39/41
-chk "$(_g "$T/data/app_categories.conf" video_cpu_big)" "41" "视频超大核 = 省电 46 - 5"
-chk "$(_g "$T/data/app_categories.conf" video_cpu_little)" "51" "视频小核 = 省电 51 + 0"
-chk "$(_g "$T/data/app_categories.conf" social_cpu_big)" "41" "社交超大核 = 省电 46 - 5"
-chk "$(_g "$T/data/app_categories.conf" social_cpu_little)" "61" "社交小核 = 省电 51 + 10"
-chk "$(_g "$T/data/app_categories.conf" reading_cpu_big)" "39" "阅读超大核 = 省电 46 - 7"
-chk "$(_g "$T/data/app_categories.conf" reading_cpu_little)" "41" "阅读小核 = 省电 51 - 10"
+# SM8750 v3.4 三场景：视频 40/45，社交 46/51，阅读 33/39
+chk "$(_g "$T/data/app_categories.conf" video_cpu_big)" "40" "视频超大核 = 1689MHz 档"
+chk "$(_g "$T/data/app_categories.conf" video_cpu_little)" "45" "视频小核 = 1555MHz 档"
+chk "$(_g "$T/data/app_categories.conf" social_cpu_big)" "46" "社交超大核 = 1958MHz 档"
+chk "$(_g "$T/data/app_categories.conf" social_cpu_little)" "51" "社交小核 = 1785MHz 档"
+chk "$(_g "$T/data/app_categories.conf" reading_cpu_big)" "33" "阅读超大核 = 1401MHz 档"
+chk "$(_g "$T/data/app_categories.conf" reading_cpu_little)" "39" "阅读小核 = 1363MHz 档"
 chk "$(_g "$T/data/app_categories.conf" video_cpu_mid2)" "" "两簇机不写不存在的中核键"
-chk "$(_g "$T/data/defaults/app_categories.conf" video_cpu_big)" "41" \
+chk "$(_g "$T/data/defaults/app_categories.conf" video_cpu_big)" "40" \
     "恢复默认那份也写入芯片分类默认值"
 has "$T/data/app_categories.conf" "video=com.ss.android.ugc.aweme" && _k=yes || _k=no
 chk "$_k" "yes" "生成默认值时保留视频包名"
@@ -696,10 +696,10 @@ sed 's/^video_gpu=0$/video_gpu=33/' "$T/data/app_categories.conf" > "$T/data/cat
 mv -f "$T/data/cat.tmp" "$T/data/app_categories.conf"
 eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8750;; ro.board.platform) echo X;; esac; }"
 mk_case; runcase
-chk "$(_g "$T/data/app_categories.conf" video_cpu_big)" "41" "旧固定默认升级后换成芯片默认"
-chk "$(_g "$T/data/app_categories.conf" video_gpu)" "33" "迁移不丢用户改过的分类 GPU"
+chk "$(_g "$T/data/app_categories.conf" video_cpu_big)" "40" "旧固定默认升级后换成芯片默认"
+chk "$(_g "$T/data/app_categories.conf" video_gpu)" "32" "首次升级覆盖分类 GPU"
 
-echo "== 场景 31：用户改过分类 CPU 时不迁移 =="
+echo "== 场景 31：v3.4 首次升级强制覆盖分类值 =="
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
 cp "$MOD/socfreq.conf" "$T/data/socfreq.conf"
 cp "$MOD/socfreq.conf" "$T/mod/socfreq.conf"
@@ -712,8 +712,9 @@ cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
 } > "$T/data/app_categories.conf"
 eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8750;; ro.board.platform) echo X;; esac; }"
 mk_case; runcase
-chk "$(_g "$T/data/app_categories.conf" video_cpu)" "40" "用户改过的 legacy 分类值保留"
-chk "$(_g "$T/data/app_categories.conf" video_cpu_big)" "" "不迁移就不额外写四簇键"
+chk "$(_g "$T/data/app_categories.conf" video_cpu_big)" "40" "首次升级强制覆盖分类 CPU"
+chk "$(_g "$T/data/app_categories.conf" video_cpu)" "" "旧版统一键被移除"
+chk "$(_g "$T/data/app_categories.conf" video_gpu)" "32" "首次升级也覆盖分类 GPU"
 
 echo "== 场景 32：旧公式生成值升级到新公式，保留包名和 GPU =="
 rm -rf "$T/data" "$T/mod"; mkdir -p "$T/data" "$T/mod" "$T/mod/adapt"
@@ -729,10 +730,10 @@ cp "$MOD"/adapt/*.conf "$T/mod/adapt/"
 } > "$T/data/app_categories.conf"
 eval "getprop() { case \"\$1\" in ro.soc.model) echo SM8750;; ro.board.platform) echo X;; esac; }"
 mk_case; runcase
-chk "$(_g "$T/data/app_categories.conf" video_cpu_little)" "51" "旧公式视频小核迁移到 +0"
-chk "$(_g "$T/data/app_categories.conf" social_cpu_little)" "61" "旧公式社交小核迁移到 +10"
-chk "$(_g "$T/data/app_categories.conf" reading_cpu_little)" "41" "旧公式阅读小核迁移到 -10"
-chk "$(_g "$T/data/app_categories.conf" video_gpu)" "33" "迁移保留用户改过的 GPU"
+chk "$(_g "$T/data/app_categories.conf" video_cpu_little)" "45" "旧公式视频小核迁移到视频档"
+chk "$(_g "$T/data/app_categories.conf" social_cpu_little)" "51" "旧公式社交小核迁移到社交档"
+chk "$(_g "$T/data/app_categories.conf" reading_cpu_little)" "39" "旧公式阅读小核迁移到阅读档"
+chk "$(_g "$T/data/app_categories.conf" video_gpu)" "32" "首次升级覆盖分类 GPU"
 has "$T/data/app_categories.conf" "video=com.ss.android.ugc.aweme" && _k=yes || _k=no
 chk "$_k" "yes" "迁移保留分类包名"
 

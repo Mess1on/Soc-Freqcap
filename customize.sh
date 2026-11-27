@@ -274,17 +274,39 @@ _cat_make_block() {
       social)  _ba=-5; _oa=10; _oba=-5; _ooa=7 ;;
       reading) _ba=-7; _oa=-10; _oba=-7; _ooa=-11 ;;
     esac
-    _v=$(_cat_pct "$_sav_big" "$_ba")
-    printf '%s_cpu_big=%s\n' "$_c" "$_v" >> "$_cat_block"
     _ov=$(_cat_pct "$_sav_big" "$_oba")
     printf '%s_cpu_big=%s\n' "$_c" "$_ov" >> "$_cat_old_block"
     for _spec in "mid2:$_sav_mid2" "mid:$_sav_mid" "little:$_sav_little"; do
       _t=${_spec%%:*}; _b=${_spec#*:}
       case "$_b" in ''|*[!0-9]*) continue ;; esac
-      _v=$(_cat_pct "$_b" "$_oa")
-      printf '%s_cpu_%s=%s\n' "$_c" "$_t" "$_v" >> "$_cat_block"
       _ov=$(_cat_pct "$_b" "$_ooa")
       printf '%s_cpu_%s=%s\n' "$_c" "$_t" "$_ov" >> "$_cat_old_block"
+    done
+
+    _cb=$(sed -n "s/^cat_${_c}_big=//p" "$ADAPT_FILE" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+    case "$_cb" in ''|*[!0-9]*) _cb= ;; esac
+    if [ -n "$_cb" ]; then
+      _v=$(_cat_pct "$_cb" 0)
+      printf '%s_cpu_big=%s\n' "$_c" "$_v" >> "$_cat_block"
+      for _t in mid2 mid little; do
+        _cv=$(sed -n "s/^cat_${_c}_${_t}=//p" "$ADAPT_FILE" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+        case "$_cv" in ''|*[!0-9]*) continue ;; esac
+        _v=$(_cat_pct "$_cv" 0)
+        printf '%s_cpu_%s=%s\n' "$_c" "$_t" "$_v" >> "$_cat_block"
+      done
+      _cg=$(sed -n "s/^cat_${_c}_gpu=//p" "$ADAPT_FILE" 2>/dev/null | head -n 1 | tr -d ' \r\t')
+      case "$_cg" in ''|*[!0-9]*) _cg=0 ;; esac
+      printf '%s_gpu=%s\n' "$_c" "$_cg" >> "$_cat_block"
+      continue
+    fi
+
+    _v=$(_cat_pct "$_sav_big" "$_ba")
+    printf '%s_cpu_big=%s\n' "$_c" "$_v" >> "$_cat_block"
+    for _spec in "mid2:$_sav_mid2" "mid:$_sav_mid" "little:$_sav_little"; do
+      _t=${_spec%%:*}; _b=${_spec#*:}
+      case "$_b" in ''|*[!0-9]*) continue ;; esac
+      _v=$(_cat_pct "$_b" "$_oa")
+      printf '%s_cpu_%s=%s\n' "$_c" "$_t" "$_v" >> "$_cat_block"
     done
     printf '%s_gpu=0\n' "$_c" >> "$_cat_block"
   done
@@ -338,7 +360,7 @@ _cat_rewrite() {
     done
   fi
   {
-    printf '# 应用分类：只压不抬。0 = 不启用/跟随全局。\n'
+    printf '# 应用分类：按场景覆盖当前封顶。0 = 不设置/跟随全局。\n'
     cat "$_block" 2>/dev/null
     awk '
       /^[ \t]*(video|social|reading)_(cpu|cpu_big|cpu_mid2|cpu_mid|cpu_little|gpu)[ \t]*=/ { next }
@@ -354,7 +376,13 @@ _cat_soc_defaults() {
   [ -n "$ADAPT_FILE" ] && [ -f "$ADAPT_FILE" ] || return 0
   _cat_make_block || return 0
   _cat_rewrite "$DATA/defaults/app_categories.conf" 0
-  if [ "$_FRESH_CONF" = 1 ] || _cat_old_defaults "$DATA/app_categories.conf" \
+  _force_mark="$DATA/.cat_scene_v3_4"
+  _force=0
+  [ -f "$_force_mark" ] || _force=1
+  if [ "$_force" = 1 ]; then
+    _cat_rewrite "$DATA/app_categories.conf" 0
+    : > "$_force_mark"
+  elif [ "$_FRESH_CONF" = 1 ] || _cat_old_defaults "$DATA/app_categories.conf" \
      || _cat_old_generated "$DATA/app_categories.conf"; then
     _cat_rewrite "$DATA/app_categories.conf" 1
   fi

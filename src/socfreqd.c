@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.4 Beta4"
+#define SF_VERSION "2.4 Beta5"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -156,6 +156,7 @@ struct cfg {
   int wake_delta_ma;
   char batt_current_path[192];
   int batt_current_ma_unit; /* 1 = 原始值已经是 mA；0 = µA */
+  int batt_current_auto;    /* 1 = 按量级自动识别单位 */
   int boot_full_s;     /* 开机后满血秒数，0 = 关 */
   char governor[32];   /* 日常调速器，空 = 不干预 */
   int big_min;         /* 1 = 超大核压到最低频（不关闭核心） */
@@ -4675,7 +4676,8 @@ static int cat_lookup(const char *pkg) {
 }
 
 static long cap_with_cat(const struct policy *p, long want) {
-  if (p->cat_cap > 0 && p->cat_cap < want) return p->cat_cap;
+  if (g_screen_off) return want;
+  if (p->cat_cap > 0) return p->cat_cap;
   return want;
 }
 
@@ -4761,7 +4763,7 @@ static long gpu_target_for(int base_pct, int delta) {
 
 static long gpu_target(void) {
   int base = g_app_gpu > 0 ? g_app_gpu : cfg.gpu_pct;
-  if (g_cat_gpu_cur > 0 && g_cat_gpu_cur < base) base = g_cat_gpu_cur;
+  if (!g_screen_off && g_cat_gpu_cur > 0) base = g_cat_gpu_cur;
   if (cfg.strategy == 1) {
     int cap = cfg.fsm_gpu[g_sm.fsm] > 0 ? cfg.fsm_gpu[g_sm.fsm]
                                          : kSmartGpuPct[g_sm.fsm];
@@ -4854,12 +4856,16 @@ static long sup_static_floor_for(const struct policy *p) {
 
 static long sup_cap_for(const struct policy *p) {
   if (g_sup_level <= SUP_OPT) return p->cap;
+  /* BIG 不跟动态地板：降到下一档后常常正好等于内核下限，
+     min/max 一起钉死，反而既卡又费电。 */
+  if (g_sup_level == SUP_FLOOR_LV && (p->tier & 3) == 0) return p->cap;
   if (cfg.sup_style && g_sup_level == SUP_FLOOR_LV)
     return sup_static_floor_for(p);
-  /* 按用户设定的百分比继续收；BIG_MIN 已经把 cap 放到硬件最低时 */
   long want = p->cap * sup_pct() / 100;
   if (p->hw_min > 0 && want < p->hw_min) want = p->hw_min;
-  return cap_floor_apply(p, snap_freq(p, want));
+  /* 地板是“不低于”的下限，吸附要向上；向下取会把 80% 白丢一整档。 */
+  return cap_floor_apply(p, g_sup_level == SUP_FLOOR_LV
+                                ? snap_up_freq(p, want) : snap_freq(p, want));
 }
 
 /* 用户设的进阶最低频；0 = 没设，返回 0。目标夹在 hw_min 与当前封顶之间 */
@@ -4884,9 +4890,8 @@ static void sup_min_clamp(int on) {
   for (int i = 0; i < g_npol; i++) {
     if (g_pol[i].hw_min <= 0) continue;
     char path[256];
-    long target = (cfg.sup_style && g_sup_level == SUP_FLOOR_LV)
-                      ? g_pol[i].hw_min
-                      : min_floor_for(&g_pol[i]);
+    /* 用户设了最低频就用用户的；没有再跟随硬件最低。 */
+    long target = min_floor_for(&g_pol[i]);
     if (target <= 0) continue;
     snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
     if (on) {
@@ -5118,10 +5123,19 @@ long batt_current_ma(long raw, int unit_ma) {
   return unit_ma ? a : a / 1000;
 }
 
+/* 10A 以上的手机电流不可能出现；超过这个量级肯定是 µA 节点。 */
+#define BATT_CURRENT_UA_MIN 10000
+long batt_current_ma_auto(long raw, int unit_ma, int auto_unit) {
+  long a = raw < 0 ? -raw : raw;
+  if (a >= BATT_CURRENT_UA_MIN) return a / 1000;
+  if (auto_unit) return a;
+  return unit_ma ? a : a / 1000;
+}
+
 static long batt_current_ma_now(void) {
   long raw;
   if (!read_signed(cfg.batt_current_path, &raw)) return -1;
-  return batt_current_ma(raw, cfg.batt_current_ma_unit);
+  return batt_current_ma_auto(raw, cfg.batt_current_ma_unit, cfg.batt_current_auto);
 }
 
 /* 深度空闲纯步进。返回 0=不变、1=进入深睡、2=电流突增（让调用方做一次亮屏确认）。 */
@@ -5265,6 +5279,53 @@ static int boot_boost_active(void) {
 #define BIG_OFF_JOURNAL RUN_DIR "/bigoffline.saved"
 static int g_big_offline_on;
 
+/* 上电顺序必须从小到大：同一簇里先叫醒低号核，再叫醒高号核。
+   反着写（cpu7 先于 cpu6）在部分高通内核上会把簇电源状态打乱。 */
+struct bo_saved {
+  char path[256];
+  char val[16];
+  unsigned mode;
+  int cpu;
+};
+static int bo_saved_cmp(const void *a, const void *b) {
+  int x = ((const struct bo_saved *)a)->cpu;
+  int y = ((const struct bo_saved *)b)->cpu;
+  return (x > y) - (x < y);
+}
+static int big_offline_restore_online(const char *tag) {
+  FILE *f = fopen(BIG_OFF_JOURNAL, "r");
+  if (!f) return 0;
+  struct bo_saved e[MAX_CORES];
+  int n = 0, failed = 0;
+  char ln[640];
+  while (n < MAX_CORES && fgets(ln, sizeof ln, f)) {
+    if (sscanf(ln, "%255s %15s %o", e[n].path, e[n].val, &e[n].mode) != 3)
+      continue;
+    const char *p = strstr(e[n].path, "/cpu");
+    e[n].cpu = p ? atoi(p + 4) : 999;
+    n++;
+  }
+  fclose(f);
+  if (n > 1) qsort(e, n, sizeof e[0], bo_saved_cmp);
+  for (int i = 0; i < n; i++) {
+    if (access(e[i].path, F_OK)) { failed = 1; continue; }
+    chmod(e[i].path, 0644);
+    char cur[16] = {0};
+    if (write_str(e[i].path, e[i].val) ||
+        read_file(e[i].path, cur, sizeof cur) || strcmp(cur, e[i].val))
+      failed = 1;
+    chmod(e[i].path, (mode_t)e[i].mode);
+    usleep(100000);
+  }
+  if (failed) {
+    log("WARN 超大核离线：%s上电未全部完成，保留快照下次重试", tag);
+    return -1;
+  }
+  unlink(BIG_OFF_JOURNAL);
+  log("超大核离线：%s，已按 cpu 号从小到大上电", tag);
+  return n;
+}
+
 static int big_cpu_list(int *out, int max) {
   static int ids[MAX_CORES];
   static int n = -1;
@@ -5303,7 +5364,7 @@ static int boot_completed_now(void) {
 static void big_offline_restore(const char *why) {
   int had = access(BIG_OFF_JOURNAL, F_OK) == 0;
   if (!had && !g_big_offline_on) return;
-  if (had) str_restore_all(BIG_OFF_JOURNAL, "超大核离线");
+  if (had) big_offline_restore_online("关闭");
   g_big_offline_on = 0;
 
   int ids[MAX_CORES];
@@ -5334,7 +5395,7 @@ static void big_offline_restore(const char *why) {
 /* 启动时先恢复离线核再探测 policy；这里不初始化 big_cpu_list 缓存。 */
 static void big_offline_restore_boot(void) {
   if (access(BIG_OFF_JOURNAL, F_OK)) return;
-  str_restore_all(BIG_OFF_JOURNAL, "超大核离线");
+  big_offline_restore_online("启动");
   struct topo_entry topo[MAX_CORES];
   int tn = topo_load(topo, MAX_CORES, NULL);
   if (tn <= 0) usleep(200000);
@@ -5352,10 +5413,30 @@ static void big_offline_restore_boot(void) {
   log("超大核离线：启动前已恢复离线核");
 }
 
+static int big_offline_vendor_blocked(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    char b[64] = "", m[64] = "";
+    __system_property_get("ro.product.brand", b);
+    __system_property_get("ro.product.manufacturer", m);
+    cached = !strncasecmp(b, "honor", 5) || !strncasecmp(m, "honor", 5) ||
+             !strncasecmp(b, "huawei", 6) || !strncasecmp(m, "huawei", 6);
+  }
+  return cached;
+}
+
 static void big_offline_apply(void) {
   static long log_at = -600, fail_at = 0;
   if (!cfg.big_offline) {
     if (g_big_offline_on) big_offline_restore("关闭");
+    return;
+  }
+  if (big_offline_vendor_blocked()) {
+    static int warned;
+    if (!warned) {
+      warned = 1;
+      log("超大核离线：荣耀/华为内核不支持热插拔，已跳过");
+    }
     return;
   }
   /* 第一次在这个运行实例上开离线：先把完整拓扑写下来，导出才不会把
@@ -5766,8 +5847,8 @@ static void cpu_min_patrol(void) {
     }
     return;
   }
-  /* 省电静态档的下限已由压制改为硬件最低；巡检这时再写用户下限 */
-  if (suppress_on() && cfg.sup_style && g_sup_level == SUP_FLOOR_LV) return;
+  /* 省电静态档的下限已由压制写入；用户显式设了最低频时仍要巡检。 */
+  if (suppress_on() && cfg.sup_style && g_sup_level == SUP_FLOOR_LV && !user_any) return;
   long now = mono_sec();
   if (g_min_fails >= 3) {
     if (now - g_min_fail_at < 600) return;
@@ -6060,6 +6141,7 @@ static void load_cfg(void) {
   snprintf(cfg.batt_current_path, sizeof cfg.batt_current_path,
            "/sys/class/power_supply/battery/current_now");
   cfg.batt_current_ma_unit = 0;
+  cfg.batt_current_auto = 1;
   cfg.boot_full_s = 60;
   /* 默认不碰调速器：部分厂商内核（荣耀/华为）切到 conservative 会硬重启。 */
   cfg.governor[0] = 0;
@@ -6107,8 +6189,17 @@ static void load_cfg(void) {
     if (strlen(v) < sizeof cfg.batt_current_path)
       snprintf(cfg.batt_current_path, sizeof cfg.batt_current_path, "%s", v);
   }
-  if (cfg_get("BATT_CURRENT_UNIT", v) == 0)
-    cfg.batt_current_ma_unit = !strcasecmp(v, "ma");
+  if (cfg_get("BATT_CURRENT_UNIT", v) == 0) {
+    if (!strcasecmp(v, "ma")) {
+      cfg.batt_current_auto = 0;
+      cfg.batt_current_ma_unit = 1;
+    } else if (!strcasecmp(v, "ua")) {
+      cfg.batt_current_auto = 0;
+      cfg.batt_current_ma_unit = 0;
+    } else {
+      cfg.batt_current_auto = 1;
+    }
+  }
   if (cfg_get("STRATEGY", v) == 0)
     cfg.strategy = !strcasecmp(v, "smart") ? 1 : 0;
   /* 开机满血窗口上限 600s：再长就不是"开机提速"而是"忘了限频"了 */
@@ -7254,7 +7345,9 @@ int main(int argc, char **argv) {
       missing_since = 0;
       adapt_cancel();   /* 交权态不攒 PSI/温控档位 */
       category_clear();
-      if (strcmp(g_game, fg)) {
+      /* 从别的应用切回同一个游戏也要重交一次：宽限期里状态可能还是
+         game，但厂商/前台切换可能把上限或亲和性写回去了。 */
+      if (strcmp(g_game, fg) || (fg_changed && !strcmp(g_state, "game"))) {
         snprintf(g_game, sizeof g_game, "%s", fg);
         unlock_game();
       }

@@ -591,8 +591,12 @@ static void sf_test_app_categories(void) {
   memset(&cp, 0, sizeof cp);
   cp.cat_cap = 1600000;
   sf_check(cap_with_cat(&cp, 2000000) == 1600000 &&
-           cap_with_cat(&cp, 1000000) == 1000000,
-           "分类上限只压不抬", NULL);
+           cap_with_cat(&cp, 1000000) == 1600000,
+           "分类按场景覆盖当前封顶，可升可降", NULL);
+  g_screen_off = 1;
+  sf_check(cap_with_cat(&cp, 1000000) == 1000000,
+           "熄屏时分类不覆盖封顶", NULL);
+  g_screen_off = 0;
   g_cat_cpu[CAT_VIDEO][2] = 0;
   category_apply("com.ss.android.ugc.aweme");
   sf_check(g_pol[2].cat_cap == 0 && g_pol[0].cat_cap == 1600000,
@@ -1247,6 +1251,10 @@ int sf_test_main(void) {
     sf_check(batt_current_ma(-540, 1) == 540, "mA 机型：负号取绝对值", NULL);
     sf_check(batt_current_ma(-540000, 0) == 540, "µA 机型：/1000 后得 540mA", NULL);
     sf_check(batt_current_ma(1120, 0) == 1, "µA 小电流向下取整不溢出", NULL);
+    sf_check(batt_current_ma_auto(-454000, 1, 0) == 454,
+             "单位配错成 ma 时，超大 µA 读数自动纠正", NULL);
+    sf_check(batt_current_ma_auto(-540, 1, 0) == 540,
+             "正常 mA 读数不受自动纠正影响", NULL);
 
     const char *cp = "/data/local/tmp/sf_current.test";
     long cv = 0;
@@ -2004,9 +2012,26 @@ sf_algo_tests:
       long c1 = sup_cap_for(&p);
       cfg.sup_style = 0;
       long c2 = sup_cap_for(&p);
-      sf_check(c1 > p.hw_min && c2 > p.hw_min,
-               "动态压制按百分比收超大核，不再无条件钉到硬件最低", NULL);
+      sf_check(c1 == p.cap && c2 == p.cap,
+               "动态地板不压 BIG：保留用户 46% 封顶", NULL);
       g_sup_level = sv; cfg.sup_style = ss;
+    }
+    {
+      struct policy p;
+      char fp[128];
+      memset(&p, 0, sizeof p);
+      snprintf(p.dir, sizeof p.dir, "/data/local/tmp/sf_sup_policy");
+      mkdir(p.dir, 0755);
+      snprintf(fp, sizeof fp, "%s/scaling_available_frequencies", p.dir);
+      FILE *f = fopen(fp, "w");
+      if (f) { fputs("384000 556800 748800 960000 1152000 1363200 1555200 1785600 1958400\n", f); fclose(f); }
+      p.hw_max = 1958400; p.hw_min = 384000; p.cap = 1958400; p.tier = 3;
+      cfg.sup_style = 0; g_sup_level = SUP_FLOOR_LV;
+      long c = sup_cap_for(&p);
+      sf_check(f && c == 1785600,
+               "动态地板向上吸附：80% 的下一档是 1785600", NULL);
+      unlink(fp);
+      g_sup_level = 0;
     }
     {
       struct policy p;

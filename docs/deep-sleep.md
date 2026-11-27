@@ -1,4 +1,4 @@
-# 深度睡眠（V2.4 Beta4）
+# 深度睡眠（V2.4 Beta5）
 
 （返回 [README](../README.md)）
 

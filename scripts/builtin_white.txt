@@ -96,3 +96,16 @@ com.hihonor.calendar              # 荣耀日历
 com.oplus.calendar                # OPPO 日历
 com.huawei.calendar               # 日历
 com.samsung.android.calendar      # 日历
+com.android.systemui              # 系统界面
+com.microsoft.todos               # Microsoft To Do
+com.google.android.apps.tasks     # Google 任务
+cn.ticktick.task                  # 滴答清单
+com.todoist                       # Todoist
+com.samsung.android.app.reminder  # 三星提醒
+com.android.launcher3             # 桌面
+com.oplus.launcher                 # ColorOS 桌面
+com.coloros.launcher               # ColorOS 桌面
+com.miui.home                      # 小米桌面
+com.hihonor.android.launcher       # 荣耀桌面
+com.huawei.android.launcher        # 华为桌面
+com.google.android.apps.nexuslauncher # Pixel 桌面

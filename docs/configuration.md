@@ -31,7 +31,7 @@
 | `SCREEN_UNCAP` | 0 | 旧键兼容：只在手工设成 `keep` 时给旧的熄屏解锁分支用 |
 | `IDLE_CURRENT_MA` / `IDLE_HOLD_CYCLE` | 250 / 2 | 熄屏电流低于多少 mA、连续几轮后进深度空闲 |
 | `IDLE_INTERVAL` / `WAKE_DELTA_MA` | 30 / 150 | 深度空闲周期；电流比熄屏基线高多少 mA 才触发一次亮屏复核 |
-| `BATT_CURRENT_PATH` / `BATT_CURRENT_UNIT` | battery/current_now / ma | 电流节点与单位；ua 会先 /1000，符号统一取绝对值 |
+| `BATT_CURRENT_PATH` / `BATT_CURRENT_UNIT` | battery/current_now / auto | 电流节点与单位；auto 按量级识别，ua / ma 可强制；符号统一取绝对值，明显是 µA 的超大读数也会自动纠正 |
 | `BOOT_FULL_S` | 60 | 开机后满血窗口秒数（0 = 关掉这个功能） |
 | `CPU_GOVERNOR` | 空（不干预） | 留空 = 不碰调速器；荣耀 / 华为机型一律不改写（切 conservative 会硬重启） |
 | `CHG_UNCAP` / `CHG_PCT` | 1 / 100 | 插电时把常态 CPU/GPU 封顶至少抬到多少（专属 GPU 档不抬） |
@@ -94,8 +94,9 @@
 省电/均衡的具体落档值在 `adapt/*.conf` 的 `preset_sav_*` / `preset_bal_*`；`default_*` 等于
 均衡档。省电档不是能效最优点，而是“省电量最大的、性能还能忍”的工程取舍点。
 
-应用分类默认值也按省电预设算：BIG 视频/社交 -5、阅读 -7；MID2/MID/LITTLE
-视频 +0、社交 +10、阅读 -10；GPU 默认 0（跟随全局）。全新安装、仍是旧固定值
+应用分类默认值按芯片的三场景参数表（视频 / 社交 / 阅读）落档，写在 `adapt/*.conf`
+的 `cat_*` 键里；没有表数据的芯片继续用省电预设偏移兜底。分类按场景覆盖当前封顶，
+不再只压不抬，但熄屏、游戏、满血和专属应用档不覆盖。全新安装、仍是旧固定值
 44/55/50、或仍是旧公式生成且未改过时重写；用户改过的 CPU/GPU 保留。
 应用分类滑条只改页面草稿，点「保存分类参数」二次确认后才写入；三个分类的未保存
 修改可以一起保存，也可以一键撤销。
@@ -324,8 +325,8 @@ MediaProvider 的一套权限，root 写进去的文件应用侧未必读得到�
 `IDLE_HOLD_CYCLE` 轮，巡检周期从 30s 拉到 `IDLE_INTERVAL`（新装默认 60s）。亮屏信号仍每轮读，
 电流只做辅助：比熄屏 EMA 基线高出 `WAKE_DELTA_MA`（默认 150mA）时才多问一次
 `dumpsys power`，不拿绝对阈值。电流读不到就停在 SCREEN_OFF，永不进深睡。
-电流单位在 `BATT_CURRENT_UNIT` 里显式写 `ua`/`ma`——一加 13 实测是 mA 且充电为负，
-代码统一取绝对值；换 ROM 先按 `_tools/measure_screen_state.sh` 复测再改这一项。
+电流单位默认 `BATT_CURRENT_UNIT=auto`，按量级识别；也可以显式写 `ua`/`ma`。
+一加 13 实测是 mA 且充电为负，代码统一取绝对值；明显是 µA 的超大读数会自动纠正。
 
 **分应用 `keep`：** `app_modes.conf` 里写 `包名=keep`，这个包在熄屏那一刻是前台时
 **不交还系统**，继续按全局百分比做轻巡检（只读频率节点、被顶回就压回），适合 Termux

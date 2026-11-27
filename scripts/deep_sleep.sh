@@ -279,15 +279,14 @@ ds_sms_pkg() {
     return 1
 }
 
-# 闹钟守卫：时钟类应用有 ALARM_GUARD_SEC 内要响的闹钟时，不进入深睡。
-# 只认 dumpsys alarm 里带 alarmclock/deskclock 的 Alarm{} 行，取 origWhen。
-# 这样"每天都设闹钟"也不会导致整晚不深睡：只让路闹钟前半小时。
+# 闹钟守卫：时钟/日历/待办类应用有 ALARM_GUARD_SEC 内要响的闹钟时，不进入深睡。
+# 按 Alarm{} 行里的包名/组件关键字识别，取 origWhen；只让路临近的一次。
 ds_alarm_soon() {
     local nows
     nows=$(now)
     timeout 3 dumpsys alarm 2>/dev/null | awk -v now="$nows" -v win="$ALARM_GUARD_SEC" '
         /Alarm\{/ {
-            if ($0 !~ /alarmclock|deskclock|AlarmClock/) next
+            if (tolower($0) !~ /alarmclock|deskclock|calendar|reminder|todo|task/) next
             if (!match($0, /origWhen[ =][0-9]+/)) next
             s = substr($0, RSTART, RLENGTH)
             sub(/^origWhen[ =]/, "", s)
@@ -1598,6 +1597,32 @@ ds_shutdown() {
     exit 0
 }
 
+# 新装时装机脚本没跑成（pm 不可用/管理器提前结束）也补一次内置豁免；
+# base 存在就说明已处理过，用户后来删掉的条目不会被重新塞回。
+ds_builtin_white_once() {
+    local root="$1" new base inst pkg n=0
+    new="$root/scripts/builtin_white.txt"
+    base="$CONF_DIR/builtin_white.base.txt"
+    [ -f "$new" ] && [ -f "$DSLEEP_CONF" ] && [ ! -f "$base" ] || return 0
+    inst="$CONF_DIR/.bwinst.$$"
+    pm list packages --user all 2>/dev/null | sed -n 's/^package://p' \
+        | awk '{print $1}' | tr -d '\r' | sort -u > "$inst" 2>/dev/null
+    [ -s "$inst" ] || { rm -f "$inst"; return 0; }
+    [ -n "$(tail -c 1 "$DSLEEP_CONF" 2>/dev/null)" ] && printf '\n' >> "$DSLEEP_CONF"
+    while IFS= read -r pkg; do
+        case "$pkg" in ''|*[!A-Za-z0-9._]*) continue ;; esac
+        grep -Fqx -- "$pkg" "$inst" 2>/dev/null || continue
+        grep -Fxq -- "white=$pkg" "$DSLEEP_CONF" 2>/dev/null && continue
+        printf 'white=%s\n' "$pkg" >> "$DSLEEP_CONF" 2>/dev/null && n=$((n + 1))
+    done <<EOF
+$(sed -n 's/^[[:space:]]*\([A-Za-z0-9_][A-Za-z0-9_.]*\).*/\1/p' "$new" | sort -u)
+EOF
+    rm -f "$inst"
+    cp -f "$new" "$base" 2>/dev/null
+    [ "$n" -gt 0 ] && log_ds "内置永久豁免已补入：$n 个"
+    return 0
+}
+
 ds_main() {
     mkdir -p "$CONF_DIR/run" 2>/dev/null
     ds_alive_pid && exit 0
@@ -1612,6 +1637,8 @@ ds_main() {
         log_ds "检测到 NoActive 墓碑，深睡不接管 Doze"
         exit 0
     fi
+    ds_builtin_white_once "$(cd "${0%/*}/.." 2>/dev/null && pwd)"
+    ds_conf_load
     # 深睡开关关闭时只做退出清理（冻结/appops 账本），绝不改 Doze 白名单。
     if [ "$ds_enabled" != "1" ]; then
         log_ds "深睡开关关闭，跳过 Doze 策略迁移"

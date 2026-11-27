@@ -390,6 +390,10 @@ console.log('\n== P0b 深度空闲 / 分应用 keep ==');
      /long a = raw < 0 \? -raw : raw;/.test(csrc) &&
      /return unit_ma \? a : a \/ 1000;/.test(csrc),
      '电流归一化：先取绝对值，再按 ma/ua 换算');
+  ok(/long batt_current_ma_auto\(long raw, int unit_ma, int auto_unit\)/.test(csrc) &&
+     /#define BATT_CURRENT_UA_MIN 10000/.test(csrc) &&
+     /batt_current_ma_auto\(raw, cfg\.batt_current_ma_unit, cfg\.batt_current_auto\)/.test(csrc),
+     '电流单位 auto + 超大 µA 读数自动纠正');
   ok(/static int read_signed\(const char \*path, long \*out\)/.test(csrc) &&
      /int valid = read_signed\(cfg\.batt_current_path, &raw\);/.test(csrc),
      '电流用有符号读取：充电负值（-404）不能被当成读失败');
@@ -552,8 +556,11 @@ console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电�
      /big_offline_restore\("开机满血"\)/.test(csrc) &&
      /boot_completed_now\(\)/.test(csrc) &&
      /boot_boost_active\(\)/.test(csrc) &&
-     /str_write_journaled\(BIG_OFF_JOURNAL, path, "0"\)/.test(csrc),
-     '超大核离线：游戏/满血/开机满血先上线，开机完成前不执行');
+     /str_write_journaled\(BIG_OFF_JOURNAL, path, "0"\)/.test(csrc) &&
+     /static int bo_saved_cmp\(/.test(csrc) &&
+     /qsort\(e, n, sizeof e\[0\], bo_saved_cmp\)/.test(csrc) &&
+     /big_offline_restore_online\("关闭"\)/.test(csrc),
+     '超大核离线：游戏/满血/开机满血先上线，按 cpu 号升序恢复');
   ok(/TOPO_FILE/.test(csrc) && /topo_load\(/.test(csrc) &&
      /topology_save\(\)/.test(csrc) && /topo_collect\(/.test(csrc) &&
      /coreonline_%d/.test(csrc) && /coreonline_/.test(html) &&
@@ -667,10 +674,12 @@ console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电�
   ok(/static long sup_cap_for\(const struct policy \*p\)/.test(csrc) &&
      /long want = p->cap \* sup_pct\(\) \/ 100;/.test(csrc) &&
      /if \(p->hw_min > 0 && want < p->hw_min\) want = p->hw_min;/.test(csrc) &&
+     /g_sup_level == SUP_FLOOR_LV && \(p->tier & 3\) == 0/.test(csrc) &&
+     /snap_up_freq\(p, want\)/.test(csrc) &&
      !/sup_prime_min_enabled/.test(csrc) &&
      /cfg\.big_min && t == 0/.test(csrc) &&
      /big_min_hit = \(cfg\.big_min && tierkey == 0\)/.test(csrc),
-     '动态压制按百分比收，不再无条件把超大核钉最低（BIG_MIN 仍可手动开）');
+     '动态地板不压 BIG，非 BIG 地板向上吸附；BIG_MIN 仍可手动开');
   ok(/elif \[ "\$_k" = SUP_STYLE \]; then/.test(apiSrc) &&
      /case "\$_v" in bal\|sav\) ;; \*\) die "BAD_SUPSTYLE"/.test(apiSrc),
      'SUP_STYLE 是字符串键：走 cfg_set 的 elif 分支，不能掉进数字校验');
@@ -854,12 +863,8 @@ ok(/panel0-backlight\/brightness/.test(csrc) &&
      /dumpsys deviceidle whitelist "\+\$_p"/.test(apiSrc),
      '开机和 WebUI 添加豁免都会立即同步系统 Doze 白名单');
 }
-/* 保存前的大小核倒挂提醒。 */
-ok(/function validateFreqCapBeforeSave\(littleKHz, bigKHz\)/.test(html) &&
-   /littleKHz <= bigKHz/.test(html) &&
-   /window\.confirm\(/.test(html) &&
-   /cpuCapKHz\('CPU_PCT_LITTLE'/.test(html),
-   '保存 CPU 封顶前检查大小核频率倒挂，确认后才允许保存');
+ok(!/validateFreqCapBeforeSave|检测到大小核频率倒挂/.test(html),
+   '不再用大小核频率倒挂弹窗拦截保存，预设值可直接落盘');
 // 剥掉注释再判，否则注释里提到 while 会被误判成裸 while。
 // 子 shell 里的 while 前面有缩进且上一行是单独的 "("，裸的则顶格。
 const svcCode = stripSh(svc);
@@ -3714,6 +3719,9 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
   ok(/cfg\.fsm_min\[g_sm\.fsm\]\[grp\]/.test(csrc) &&
      /cpu_min_refresh\(\)/.test(csrc),
      'FSM 状态下限接管 scaling_min，并随状态切换立即重写');
+  ok(/long target = min_floor_for\(&g_pol\[i\]\);/.test(csrc) &&
+     /SUP_FLOOR_LV && !user_any/.test(csrc),
+     '用户自定义最低频优先于省电静态地板');
   ok(/skin_temp_c\(void\)/.test(csrc) && /adpf_headroom\(void\)/.test(csrc) &&
      /g_fsm_psi/.test(csrc) && /skin=%d\\nadpf=%d/.test(csrc),
      'PSI/皮肤温/ADPF 进入 FSM 并写状态');
@@ -3854,6 +3862,12 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
              /cpuset_sysbg_lv0=0-3/.test(t) && /cpuset_bg_lv0=0-2/.test(t);
     });
     ok(allAdapts, '所有 adapt 配置使用同一套常态 cpuset 亲和性');
+    const allCat = adapts.filter(f=>f!=='_TEMPLATE.conf').every(f=>{
+      const t = fs.readFileSync(MOD0 + '/adapt/' + f, 'utf8');
+      return /^cat_video_big=\d+$/m.test(t) && /^cat_social_big=\d+$/m.test(t) &&
+             /^cat_reading_big=\d+$/m.test(t) && /^cat_video_gpu=\d+$/m.test(t);
+    });
+    ok(allCat, '所有芯片表都有视频/社交/阅读三场景分类参数');
     ok(/CPUSET_GROUPS  5/.test(csrc) && /"restricted"/.test(csrc) &&
        /static void cpuset_finalize\(void\)/.test(csrc) &&
        /g_cpuset_static/.test(csrc) &&
@@ -4305,6 +4319,11 @@ console.log('\n== restart 不吊住调用者 ==');
      '守护先读芯片分类默认值，再用用户文件覆盖');
   ok(/defaults\/app_categories\.conf/.test(apiSrc) && /FILENAME == usr/.test(apiSrc),
      '接口层缺省时合并芯片分类默认值');
+  ok(/\.cat_scene_v3_4/.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')),
+     'Beta4 fix 首次升级强制覆盖分类一次');
+  ok(/static long cap_with_cat\(const struct policy \*p, long want\)[\s\S]{0,120}if \(g_screen_off\) return want;[\s\S]{0,80}if \(p->cat_cap > 0\) return p->cat_cap/.test(csrc) &&
+     /cat_video_big/.test(fs.readFileSync(MOD0 + '/adapt/sm8750.conf', 'utf8')),
+     '分类按场景覆盖封顶，熄屏不覆盖；装机读取 cat_* 三场景');
   ok(/#cat-picker\{max-height:0/.test(html) && /#cat-picker\.open\{/.test(html) &&
      /classList\.add\('open'\)/.test(html) && /classList\.remove\('open'\)/.test(html) &&
      !/<div id="cat-picker" style="display:none">/.test(html) &&
@@ -4316,15 +4335,19 @@ console.log('\n== restart 不吊住调用者 ==');
      /CAT_DRAFT/.test(html) && /catChanges/.test(html) &&
      /window\.confirm\(/.test(html),
      '应用分类滑条只改草稿，点保存后二次确认，误触不会直接写盘');
+  ok(/document\.body\.appendChild\(list\)/.test(html) &&
+     /list\.style\.position = 'fixed'/.test(html) &&
+     /\.dd-list\.open\{display:block\}/.test(html),
+     '下拉浮层挂到 body，避免被应用列表的滚动容器裁掉');
 
   /* 版本：module.prop / 页面模块版本 / README / 守护二进制一起改；
      页面 #ver2 在 status 回来后会用守护的 SF_VERSION 覆盖，两边必须一致。 */
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
-  ok(/^version=V2\.4 Beta4$/m.test(mp) && /^versionCode=24040$/m.test(mp),
-     'module.prop 是 V2.4 Beta4 / 24040');
-  ok(/SF_VERSION "2\.4 Beta4"/.test(csrc), '守护源码里的版本号同步到 2.4 Beta4');
-  ok(/id="ver">V2\.4 Beta4</.test(html) && /id="ver2">V2\.4 Beta4</.test(html),
-     '页面：模块版本与守护版本都是 V2.4 Beta4');
+  ok(/^version=V2.4 Beta5$/m.test(mp) && /^versionCode=24050$/m.test(mp),
+     'module.prop 是 V2.4 Beta5 / 24050');
+  ok(/SF_VERSION "2.4 Beta5"/.test(csrc), '守护源码里的版本号同步到 2.4 Beta5');
+  ok(/id="ver">V2.4 Beta5</.test(html) && /id="ver2">V2.4 Beta5</.test(html),
+     '页面：模块版本与守护版本都是 V2.4 Beta5');
   ok(/\.sub\{[^}]*white-space:normal/.test(html),
      '标题副行允许换行，窄屏不会把版本号省略成 "…"');
   ok(/<html lang="zh-CN" data-style="glass">/.test(html),
@@ -4352,8 +4375,8 @@ console.log('\n== restart 不吊住调用者 ==');
      '动效关/减少动态效果时控件过渡和指下光斑也停');
   ok(/\[data-theme="dark"\][\s\S]{0,700}?--acc:#2563eb/.test(html),
      '深色主色压到 #2563eb，白字达到 4.5:1');
-  ok(/版本：V2\.4 Beta4/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
-     'README 标题行同步到 V2.4 Beta4');
+  ok(/版本：V2.4 Beta5/.test(fs.readFileSync(MOD0 + '/README.md', 'utf8')),
+     'README 标题行同步到 V2.4 Beta5');
   {
     /* 管理器按 update.json 的 versionCode 提示更新，和 module.prop 漂移会
        出现"提示了但装不上"或"明明有新版却不提示"，两边必须同源。 */
