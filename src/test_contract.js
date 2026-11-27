@@ -3706,6 +3706,24 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      '主循环里：偏移算完之后才统一重算并施加（顺序错了就会写一遍旧地板）');
   ok(/#from adapt\//.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')),
      '装机脚本写的来源标记和守护读的文件是同一份（撤表判据认它）');
+  /* 智能模式日志契约：与 kin-daemon 的「前台: pkg 类型=N FSM=STATE」对齐 */
+  ok(/前台: %s 类型=%d FSM=%s/.test(csrc) &&
+     /static const char \*smart_fsm_name\(int s\)/.test(csrc) &&
+     /"DEEP_IDLE", "LIGHT_IDLE", "MODERATE", "HEAVY", "SUSTAINED", "GAMING"/.test(csrc),
+     '前台日志格式与状态名对齐 Kin（前台: pkg 类型=N FSM=STATE）');
+  ok(/nowms - g_smart_fg_log_ms >= 60000/.test(csrc) &&
+     /if \(fg_changed \|\| cat_changed \|\| smart_changed \|\| hb\) smart_log_fg\(\)/.test(csrc),
+     '前台变化 / 状态切换 / 亮屏 60s 心跳都打同一行');
+  ok(/static int fg_type_code\(void\)[\s\S]{0,400}?return 0;[\s\S]{0,200}?return 2;[\s\S]{0,120}?return 4;[\s\S]{0,120}?return 5;/.test(csrc),
+     '类型码用 ApplicationInfo.CATEGORY_*：游戏0/视频2/社交4/阅读5');
+  /* 智能模式补全：游戏包直判 GAMING（Kin/ASB pkg_agrees） */
+  ok(/int game_hint = g_smart_game_hint && !fg_not_game;/.test(csrc) &&
+     /if \(game_hint\)[\s\S]{0,80}?d = SMART_GAMING;/.test(csrc) &&
+     /g_smart_game_hint && want == SMART_GAMING/.test(csrc),
+     '前台是游戏包时一拍进 GAMING，不等 GPU 6 拍确认');
+  ok(/^FSM_GAME_HINT=1$/m.test(conf) && /cfg\.fsm_game_hint = 1;/.test(csrc) &&
+     /FSM_GAME_HINT/.test(apiSrc) && /cfg_get\("FSM_GAME_HINT"/.test(csrc),
+     'FSM_GAME_HINT 默认开，配置/接口/守护三处一致');
   /* 智能模式：目标按各簇天花板比例，不再写死 30/45/65/85。 */
   ok(/static const int kSmartFrac\[SMART_STATE_COUNT\] = \{[\s\S]{0,160}?45, 65, 85, 100, 80, 100/.test(csrc) &&
      /ceil \* kSmartFrac\[state\] \/ 100/.test(csrc),

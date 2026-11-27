@@ -16,6 +16,7 @@
 | `GPU_PCT` | 45 | GPU 封顶百分比 |
 | `STRATEGY` | cap | `cap` 固定百分比封顶；`smart` 六态智能调度，`CPU_PCT_*` 只当天花板 |
 | `APP_SWITCH_TIER` | 2 | 智能模式切前台首拍预热档：0=关、1=轻载、2=中载(85%)、3=重载；只升不降 |
+| `FSM_GAME_HINT` | 1 | 前台命中游戏名单时直接判 GAMING（Kin/ASB 的 `pkg_agrees`），不再等 GPU 连续 6 拍；分类命中的视频/社交/阅读优先，0 = 只看负载 |
 | `GPU_BOOST_OFF` | 1 | 1 = 禁止 GPU Boost：同时把下限压回最低档、关掉抬频源头（`dcvs_boost` / `touch_wake` / `force_no_nap` / `devfreq_boost` / 天玑 OPP boost 档），并把高通 KGSL `idle_timer` 从 80ms 收到 48ms（只降不升）；交权态自动还原。旧键 `GPU_MIN_LOCK` 已并入本开关 |
 | `BG_LIGHT` | 1 | 后台分组常驻轻压制（与动态封顶无关）：`background` / `system-background` 的 `uclamp.max` 收到 50/60，`background` cpuset 收窄到最低频簇（与现有掩码取交集，只收窄）；交权态自动还原。默认开，页面不提供开关 |
 | `BIG_MIN` | 0 | 1 = 超大核压到最低可用频点（不关核）；游戏/满血/熄屏交还仍放开 |
@@ -189,6 +190,23 @@ CPU/GPU 80/60、升降窗口、驻留等按内置参数固定，不再暴露英�
 温度超过 `TH_HIGH` 且处于重载时进持续高载，回到 `TH_LOW` 以下才退出；亮屏/切前台后 45 秒内不吃热降档。
 PSI 争用、皮肤/外壳温也参与选档；ADPF 从 `/data/adb/soc_freqcap/adpf` 读 0-100，30 秒内新鲜才生效，没有 companion 写入时自动忽略。
 状态里的 `src` / `gsrc` 报 CPU/GPU 当前来源，`fsmrs` / `fsmw` 报切换原因和还差几拍，`hr` / `hrv` / `hrs` / `hrh` 报厂商上限余量、是否可信、软钳/硬钳。
+### 日志：与 Kin 对齐的「前台」行
+
+智能模式下，**前台变化 / FSM 状态切换 / 亮屏 60 秒心跳**都会打同一行（格式取自
+`kin-daemon` 的 `scheduler.hpp`）：
+
+```
+前台: com.tencent.tmgp.sgame 类型=0 FSM=GAMING
+前台: com.ss.android.ugc.aweme 类型=2 FSM=MODERATE
+前台: com.android.launcher 类型=-1 FSM=LIGHT_IDLE
+```
+
+- `类型` 用 Android `ApplicationInfo.CATEGORY_*` 枚举：`0`=游戏（命中游戏名单）、
+  `2`=视频、`4`=社交、`5`=阅读，`-1`=未知；
+- `FSM` 是英文状态名：`DEEP_IDLE / LIGHT_IDLE / MODERATE / HEAVY / SUSTAINED / GAMING`；
+- 详细指标仍是原来的 `智能模式：负载 x% / GPU y% → 中载（大核 36% / 其余 45%）` 行，
+  两行配合看：一行看"谁在前台、在什么状态"，一行看"为什么切、给了多少"。
+
 **切前台首拍**直接预热到 `APP_SWITCH_TIER`（默认 2 = 中载 85%），冷启动/首屏
 不用等负载爬升；只升不降，下一拍起回到正常迟滞。亮屏和 cap→smart 边沿也会
 预热一次。连续 2 拍目标空闲、且各簇实际频率都低于当前封顶一半时，直接从

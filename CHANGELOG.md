@@ -19,6 +19,8 @@
 - 进阶最低频、六态状态下限都套用同一条规则；`MIN_WINDOW_STEPS` 默认 3 档，0 = 关闭回到旧行为
 - **新增「平台帽」学习**：写 `scaling_max_freq` 被平台压在更低处（厂商 perf HAL / msm_performance / 温控）时，记下这个值并按 5→15→60→180 秒退避重探，不再每拍硬写刷「写入未生效」；帽放开、亮屏、插拔电、改配置都会自动重探
 - 高通只走 sysfs 时会在启动日志里提示 `msm_performance` 节点存在（可用 `CAP_BACKEND=msm` 手动接管厂商节点）
+- **智能模式补全（对齐 AutoSystemBoost / Kin）**：前台命中游戏名单时直接判 `GAMING`（`pkg_agrees`，不再等 GPU 连续 6 拍）；分类命中的视频/社交/阅读优先，不会被误判成游戏；新增 `FSM_GAME_HINT`（默认 1）可关回旧行为
+- **日志对齐 Kin**：新增 `前台: <包名> 类型=<类别码> FSM=<状态>`，前台变化 / 状态切换 / 亮屏 60s 心跳各打一行；类别码用 `ApplicationInfo.CATEGORY_*`（0=游戏 2=视频 4=社交 5=阅读，-1 未知）；status 新增 `fgtype`
 
 ## V2.4 — 2026-11-27 ｜ versionCode 24060
 

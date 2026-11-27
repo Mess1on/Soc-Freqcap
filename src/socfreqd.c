@@ -164,6 +164,8 @@ struct cfg {
   int big_min;         /* 1 = 超大核压到最低频（不关闭核心） */
   int big_offline;     /* 1 = 常态直接关掉超大核，游戏/满血时上线 */
   int cpu_min_lock;    /* 1 = 常态把各簇下限压到 cpuinfo_min（有节流+退避） */
+  /* 1 = 前台命中游戏名单时直接判 GAMING（Kin/ASB 的 pkg_agrees），0 = 只看负载 */
+  int fsm_game_hint;
   /* CPU 封顶后端：auto=有 PPM/msm 节点就加第二道锁；sysfs=只写 sysfs */
   int cap_backend;
   /* 实时偏移（adapt.c）。都是"百分点"，只加在生效值上，不写回配置。 */
@@ -1278,6 +1280,10 @@ static int g_prime_busy = -1;
 static int g_prime_state = -1;
 /* 1 = 本圈 smart_tick 走切前台预热（亮屏 / cap→smart，不靠 fg_changed）。 */
 static int g_smart_warmup;
+/* 1 = 本拍前台命中游戏名单（smart_tick 每拍刷新，FSM 用它直判 GAMING）。 */
+static int g_smart_game_hint;
+/* 上一次「前台:」日志的时间（毫秒），做 60s 心跳。 */
+static long g_smart_fg_log_ms;
 #ifdef SF_TEST
 static int g_test_busy = -2;  /* -2 = 走真实 cpu_busy_pct */
 static int g_test_half = -1;  /* -1 = 走真实 clusters_below_half */
@@ -1588,6 +1594,14 @@ static int freq_below_half(long cur, long cap) {
 
 static int clusters_below_half(void);
 
+/* Kin 的 FSM 名（日志契约用英文，和 kin-daemon 的 stateName() 一致）。 */
+static const char *smart_fsm_name(int s) {
+  static const char *const n[SMART_STATE_COUNT] = {
+    "DEEP_IDLE", "LIGHT_IDLE", "MODERATE", "HEAVY", "SUSTAINED", "GAMING"
+  };
+  return n[s < 0 || s >= SMART_STATE_COUNT ? SMART_DEEP_IDLE : s];
+}
+
 static const char *smart_state_cn(int s) {
   static const char *const n[SMART_STATE_COUNT] = {
     "深度空闲", "浅空闲", "中载", "重载", "持续高载", "游戏"
@@ -1629,15 +1643,22 @@ static int smart_fsm_desired(int cpu, int gpu, int temp, int fg_not_game,
   int gpu_heavy_th = cur >= SMART_HEAVY ? gpu_hi_out : gpu_hi_in;
   int gpu_heavy = gpu >= 0 && gpu >= gpu_heavy_th;
   int gaming_by_gpu = gpu >= gpu_game_in && !fg_not_game;
+  /* Kin/ASB 的 pkg_agrees：前台就是游戏包 → 直接 GAMING，不靠 GPU 确认。
+     分类命中的非游戏（视频/社交/阅读）优先，避免把视频 App 判成游戏。 */
+  int game_hint = g_smart_game_hint && !fg_not_game;
 
-  if (gaming_by_gpu) {
+  if (game_hint) {
+    g_sm.gaming_streak = 6;
+  } else if (gaming_by_gpu) {
     if (g_sm.gaming_streak < 6) g_sm.gaming_streak++;
   } else if (gpu >= 0 && gpu < gpu_game_out) {
     g_sm.gaming_streak = 0;
   }
 
   int d;
-  if (gaming_by_gpu)
+  if (game_hint)
+    d = SMART_GAMING;
+  else if (gaming_by_gpu)
     d = g_sm.gaming_streak >= 6 ? SMART_GAMING : SMART_HEAVY;
   else if (cpu_heavy || (gpu_heavy && cpu_some))
     d = SMART_HEAVY;
@@ -1692,6 +1713,14 @@ static int smart_tick_ex(int busy, int gpu, int temp, int screen_on,
       log("智能模式：切前台，预热到%s（大核 %d%% / 其余 %d%%）",
           smart_state_cn(g_sm.fsm), smart_pct(0), smart_pct(3));
     }
+  }
+
+  /* Kin/ASB：前台就是游戏包时即时进 GAMING，不等升档窗口确认 */
+  if (!forced && g_smart_game_hint && want == SMART_GAMING &&
+      g_sm.fsm != SMART_GAMING) {
+    smart_fsm_enter(SMART_GAMING, "游戏包");
+    g_sm.switches++;
+    changed = forced = 1;
   }
 
   if (!forced && want <= SMART_LIGHT_IDLE && g_sm.fsm >= SMART_MODERATE &&
@@ -1767,7 +1796,8 @@ static int smart_tick_ex(int busy, int gpu, int temp, int screen_on,
   return changed;
 }
 
-static int smart_tick(int app_switch) {
+static int smart_tick(int app_switch, int game_hint) {
+  g_smart_game_hint = game_hint ? 1 : 0;
   if (g_smart_warmup) {
     app_switch = 1;
     g_smart_warmup = 0;
@@ -4779,6 +4809,25 @@ static int mode_lookup(const char *pkg, int *out, int *out_big, int *out_little,
   return 0;
 }
 
+/* 前台类型码：对齐 Android ApplicationInfo.CATEGORY_*（Kin 日志里的「类型=N」）。
+   我们没有 PackageManager 类别，用游戏名单 + 自有分类映射：
+   0=GAME / 2=VIDEO / 4=SOCIAL / 5=NEWS，其余 -1（未知）。 */
+static int fg_type_code(void) {
+  if (g_fg[0] && is_game(g_fg)) return 0;
+  if (g_cat_idx == CAT_VIDEO) return 2;
+  if (g_cat_idx == CAT_SOCIAL) return 4;
+  if (g_cat_idx == CAT_READING) return 5;
+  return -1;
+}
+
+/* Kin 的 INFO 契约：前台变化 / FSM 切换 / 60s 心跳都打同一行。
+   详细指标仍由「智能模式：…」与 status 提供。 */
+static void smart_log_fg(void) {
+  log("前台: %s 类型=%d FSM=%s", g_fg[0] ? g_fg : "-", fg_type_code(),
+      smart_fsm_name(g_sm.fsm));
+  g_smart_fg_log_ms = mono_ms();
+}
+
 /* 重算每个 policy 的封顶值。app_pct>0 = 四档统一；app_big/app_little>0 = */
 static void set_caps_tiers(int app_pct, int app_big, int app_little, const char *why) {
   for (int i = 0; i < g_npol; i++) {
@@ -6325,6 +6374,7 @@ static void load_cfg(void) {
   cfg.big_min = 0;
   cfg.big_offline = 0;
   cfg.cpu_min_lock = 0;
+  cfg.fsm_game_hint = 1;
   cfg.cap_backend = CAP_BE_AUTO;
   /* 熄屏策略：基准 keep（旧行为）。全新安装的 conf 写 uncap */
   cfg.screen_uncap = 0;
@@ -6544,6 +6594,8 @@ static void load_cfg(void) {
     cfg.big_min = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("BIG_OFFLINE", v) == 0)
     cfg.big_offline = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("FSM_GAME_HINT", v) == 0)
+    cfg.fsm_game_hint = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("CPU_MIN_LOCK", v) == 0)
     cfg.cpu_min_lock = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("CAP_BACKEND", v) == 0) {
@@ -6688,14 +6740,14 @@ static void publish_status(void) {
   int cat_gpu = g_cat_idx >= 0 ? g_cat_gpu[g_cat_idx] : 0;
   n = ps_append(buf, sizeof buf, n,
              "state=%s\nscreen=%s\nsoff=%d\nsoff_keep=%d\ngame_pkg=%s\nreason=%s\n"
-             "fg=%s\napp_mode=%s\napp_big=%d\napp_little=%d\napp_gpu=%s\n"
+             "fg=%s\nfgtype=%d\napp_mode=%s\napp_big=%d\napp_little=%d\napp_gpu=%s\n"
              "pid=%d\nver=%s\nntier=%d\ncapbe=%s\n"
              "strat=%d\nsmart=%d\nfsm=%d\nprime=%d\nsup=%d\ntick=%ld\nfgprobe=%ld\ngminw=%ld\n"
              "cminw=%ld\ncminf=%d\ncminpaused=%d\ncming=%d\ncat=%s\ncatcpu=%d\ncatgpu=%d\n",
           g_state, g_deep ? "deep" : (g_screen_off ? "off" : "on"),
           g_deep ? cfg.idle_interval : cfg.soff_interval, g_soff_keep,
           g_game[0] ? g_game : "-", g_reason,
-          g_fg[0] ? g_fg : "-", mode, g_app_big, g_app_little, gmode,
+          g_fg[0] ? g_fg : "-", fg_type_code(), mode, g_app_big, g_app_little, gmode,
           getpid(), SF_VERSION, ntier,
           g_npol > 0 ? cap_backend_name(g_pol[0].be) : "sysfs",
           cfg.strategy, g_sm.fsm, g_sm.fsm, g_prime_state,
@@ -7536,8 +7588,16 @@ int main(int argc, char **argv) {
     /* 配置和偏移都看过之后，统一在这里重算生效封顶。 */
     /* 智能模式：每拍推进一次状态机。档位变了就走和"配置变了"同一条 */
     int smart_changed = 0;
-    if (cfg.strategy == 1) smart_changed = smart_tick(fg_changed && !game);
+    if (cfg.strategy == 1)
+      smart_changed = smart_tick(fg_changed && !game, game && cfg.fsm_game_hint);
     if (smart_changed) cpu_min_refresh();
+    /* Kin 的日志契约：前台/类型/状态变化，以及亮屏 60s 心跳，都是同一行 */
+    if (cfg.strategy == 1) {
+      long nowms = mono_ms();
+      int hb = !g_screen_off && g_smart_fg_log_ms > 0 &&
+               nowms - g_smart_fg_log_ms >= 60000;
+      if (fg_changed || cat_changed || smart_changed || hb) smart_log_fg();
+    }
     if (cfg_changed || adapt_changed || smart_changed) {
       assign_pct(g_pol, g_npol);
       /* 配置变更时压制收口一次：天花板/下限回到新封顶，压制随后 */

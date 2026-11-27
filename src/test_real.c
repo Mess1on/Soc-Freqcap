@@ -311,13 +311,13 @@ static void sf_test_smart_audit(void) {
              "AC-2：亮屏重立基线并请求预热（同应用也走这条，不靠 fg_changed）", NULL);
     g_test_busy = -1;
     g_test_half = 0;
-    int ch = smart_tick(0);
+    int ch = smart_tick(0, 0);
     sf_check(ch == 1 && g_sm.state == 2 && g_smart_warmup == 0,
              "AC-2：预热只升不降到默认中载 2", NULL);
 
     g_sm.fsm = 3; g_sm.state = 3; g_smart_warmup = 1;
     g_test_busy = -1;
-    smart_tick(0);
+    smart_tick(0, 0);
     sf_check(g_sm.state == 3, "AC-2：当前档更高则不压回", NULL);
 
     cfg.app_switch_tier = 0;
@@ -353,7 +353,7 @@ static void sf_test_smart_audit(void) {
     sf_check(g_sm.state == 0 && g_cpu_prev_ok == 0 && g_smart_warmup == 1,
              "AC-4：cap→smart 重置后请求预热", NULL);
     g_test_busy = -1; g_test_half = 0;
-    smart_tick(0);
+    smart_tick(0, 0);
     sf_check(g_sm.state == 2, "AC-4：cap→smart 预热到中载", NULL);
 
     cfg.strategy = save_st;
@@ -445,6 +445,45 @@ static void sf_test_smart_audit(void) {
     sf_check(g_sm.fsm == SMART_GAMING && g_sm.state == SMART_GAMING,
              "FSM：未分类前台 GPU 连续 6 拍高位进 GAMING", NULL);
 
+    /* Kin/ASB pkg_agrees：前台命中游戏名单 → 即时 GAMING（不等 6 拍 GPU 确认） */
+    SM_RESET();
+    g_smart_game_hint = 1;
+    sf_check(smart_tick_ex(5, -1, 30, 1, 0, 0, 0) == 1 &&
+             g_sm.fsm == SMART_GAMING && g_sm.state == SMART_GAMING,
+             "FSM：游戏包直判 GAMING（一拍到位）", NULL);
+    g_smart_game_hint = 0;
+    SM_RESET();
+    for (int i = 0; i < 3; i++) smart_tick_ex(5, -1, 30, 1, 0, 0, 0);
+    sf_check(g_sm.fsm == SMART_LIGHT_IDLE,
+             "FSM：没有游戏提示时低载维持浅空闲", NULL);
+
+    /* 日志契约：状态名 / 类别码与 Kin 一致 */
+    sf_check(!strcmp(smart_fsm_name(SMART_DEEP_IDLE), "DEEP_IDLE") &&
+             !strcmp(smart_fsm_name(SMART_MODERATE), "MODERATE") &&
+             !strcmp(smart_fsm_name(SMART_GAMING), "GAMING"),
+             "日志契约：FSM 名与 Kin stateName() 一致", NULL);
+    {
+      int save_n = g_npkg;
+      if (g_npkg < MAX_PKG) {
+        snprintf(g_pkgs[g_npkg], PKG_LEN, "%s", "com.tencent.tmgp.sgame");
+        g_npkg++;
+      }
+      snprintf(g_fg, sizeof g_fg, "%s", "com.tencent.tmgp.sgame");
+      g_cat_idx = -1;
+      sf_check(fg_type_code() == 0, "类型码：游戏包 = 0（GAME）", NULL);
+      snprintf(g_fg, sizeof g_fg, "%s", "com.ss.android.ugc.aweme");
+      g_cat_idx = CAT_VIDEO;
+      sf_check(fg_type_code() == 2, "类型码：视频分类 = 2（VIDEO）", NULL);
+      g_cat_idx = CAT_SOCIAL;
+      sf_check(fg_type_code() == 4, "类型码：社交分类 = 4（SOCIAL）", NULL);
+      g_cat_idx = CAT_READING;
+      sf_check(fg_type_code() == 5, "类型码：阅读分类 = 5（NEWS）", NULL);
+      g_cat_idx = -1;
+      sf_check(fg_type_code() == -1, "类型码：未知 = -1", NULL);
+      g_fg[0] = 0;
+      g_npkg = save_n;
+    }
+
     SM_RESET();
     g_sm.fsm = SMART_MODERATE; g_sm.state = 2;
     sf_check(smart_tick_ex(0, -1, -1, 1, 0, 1, 0) == 0 && g_sm_fast_n == 1,
@@ -457,7 +496,7 @@ static void sf_test_smart_audit(void) {
     g_prime_state = 0;
     g_smart_warmup = 1;
     cfg.app_switch_tier = 2;
-    smart_tick(0);
+    smart_tick(0, 0);
     sf_check(g_sm.fsm == SMART_MODERATE && g_sm.state == 2 &&
              g_prime_state == -1 && g_smart_warmup == 0,
              "FSM：切前台预热到中载并清超大核旧档", NULL);
