@@ -604,6 +604,21 @@ console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电�
      '状态刷新和配置载入都会重画 cmin 统计');
   ok(/if \(got > 0 && got != g_min_logpin\[i\]\)/.test(csrc),
      '同一钉住值只打一次日志，平台换档（回读值变了）才再报');
+  /* 窗口守护：下限不许贴着封顶，否则整簇钉死一点、空载也不降（CPU 空转），
+     温控/自适应想压封顶还被"want = floor"顶回去。 */
+  ok(/^MIN_WINDOW_STEPS=3$/m.test(conf) && /cfg\.min_window = 3;/.test(csrc) &&
+     /static long window_floor\(const struct policy \*p, long cap\)/.test(csrc) &&
+     /static long freq_gap_down\(const struct policy \*p, long from, int gap\)/.test(csrc),
+     '窗口守护默认 3 档：配置键、默认值、窗口计算都在');
+  ok(/long wf = window_floor\(p, p->cap\);\n  if \(wf > 0 && want > wf\) want = wf;/.test(csrc) &&
+     /long wf = window_floor\(&g_pol\[i\], g_pol\[i\]\.cap\);/.test(csrc),
+     '进阶最低频与六态状态下限都套用窗口守护');
+  ok(/long wf = window_floor\(&g_pol\[i\], want\);[\s\S]{0,700}?下限让到 %ld（留 %d 档下降空间）/.test(csrc) &&
+     /if \(floor > 0 && want < floor\) \{[\s\S]{0,700}?want = floor;/.test(csrc),
+     '封顶低于下限时先让下限，再写封顶；压不动才退回按平台值抬封顶');
+  ok(/\| `MIN_WINDOW_STEPS` \| 3 \|/.test(DOC) && /MIN_WINDOW_STEPS/.test(apiSrc) &&
+     /MIN_WINDOW_STEPS\) \[ "\$_v" -ge 0 \]/.test(apiSrc),
+     '文档与接口层都收录窗口守护（含 0~8 越界校验）');
   ok(!/15s 轻巡检/.test(html) && !/默认 15s/.test(DOC) && !/从 15s 拉到/.test(DOC) &&
      !/熄屏 15s/.test(DOC),
      '展示文案不再写 15s（新装默认 30s / 深空闲 60s）');
@@ -619,9 +634,10 @@ console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电�
   ok(/if \(!c->psi\) \{[\s\S]{0,500}stall = -1/
        .test(fs.readFileSync(MOD0 + '/src/adapt.c', 'utf8')),
      'PSI 关掉时不再每拍读 /proc，status 报 stall=-1');
-  ok(/long floor = read_num\(mpath\)[\s\S]{0,500}?want = floor/.test(csrc) &&
+  ok(/long floor = read_num\(mpath\)[\s\S]{0,1100}?want = floor;/.test(csrc) &&
+     /window_floor\(&g_pol\[i\], want\)/.test(csrc) &&
      /if \(cur == want\) \{[\s\S]{0,140}?last_cap = want/.test(csrc),
-     '封顶目标低于内核下限时按低限生效，不做无效写入/刷日志');
+     '封顶低于下限时先让下限（留 N 档），压不动才按平台低限抬封顶；不做无效写入');
   ok(/want == g_pol\[i\]\.unreach_cap && cur == g_pol\[i\]\.unreach_got[\s\S]{0,80}?unreach_at < 600/.test(csrc) &&
      /g_pol\[i\]\.unreach_cap = want;[\s\S]{0,120}?unreach_got = got/.test(csrc),
      '写不动的目标与回读值会被记住，10 分钟内不重复写');

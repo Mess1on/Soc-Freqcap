@@ -141,6 +141,8 @@ struct cfg {
   int min_pct[4];
   /* M 簇封顶下限（Hz）：只作用于最低频档（2 簇机型的 LITTLE/M 簇）。 */
   int cap_floor_m;
+  /* 窗口守护：下限至少比封顶低几个频点（0 = 关）。见 window_floor()。 */
+  int min_window;
   int gpu_pct;         /* GPU 封顶百分比 */
   int gpu_min_lock;    /* 1 = 把 GPU 下限压回最低档（devfreq 一路，非关 boost） */
   int gpu_boost_off;   /* 1 = 关掉 GPU boost 源（dcvs_boost / touch_wake / devfreq_boost） */
@@ -921,6 +923,58 @@ static long cap_floor_m_for(const struct policy *p) {
 static long cap_floor_apply(const struct policy *p, long cap) {
   long f = cap_floor_m_for(p);
   return (f > 0 && cap < f) ? f : cap;
+}
+
+/* 窗口守护：下限不能贴着封顶。
+ *
+ * min == max 时 governor 没有任何下降空间，空载也只能跑在那个频点上——用户
+ * 看到的就是"CPU 空转"；更糟的是这时温控/自适应想把封顶压下来也压不动：
+ * 旧代码遇到"封顶目标 < 当前下限"直接把封顶抬回下限，封顶等于失效。
+ *
+ * 冲突时一律让下限让路：落到"封顶往下 N 个频点"（MIN_WINDOW_STEPS，默认 3）。
+ * 封顶离硬件最低不足 N 档时落到硬件最低——那种情况下"落最低"和"落几档"
+ * 是同一件事，没必要把频率锁在半空中。
+ */
+
+/* 频点表里严格小于 from 的第 gap 个频点（1 = 紧邻下一档）。
+ * 返回 >0 = 该频点；0 = 表里没有那么多档；-1 = 频点表读不到（别乱压）。 */
+static long freq_gap_down(const struct policy *p, long from, int gap) {
+  char b[4096], path[224];
+  long v[96];
+  int n = 0;
+  if (gap < 1 || from <= 0) return 0;
+  snprintf(path, sizeof path, "%s/scaling_available_frequencies", p->dir);
+  if (read_file(path, b, sizeof b)) return -1;
+  char *save = NULL;
+  for (char *t = strtok_r(b, " \t\n", &save); t; t = strtok_r(NULL, " \t\n", &save)) {
+    if (!isdigit((unsigned char)*t)) continue;
+    long f = strtol(t, NULL, 10);
+    if (f <= 0 || f >= from) continue;
+    int dup = 0;
+    for (int i = 0; i < n; i++)
+      if (v[i] == f) { dup = 1; break; }
+    if (!dup && n < (int)(sizeof v / sizeof v[0])) v[n++] = f;
+  }
+  /* 频点表一般已经是降序，这里仍排一次，防止厂商表乱序 */
+  for (int i = 1; i < n; i++) {
+    long x = v[i];
+    int j = i - 1;
+    while (j >= 0 && v[j] < x) { v[j + 1] = v[j]; j--; }
+    v[j + 1] = x;
+  }
+  if (gap > n) return 0;
+  return v[gap - 1];
+}
+
+/* 封顶 cap 时下限允许的最高值（0 = 不限制）。 */
+static long window_floor(const struct policy *p, long cap) {
+  if (cfg.min_window <= 0 || cap <= 0 || p->hw_min <= 0) return 0;
+  long f = freq_gap_down(p, cap, cfg.min_window);
+  if (f < 0) return 0;           /* 频点表读不到：不干预，免得把下限压到最低 */
+  if (f == 0) return p->hw_min;  /* 封顶已贴着底部：落最低，锁在半空中更糟 */
+  if (f < p->hw_min) f = p->hw_min;
+  if (f >= cap) f = p->hw_min;
+  return f;
 }
 
 /* 收集全部 policy 目录，**不去重**，并记下 policy 号。 */
@@ -4876,6 +4930,9 @@ static long user_min_for(const struct policy *p) {
   want = snap_freq(p, want);
   if (p->hw_min > 0 && want < p->hw_min) want = p->hw_min;
   if (p->cap > 0 && want > p->cap) want = p->cap;
+  /* 窗口守护：下限贴着封顶时 governor 没有下降空间，空载也跑在封顶上 */
+  long wf = window_floor(p, p->cap);
+  if (wf > 0 && want > wf) want = wf;
   return want;
 }
 
@@ -5537,17 +5594,36 @@ static void caps_patrol(int force) {
     if (want == g_pol[i].unreach_cap && cur == g_pol[i].unreach_got &&
         now - g_pol[i].unreach_at < 600)
       continue;
-    /* 内核可能把允许下限锁在 cpuinfo_min 之上（本机 1,017,600）。 */
+    /* 内核/平台可能把允许下限锁在 cpuinfo_min 之上（本机 1,017,600）。 */
     char mpath[224];
     snprintf(mpath, sizeof mpath, "%s/scaling_min_freq", g_pol[i].dir);
     long floor = read_num(mpath);
     if (floor > 0 && want < floor) {
-      if (now - g_capfloor_log_at >= 600) {
-        g_capfloor_log_at = now;
-        log("%s 封顶目标 %ld 低于内核下限 %ld，按 %ld 生效", g_pol[i].name,
-            want, floor, floor);
+      /* 下限让路：封顶是硬约束（温控/电量/用户意图），下限只是响应偏好。
+         先把下限压到「封顶往下 N 档」再写封顶——顺序不能反，min > max 时
+         内核会直接拒掉 max 写入（表现就是封顶写不进、CPU 一直跑在高频）。
+         压得动就按新下限走；压不动（平台硬下限）才退回"按它抬封顶"。 */
+      long old_floor = floor;
+      long wf = window_floor(&g_pol[i], want);
+      if (wf > 0 && wf < floor && !write_journaled(NODES_JOURNAL, mpath, wf)) {
+        long got_min = read_num(mpath);
+        if (got_min > 0 && got_min < floor) {
+          floor = got_min;
+          if (now - g_capfloor_log_at >= 600) {
+            g_capfloor_log_at = now;
+            log("%s 封顶 %ld 低于当前下限 %ld：下限让到 %ld（留 %d 档下降空间）",
+                g_pol[i].name, want, old_floor, got_min, cfg.min_window);
+          }
+        }
       }
-      want = floor;
+      if (floor > 0 && want < floor) {
+        if (now - g_capfloor_log_at >= 600) {
+          g_capfloor_log_at = now;
+          log("%s 封顶目标 %ld 低于内核下限 %ld，按 %ld 生效", g_pol[i].name,
+              want, floor, floor);
+        }
+        want = floor;
+      }
     }
     if (cur == want) {          /* 写下去也不会变，别做无效写入 */
       g_pol[i].last_cap = want;
@@ -5958,6 +6034,9 @@ static void cpu_min_patrol(void) {
     if (fsm_target > 0) {
       if (fsm_target > g_pol[i].cap) fsm_target = g_pol[i].cap;
       if (fsm_target < g_pol[i].hw_min) fsm_target = g_pol[i].hw_min;
+      /* 状态下限同样不许贴着封顶：否则这个状态整簇钉死一点、空载也不降 */
+      long wf = window_floor(&g_pol[i], g_pol[i].cap);
+      if (wf > 0 && fsm_target > wf) fsm_target = wf;
     }
     if (fsm_target <= 0 && user_target <= 0 && !cfg.cpu_min_lock) {
       if (g_min_target[i] > 0) {
@@ -6233,6 +6312,7 @@ static void load_cfg(void) {
   for (int i = 0; i < 4; i++) cfg.pct[i] = dflt[i];
   for (int i = 0; i < 4; i++) cfg.min_pct[i] = 0;
   cfg.cap_floor_m = 0;
+  cfg.min_window = 3;
 
   if (cfg_get("INTERVAL", v) == 0) cfg.interval = clampi(atoi(v), 2, 60, 5);
   {
@@ -6421,6 +6501,9 @@ static void load_cfg(void) {
   }
   if (cfg_get("CPU_FLOOR_M", v) == 0)
     cfg.cap_floor_m = clampi(atoi(v), 0, 10000000, 0);
+  /* 窗口守护：下限至少比封顶低几档，0 = 关（回到旧行为：下限可以顶住封顶） */
+  if (cfg_get("MIN_WINDOW_STEPS", v) == 0)
+    cfg.min_window = clampi(atoi(v), 0, 8, 3);
 
   /* 实时偏移。区间故意收窄：这些数直接决定"最坏能比设定值宽/严多少" */
   if (cfg_get("PSI_ADAPT", v) == 0)

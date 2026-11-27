@@ -854,6 +854,58 @@ int sf_test_main(void) {
              "0 = 不设下限", NULL);
   }
 
+  printf("\n== 窗口守护（下限贴着封顶时让路） ==\n");
+  {
+    /* 频点表读的是真文件：造一份 sysfs 形态的目录，直接跑守护里的函数，
+       而不是把 window_floor 抄一份——抄的那份验证不了线上行为。 */
+    extern int mkdir(const char *, unsigned);
+    char root[256], pdir[320], fp[400];
+    int built = 0;
+    const char *roots[] = {"/data/local/tmp/sf_window_test", "/tmp/sf_window_test"};
+    for (int r = 0; r < 2 && !built; r++) {
+      snprintf(root, sizeof root, "%s", roots[r]);
+      snprintf(pdir, sizeof pdir, "%s/policy0", root);
+      mkdir(root, 0755);
+      mkdir(pdir, 0755);
+      snprintf(fp, sizeof fp, "%s/scaling_available_frequencies", pdir);
+      FILE *f = fopen(fp, "w");
+      if (!f) continue;
+      fprintf(f, "300000 600000 900000 1200000 1500000 1800000 2100000 2400000 3000000\n");
+      fclose(f);
+      built = 1;
+    }
+    if (!built) {
+      printf("  skip 窗口守护自检（无法创建临时目录）\n");
+    } else {
+      struct policy p;
+      memset(&p, 0, sizeof p);
+      snprintf(p.dir, sizeof p.dir, "%s", pdir);
+      p.hw_min = 300000;
+      p.hw_max = 3000000;
+      p.cap = 1800000;
+      p.tier = 0;
+      cfg.min_window = 3;
+      sf_check(freq_gap_down(&p, 1800000, 1) == 1500000,
+               "往回数 1 档 = 1.5G", NULL);
+      sf_check(freq_gap_down(&p, 1800000, 3) == 900000,
+               "往回数 3 档 = 900M", NULL);
+      sf_check(freq_gap_down(&p, 1800000, 99) == 0,
+               "档数超过表长返回 0（封顶贴底 → 落最低）", NULL);
+      sf_check(window_floor(&p, 1800000) == 900000,
+               "窗口下限 = 封顶往下 3 档", NULL);
+      sf_check(window_floor(&p, 600000) == 300000,
+               "封顶离硬件最低不足 3 档：直接落最低", NULL);
+      cfg.min_pct[0] = 100;
+      sf_check(user_min_for(&p) == 900000,
+               "进阶最低频 100% 也被压回封顶下 3 档（不塌成一点）", NULL);
+      cfg.min_window = 0;
+      sf_check(user_min_for(&p) == 1800000,
+               "MIN_WINDOW_STEPS=0 回到旧行为（下限可顶到封顶）", NULL);
+      cfg.min_window = 3;
+      cfg.min_pct[0] = 0;
+    }
+  }
+
   printf("\n== 老 MTK GPU OPP 解析 ==\n");
   {
     const char *txt =
