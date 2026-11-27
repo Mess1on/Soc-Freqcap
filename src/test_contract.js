@@ -602,8 +602,8 @@ console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电�
   ok(/id="cmin-stat"/.test(html) && /paintCpuMin\(s\)/.test(html) &&
      /paintCpuMin\(lastSt\)/.test(html),
      '状态刷新和配置载入都会重画 cmin 统计');
-  ok(/if \(got > 0 && got != g_min_logpin\[i\]\)/.test(csrc),
-     '同一钉住值只打一次日志，平台换档（回读值变了）才再报');
+  ok(/if \(got > 0 && got != g_min_logpin\[i\] && now - g_min_log_at\[i\] >= 60\)/.test(csrc),
+     '同一钉住值只打一次日志，且同簇 60 秒最多一条');
   /* 窗口守护：下限不许贴着封顶，否则整簇钉死一点、空载也不降（CPU 空转），
      温控/自适应想压封顶还被"want = floor"顶回去。 */
   ok(/^MIN_WINDOW_STEPS=3$/m.test(conf) && /cfg\.min_window = 3;/.test(csrc) &&
@@ -3721,6 +3721,25 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /if \(game_hint\)[\s\S]{0,80}?d = SMART_GAMING;/.test(csrc) &&
      /g_smart_game_hint && want == SMART_GAMING/.test(csrc),
      '前台是游戏包时一拍进 GAMING，不等 GPU 6 拍确认');
+  /* 日志精简：默认只打"变化"，LOG_VERBOSE=1 才恢复每拍明细 */
+  ok(/^LOG_VERBOSE=0$/m.test(conf) && /cfg\.log_verbose = 0;/.test(csrc) &&
+     /cfg_get\("LOG_VERBOSE"/.test(csrc) && /LOG_VERBOSE/.test(apiSrc),
+     'LOG_VERBOSE 默认 0（精简），配置/接口/守护三处一致');
+  ok(/p\[i\]\.log_cap != p\[i\]\.cap \|\| p\[i\]\.log_eff != eff/.test(csrc) &&
+     /static int told_n = -1;/.test(csrc) &&
+     /static int apply_logged;/.test(csrc),
+     '封顶明细按值去重、后台分组与常态封顶不重复打');
+  ok(/int mode, failed = 0, count = 0, wrote = 0;/.test(csrc) &&
+     /if \(wrote\) log\("%s 已还原 %d 个节点", tag, wrote\);/.test(csrc),
+     'cpuset/uclamp 还原只在真的写了才打日志');
+  {
+    const ds = fs.readFileSync(MOD0 + '/scripts/deep_sleep.sh', 'utf8');
+    ok(/ds_alarm_logged/.test(ds) && /ds_white_miss/.test(ds) &&
+       /!= "\$_miss"/.test(ds),
+       '深睡：闹钟守卫 10 分钟一条，白名单只在缺失列表变化时报');
+  }
+  ok(/function fgTypeTxt\(v\)/.test(html) && /fgTypeTxt\(s\.fgtype\)/.test(html),
+     '首页「前台」行显示类别（游戏/视频/社交/阅读）');
   ok(/^FSM_GAME_HINT=1$/m.test(conf) && /cfg\.fsm_game_hint = 1;/.test(csrc) &&
      /FSM_GAME_HINT/.test(apiSrc) && /cfg_get\("FSM_GAME_HINT"/.test(csrc),
      'FSM_GAME_HINT 默认开，配置/接口/守护三处一致');

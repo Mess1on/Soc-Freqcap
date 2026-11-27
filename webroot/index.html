@@ -5337,7 +5337,12 @@ function monKV(k, v, cls){ return '<div class="kv' + (cls ? ' ' + cls : '') + '"
 function renderMonitor(s){
   const grid = document.getElementById('mon-grid');
   if(!grid) return;
-  const st = s.state || '';
+  /* 前台类别码 → 中文（对齐 Kin 日志的「类型=N」：0 游戏 / 2 视频 / 4 社交 / 5 阅读） */
+function fgTypeTxt(v){
+  const t = {0:'游戏', 2:'视频', 4:'社交', 5:'阅读'}[Number(v)];
+  return t ? ' · ' + t : '';
+}
+const st = s.state || '';
   const dlt = Number(s.dlt || 0);
   const ps = Number(s.psi || 0), th = Number(s.th || 0);
   const strat = String(s.strat || '0') === '1' ? '智能' : '限频';
@@ -5367,7 +5372,7 @@ function renderMonitor(s){
     monKV('电量', Number(s.batt) >= 0 ? s.batt + '%' + (String(s.chg) === '1' ? ' · 充电' : '') : '—'),
     monKV('电流', Number(s.cur) >= 0 ? s.cur + ' mA' +
       (Number(s.pw) >= 0 ? ' · ' + s.pw + ' mW' : '') : '—'),
-    monKV('前台', s.fg && s.fg !== '-' ? s.fg : '—'),
+    monKV('前台', (s.fg && s.fg !== '-' ? s.fg : '—') + fgTypeTxt(s.fgtype)),
     monKV('PSI', Number(s.psiv) >= 0 ? s.psiv + '%' : '—'),
     monKV('负载', Number(s.stall) >= 0 ? s.stall + ' ms/s' : '—'),
     monKV('探测', (s.tick || 0) + ' 拍 / dumpsys ' + (s.fgprobe || 0)),

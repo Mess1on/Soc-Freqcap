@@ -166,6 +166,8 @@ struct cfg {
   int cpu_min_lock;    /* 1 = 常态把各簇下限压到 cpuinfo_min（有节流+退避） */
   /* 1 = 前台命中游戏名单时直接判 GAMING（Kin/ASB 的 pkg_agrees），0 = 只看负载 */
   int fsm_game_hint;
+  /* 1 = 详细日志（每拍/每状态都打封顶明细）；0 = 精简（只在数值变了才打） */
+  int log_verbose;
   /* CPU 封顶后端：auto=有 PPM/msm 节点就加第二道锁；sysfs=只写 sysfs */
   int cap_backend;
   /* 实时偏移（adapt.c）。都是"百分点"，只加在生效值上，不写回配置。 */
@@ -809,6 +811,9 @@ struct policy {
   long vcap;
   long vcap_at;
   int  vcap_fails;
+  /* 精简日志：上一次打过的「档位/意图/封顶」，一样就不重复打 */
+  long log_cap;
+  int  log_eff;
   /* 第二道锁（PPM/MSM）：用哪条后端、PPM cluster 号、最后写入值和连续失败数。 */
   int be;          /* CAP_BE_SYSFS / CAP_BE_PPM / CAP_BE_MSM */
   int ppm_idx;     /* PPM cluster 号，-1 = 不使用 */
@@ -1700,7 +1705,7 @@ static int smart_tick_ex(int busy, int gpu, int temp, int screen_on,
   }
 
   int want = smart_fsm_desired(cpu, gpu, temp, fg_not_game, screen_on);
-  int changed = 0, forced = 0;
+  int changed = 0, forced = 0, logged = 0;
 
   if (app_switch && cfg.app_switch_tier > 0) {
     int target = cfg.app_switch_tier == 1 ? SMART_LIGHT_IDLE
@@ -1712,6 +1717,7 @@ static int smart_tick_ex(int busy, int gpu, int temp, int screen_on,
       changed = forced = 1;
       log("智能模式：切前台，预热到%s（大核 %d%% / 其余 %d%%）",
           smart_state_cn(g_sm.fsm), smart_pct(0), smart_pct(3));
+      logged = 1;
     }
   }
 
@@ -1731,6 +1737,7 @@ static int smart_tick_ex(int busy, int gpu, int temp, int screen_on,
       changed = forced = 1;
       log("智能模式：静置且各簇低于半帽 → %s（大核 %d%% / 其余 %d%%）",
           smart_state_cn(g_sm.fsm), smart_pct(0), smart_pct(3));
+      logged = 1;
     }
   } else if (!forced) {
     g_sm_fast_n = 0;
@@ -1790,7 +1797,7 @@ static int smart_tick_ex(int busy, int gpu, int temp, int screen_on,
   g_sm.state = g_sm.fsm;
   g_sm.pending = g_sm.fsm;
   g_sm.pend_n = 0;
-  if (changed)
+  if (changed && !logged)
     log("智能模式：负载 %d%% / GPU %d%% → %s（大核 %d%% / 其余 %d%%）",
         busy, gpu, smart_state_cn(g_sm.fsm), smart_pct(0), smart_pct(3));
   return changed;
@@ -1876,9 +1883,14 @@ static void assign_pct(struct policy *p, int n) {
     p[i].tier = tierkey;
     long vendor = p[i].vendor_max;
     p[i].cap = cap_floor_apply(&p[i], snap_freq(&p[i], cap_from_pct(&p[i], eff)));
-    log("  %-8s 档位%d/%d 厂商%ld 硬件%ld 意图%d%% 生效%d%% 封顶%ld (%.1f%%)",
-        p[i].name, tier, m - 1, vendor, p[i].hw_max, pct, eff,
-        p[i].cap, p[i].hw_max > 0 ? 100.0 * p[i].cap / p[i].hw_max : 0.0);
+    /* 精简：同一组（生效% + 封顶）只打一次；LOG_VERBOSE=1 恢复每拍打 */
+    if (cfg.log_verbose || p[i].log_cap != p[i].cap || p[i].log_eff != eff) {
+      p[i].log_cap = p[i].cap;
+      p[i].log_eff = eff;
+      log("  %-8s 档位%d/%d 厂商%ld 硬件%ld 意图%d%% 生效%d%% 封顶%ld (%.1f%%)",
+          p[i].name, tier, m - 1, vendor, p[i].hw_max, pct, eff,
+          p[i].cap, p[i].hw_max > 0 ? 100.0 * p[i].cap / p[i].hw_max : 0.0);
+    }
   }
 }
 
@@ -2614,15 +2626,23 @@ static void str_restore_all(const char *file, const char *tag) {
   FILE *f = fopen(file, "r");
   if (!f) return;
   char ln[640], path[512], val[64];
-  int mode, failed = 0, count = 0;
+  int mode, failed = 0, count = 0, wrote = 0;
   while (fgets(ln, sizeof ln, f)) {
     if (sscanf(ln, "%511s %63s %o", path, val, &mode) != 3) continue;
     if (access(path, F_OK)) { failed = 1; continue; }
     chmod(path, 0644);
     char now[64] = {0};
+    /* 已经是目标值就别再写（原来每拍都写一遍，还打一行"已还原"） */
+    if (!read_file(path, now, sizeof now) && !strcmp(now, val)) {
+      chmod(path, (mode_t)mode);
+      count++;
+      continue;
+    }
     if (write_str(path, val) || read_file(path, now, sizeof now) ||
         strcmp(now, val))
       failed = 1;
+    else
+      wrote++;
     chmod(path, (mode_t)mode);
     count++;
   }
@@ -2632,7 +2652,7 @@ static void str_restore_all(const char *file, const char *tag) {
     return;
   }
   unlink(file);
-  log("%s 已还原 %d 个节点", tag, count);
+  if (wrote) log("%s 已还原 %d 个节点", tag, wrote);
 }
 
 /* 任务组 uclamp.max：动态封顶的第二层，只压上限、不抬下限。 */
@@ -2861,7 +2881,14 @@ static void bg_light_apply(void) {
     }
     if (!same && !str_write_journaled(BGCG_JOURNAL, p, mask)) n++;
   }
-  if (n) log("后台分组已收口（%d 个节点）", n);
+  /* 同一批节点连续收口不重复打（原来每次 apply 都打一行） */
+  if (n) {
+    static int told_n = -1;
+    if (told_n != n) {
+      told_n = n;
+      log("后台分组已收口（%d 个节点）", n);
+    }
+  }
 }
 
 /* cpuset 前后台分区（随动态封顶的中间/地板档） */
@@ -5785,7 +5812,12 @@ static void apply_normal(int force) {
   }
   int changed = force || strcmp(g_state, "normal") != 0;
   if (changed) {
-    log("→ 常态封顶");
+    /* 只在"从游戏/满血/熄屏回到常态"或首拍打一行；每拍都打会刷屏 */
+    static int apply_logged;
+    if (!apply_logged || strcmp(g_state, "normal") != 0) {
+      log("→ 常态封顶");
+      apply_logged = 1;
+    }
     perms_restore(); /* 先收回游戏期交出去的写权限 */
     /* 交权时调速器被还原成出厂值；回常态要把用户选的那个再写回去。 */
     for (int i = 0; i < g_npol; i++) apply_governor(&g_pol[i]);
@@ -5994,6 +6026,7 @@ static int  g_min_pfails[MAX_POLICY];     /* 每簇连续夹回次数，决定�
 static int  g_min_giveup[MAX_POLICY];     /* 1 = 该簇正被平台下限钉住 */
 static long g_min_pinned[MAX_POLICY];     /* 最近一次夹回值（平台下限） */
 static long g_min_logpin[MAX_POLICY];     /* 上次打过日志的钉住值，同值不重复报 */
+static long g_min_log_at[MAX_POLICY];     /* 上次打日志的时间（同一簇 60s 一条） */
 static long g_min_target[MAX_POLICY];
 static long g_min_next[MAX_POLICY];       /* 该簇下次允许重探的时间 */
 static long g_min_pend_at[MAX_POLICY];    /* > now：写完还没复核 */
@@ -6052,9 +6085,10 @@ static void min_note_clamp(int i, long target, long got, int charging) {
   g_min_next[i] = now + wait;
   g_min_fails++;
   g_min_fail_at = now;
-  /* 同一个钉住值只报一次；平台换档（回读值变了）再报一次，避免刷屏 */
-  if (got > 0 && got != g_min_logpin[i]) {
+  /* 同一个钉住值只报一次；平台换档（回读值变了）再报，且同一簇 60s 最多一条 */
+  if (got > 0 && got != g_min_logpin[i] && now - g_min_log_at[i] >= 60) {
     g_min_logpin[i] = got;
+    g_min_log_at[i] = now;
     log("CPU 下限：%s 目标 %ld，平台下限夹在 %ld（%s，第 %d 次，%ld 秒后重探）",
         g_pol[i].name, target, got, charging ? "插电中" : "未插电", n, wait);
   }
@@ -6201,9 +6235,13 @@ static void cpu_min_restore(void) {
     long target = orig;
     /* 账本里的"原值"可能已经是厂商瞬时 boost（本机 policy6 是 1,958,400）。 */
     if (g_pol[i].cap > 0 && g_pol[i].hw_min > 0 && orig >= g_pol[i].cap) {
+      static int told[MAX_POLICY];
       target = g_pol[i].hw_min;
-      log("%s 下限原值 %ld 会顶住封顶 %ld，按硬件最低 %ld 还原",
-          g_pol[i].name, orig, g_pol[i].cap, target);
+      if (!told[i]) {
+        told[i] = 1;
+        log("%s 下限原值 %ld 会顶住封顶 %ld，按硬件最低 %ld 还原",
+            g_pol[i].name, orig, g_pol[i].cap, target);
+      }
     }
     if (read_num(path) == target) continue;
     write_num(path, target);
@@ -6375,6 +6413,7 @@ static void load_cfg(void) {
   cfg.big_offline = 0;
   cfg.cpu_min_lock = 0;
   cfg.fsm_game_hint = 1;
+  cfg.log_verbose = 0;
   cfg.cap_backend = CAP_BE_AUTO;
   /* 熄屏策略：基准 keep（旧行为）。全新安装的 conf 写 uncap */
   cfg.screen_uncap = 0;
@@ -6594,6 +6633,8 @@ static void load_cfg(void) {
     cfg.big_min = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("BIG_OFFLINE", v) == 0)
     cfg.big_offline = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("LOG_VERBOSE", v) == 0)
+    cfg.log_verbose = (!strcmp(v, "1") || !strcasecmp(v, "true")) ? 1 : 0;
   if (cfg_get("FSM_GAME_HINT", v) == 0)
     cfg.fsm_game_hint = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("CPU_MIN_LOCK", v) == 0)

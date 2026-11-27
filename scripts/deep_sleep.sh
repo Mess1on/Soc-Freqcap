@@ -83,6 +83,7 @@ ds_added=""
 # Doze 关掉时 ds_added 永远是空的，用它做守卫会让这段每轮都重跑一遍、每轮刷一行日志。
 ds_white_seen=""
 ds_alarm_checked=0
+ds_alarm_logged=0
 ds_alarm_wait=0
 ds_game_checked=0
 ds_was_charging=0
@@ -1190,7 +1191,14 @@ ds_enter() {
                 [ -n "$pkg" ] || continue
                 case ",$_snapv," in *",$pkg,"*) ;; *) _miss="$_miss $pkg" ;; esac
             done
-            [ -n "$_miss" ] && log_ds "深睡白名单未生效（系统拒绝或非主用户）：$_miss"
+            if [ -n "$_miss" ]; then
+                _wm="$CONF_DIR/run/ds_white_miss"
+                _old="$(cat "$_wm" 2>/dev/null)"
+                if [ "$_old" != "$_miss" ]; then
+                    log_ds "深睡白名单未生效（系统拒绝或非主用户）：$_miss"
+                    printf '%s\n' "$_miss" > "$_wm" 2>/dev/null
+                fi
+            fi
         }
     fi
     ds_snap_write
@@ -1342,7 +1350,10 @@ ds_tick() {
                 ds_alarm_checked=$t
                 if ds_alarm_soon; then
                     ds_alarm_wait=1
-                    log_ds "闹钟在 ${ALARM_GUARD_SEC} 秒内，暂不进入深睡"
+                    if [ $((t - ds_alarm_logged)) -ge 600 ]; then
+                        ds_alarm_logged=$t
+                        log_ds "闹钟在 ${ALARM_GUARD_SEC} 秒内，暂不进入深睡"
+                    fi
                     ds_state_write
                     return 0
                 fi
@@ -1411,7 +1422,10 @@ ds_tick() {
            && [ $((t - ds_doze_checked)) -ge "$DS_DOZE_RETRY" ]; then
             ds_doze_checked=$t
             if ds_alarm_soon; then
-                log_ds "闹钟在 ${ALARM_GUARD_SEC} 秒内，暂不进入系统 Doze"
+                if [ $((t - ds_alarm_logged)) -ge 600 ]; then
+                    ds_alarm_logged=$t
+                    log_ds "闹钟在 ${ALARM_GUARD_SEC} 秒内，暂不进入系统 Doze"
+                fi
             else
                 ds_doze_once
             fi
