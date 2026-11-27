@@ -64,7 +64,7 @@ try {
 
 /* ── 抠前端代码 ───────────────────────────────────────────── */
 const MARK_NEXT = 'const ICON_STATE';
-const chunk = html.match(/\/\* ── 芯片适配 ── \*\/[\s\S]*?\n(?=\/\* 取图标的状态码)/);
+const chunk = html.match(/\/\* 芯片适配 \*\/[\s\S]*?\n(?=\/\* 取图标的状态码)/);
 
 function mkEl(tag) {
   const el = {

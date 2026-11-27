@@ -4356,7 +4356,7 @@ console.log('\n== restart 不吊住调用者 ==');
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
   const ver = ((mp.match(/^version=(.+)$/m) || [])[1] || '').trim();
   const verCode = ((mp.match(/^versionCode=(\d+)$/m) || [])[1] || '').trim();
-  ok(/^V\d+\.\d+ Beta\d+$/.test(ver) && /^\d+$/.test(verCode),
+  ok(/^V\d+\.\d+(?: Beta\d+)?$/.test(ver) && /^\d+$/.test(verCode),
      `module.prop 版本号格式正常（${ver} / ${verCode}）`);
   /* 守护里的 SF_VERSION 不带 V 前缀，页面与 README 带；都以 module.prop 为准，
      发版只改一处，测试跟着版本走，不用每次改断言 */
