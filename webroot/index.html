@@ -1329,7 +1329,7 @@ html.lg-pause .beat{animation-play-state:paused}
     </div>
     <div class="htxt">
       <h1>Soc智能限频</h1>
-      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.4 Beta4</span></div>
+      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.4 Beta5</span></div>
     </div>
   </div>
   <!-- 主题开关：太阳=浅色，月亮=深色。点一下就换，选中哪个存到本地。 -->
@@ -1372,7 +1372,7 @@ html.lg-pause .beat{animation-play-state:paused}
       <div class="hero-foot">
         <span>桥接 <b id="m-bridge">—</b></span>
         <span class="sep">·</span>
-        <span>守护 <b id="ver2">V2.4 Beta4</b></span>
+        <span>守护 <b id="ver2">V2.4 Beta5</b></span>
       </div>
     </div>
   </div>
@@ -2961,8 +2961,8 @@ function paintCpuMin(s){
   const f = Number(s.cminf) || 0;
   const g = Number(s.cming) || 0;
   el.textContent = '已写 ' + w + ' 次 · 被夹回 ' + f + ' 次'
-    + (g > 0 ? ' · ' + g + ' 簇被系统钉死（30 分钟复探一次）' : '')
-    + (s.cminpaused === '1' && g === 0 ? ' · 退避中（10 分钟后重试）' : '');
+    + (g > 0 ? ' · ' + g + ' 簇被平台下限钉住（60s→10min 逐次放宽重探）' : '')
+    + (s.cminpaused === '1' && g === 0 ? ' · 退避中（60s→10min 重探）' : '');
 }
 
 async function loadStatus(){
