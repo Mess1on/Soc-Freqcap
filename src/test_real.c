@@ -1047,6 +1047,48 @@ int sf_test_main(void) {
     memset(&g_lrn, 0, sizeof g_lrn);
   }
 
+  printf("\n== 学习覆盖层：低电迟滞 / 充电感知 / 热趋势 ==\n");
+  {
+    int save_low = cfg.ad.batt_low, save_crit = cfg.ad.batt_crit;
+    cfg.ad.batt_low = 20; cfg.ad.batt_crit = 10;
+    g_lowbat_on = 0;
+    batt_policy_update(25, 0);
+    sf_check(!g_lowbat_on, "低电闩：25% 不触发", NULL);
+    batt_policy_update(20, 0);
+    sf_check(g_lowbat_on, "低电闩：≤20% 触发", NULL);
+    batt_policy_update(30, 0);
+    sf_check(g_lowbat_on, "低电闩：30% 仍保持（迟滞）", NULL);
+    batt_policy_update(40, 0);
+    sf_check(!g_lowbat_on, "低电闩：≥40% 解除", NULL);
+    batt_policy_update(15, 0);
+    batt_policy_update(15, 1);
+    sf_check(!g_lowbat_on, "低电闩：充电直接解除", NULL);
+    batt_policy_update(8, 0);
+    sf_check(batt_alpha_floor(8, 0) == 900, "低电地板：危急档 900", NULL);
+    g_lowbat_on = 1;
+    sf_check(batt_alpha_floor(18, 0) == 800, "低电地板：普通低电 800", NULL);
+    g_lowbat_on = 0;
+    cfg.ad.batt_low = save_low; cfg.ad.batt_crit = save_crit;
+
+    sf_check(charge_aware_alpha(520, 1, 1, 420, 20, 0, 0, 0) == 800,
+             "充电：电池 ≥41.5℃ → 至少 800（护温）", NULL);
+    sf_check(charge_aware_alpha(300, 1, 0, 350, 20, 0, 0, 0) == 850,
+             "充电 + 息屏 → 至少 850（满速充）", NULL);
+    sf_check(charge_aware_alpha(700, 1, 1, 350, 20, 0, 0, 0) == 450,
+             "充电 + 亮屏 + 凉 → 封顶 450（去省电延迟）", NULL);
+    sf_check(charge_aware_alpha(700, 1, 1, 350, 20, 0, 1, 0) == 700,
+             "低电覆盖时不压（lowbat_ov）", NULL);
+    sf_check(charge_aware_alpha(700, 0, 1, 420, 20, 0, 0, 0) == 700,
+             "没充电：原样返回", NULL);
+
+    sf_check(trend_bump_calc(44, 3000, 0) == 0, "热趋势：温度不够不介入", NULL);
+    sf_check(trend_bump_calc(50, 12000, 0) == 120, "热趋势：满斜率 +120", NULL);
+    sf_check(trend_bump_calc(41, 2000, 1) == 0 && trend_bump_calc(41, 2100, 1) > 0,
+             "热 App：阈值降到 40℃/2000", NULL);
+    sf_check(fsm_learn_dt_w(85, 0, 0, 1, 50, 0) == 130,
+             "皮肤凉时热否决只加一半（100→50）", NULL);
+  }
+
   printf("\n== 老 MTK GPU OPP 解析 ==\n");
   {
     const char *txt =

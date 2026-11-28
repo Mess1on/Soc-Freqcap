@@ -3721,6 +3721,30 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /if \(game_hint\)[\s\S]{0,80}?d = SMART_GAMING;/.test(csrc) &&
      /g_smart_game_hint && want == SMART_GAMING/.test(csrc),
      '前台是游戏包时一拍进 GAMING，不等 GPU 6 拍确认');
+  /* 学习覆盖层第二组：低电迟滞 / 充电感知 / 热趋势 / 内存压力 / 软钳 */
+  ok(/static void batt_policy_update\(int pct, int charging\)/.test(csrc) &&
+     /pct >= 40\)/.test(csrc) && /g_lowbat_on = 0;/.test(csrc) &&
+     /return 900;/.test(csrc) && /return 800;/.test(csrc),
+     '低电策略：≤batt_low 闩、≥40% 或充电解除，危急 900 / 普通 800');
+  ok(/static int charge_aware_alpha\(int a, int charging, int screen_on, int dc, int w,/.test(csrc) &&
+     /if \(dc >= 415\) return a > 800 \? a : 800;/.test(csrc) &&
+     /if \(!screen_on\) return a > 850 \? a : 850;/.test(csrc) &&
+     /return a < 450 \? a : 450;/.test(csrc),
+     '充电感知：电池烫 800 / 息屏 850 / 亮屏凉 450，低电·夜間·否决时不压');
+  ok(/static int trend_bump_calc\(int c, int slope, int hot_app\)/.test(csrc) &&
+     /minT = 38; minS = 1500/.test(csrc) && /minT = 40/.test(csrc) &&
+     /return \(120 \* over\) \/ span;/.test(csrc),
+     '热趋势：按升温斜率提前介入，边充边玩阈值更低，满斜率 +120');
+  ok(/static int mem_pressure_shift\(void\)/.test(csrc) &&
+     /if \(v >= 20\) return 100;/.test(csrc) && /if \(v >= 5\) return 50;/.test(csrc),
+     '内存压力：PSI avg10 ≥20 → +100，≥5 → +50');
+  ok(/if \(hrv && hrs\) a \+= 40;/.test(csrc) &&
+     /a < -2000\) a = -2000/.test(csrc) &&
+     /不在这里钳 0\.\.1000/.test(csrc),
+     '厂商软钳 +40；alpha 不再钳 0..1000（频率侧钳物理边界）');
+  ok(/int therm_w = \(g_ls.skin_max > 0 && g_ls.skin_max < 40\) \? 50 : 100;/.test(csrc),
+     '热否决推力：皮肤 <40℃ 时减半（ASB V64）');
+
   /* 智能学习：12 桶 × 6 时段 / 置信度 / 衰减 / 回退链 / 覆盖 / 探索 */
   ok(/#define LRN_BUCKETS      12/.test(csrc) &&
      /lrn_bucket\(int dp, int weekend\) \{ return dp \* 2 \+ \(weekend \? 1 : 0\); \}/.test(csrc) &&

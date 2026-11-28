@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.5.3"
+#define SF_VERSION "2.5.4"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -218,6 +218,7 @@ static int g_lock_fd = -1;
 
 static void cpu_min_patrol(void);
 static long batt_current_ma_now(void);
+static int vendor_headroom(int *valid, int *soft, int *hard);
 static void cpu_min_refresh(void);
 static void cpu_min_restore_user(void);
 static void cpu_min_restore(void);
@@ -1314,6 +1315,7 @@ static struct {
   int  bucket;
   int  batt_start;
   int  td_max;          /* 决策温（皮肤优先）峰值 */
+  int  skin_max;        /* 皮肤温峰值（-1 = 无传感器） */
   int  ticks;
   int  heavy_ticks;
   int  thermal_hit;
@@ -1427,6 +1429,146 @@ static void lrn_save(void) {
   fclose(f);
 }
 
+/* ── 低电策略（ASB BatteryPolicy）：≤batt_low 闩住，≥40% 或充电才解除 ── */
+static int g_lowbat_on;
+static void batt_policy_update(int pct, int charging) {
+  if (charging) { g_lowbat_on = 0; return; }
+  if (pct < 0 || pct > 100) return;
+  if (!g_lowbat_on) {
+    if (pct <= cfg.ad.batt_low) g_lowbat_on = 1;
+  } else if (pct >= 40) {
+    g_lowbat_on = 0;
+  }
+}
+static int batt_alpha_floor(int pct, int charging) {
+  if (!g_lowbat_on || charging) return 0;
+  if (pct >= 0 && cfg.ad.batt_crit > 0 && pct <= cfg.ad.batt_crit) return 900;
+  return 800;
+}
+
+/* ── 充电感知（ASB charge aware）：护温 / 满速充 / 去省电延迟 ── */
+static int batt_temp_dc(void) {
+  char b[32];
+  if (read_file("/sys/class/power_supply/battery/temp", b, sizeof b)) return -1;
+  return atoi(b);
+}
+static int batt_power_w(int ma) {
+  char b[32];
+  if (ma <= 0 || read_file("/sys/class/power_supply/battery/voltage_now", b, sizeof b)) return 0;
+  long uv = atol(b);
+  if (uv <= 0) return 0;
+  return (int)(((long long)ma * uv) / 1000000000LL);
+}
+static int charge_aware_alpha(int a, int charging, int screen_on, int dc, int w,
+                              int night_ov, int lowbat_ov, int veto) {
+  if (!charging || dc <= 0) return a;
+  int warn = 390;
+  if (w >= 33) warn -= 10;                 /* 超快充：偏热阈值下调 1℃ */
+  if (dc >= 415) return a > 800 ? a : 800; /* 电池烫：护温 */
+  if (!screen_on) return a > 850 ? a : 850;/* 息屏：满速充 */
+  if (dc < warn && !night_ov && !lowbat_ov && !veto)
+    return a < 450 ? a : 450;              /* 亮屏+凉：朝均衡，去掉省电延迟 */
+  return a;
+}
+
+/* ── 热趋势 + App 发热（ASB thermal trend / appheat）── */
+static int g_tr_c, g_tr_ts, g_tr_slope;
+static struct { unsigned hash; int score; long day; } g_hot[16];
+
+static unsigned fg_hash(const char *s) {
+  unsigned h = 2166136261u;
+  for (; s && *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+  return h;
+}
+static int hot_score(unsigned h, long day) {
+  if (!h) return 0;
+  for (int i = 0; i < 16; i++) {
+    if (g_hot[i].hash != h) continue;
+    long d = day - g_hot[i].day;
+    if (d > 0) {
+      g_hot[i].score -= (int)(d > 100 ? 100 : d);
+      if (g_hot[i].score < 0) g_hot[i].score = 0;
+      g_hot[i].day = day;
+    }
+    return g_hot[i].score;
+  }
+  return 0;
+}
+static void hot_bump(unsigned h, long day) {
+  if (!h) return;
+  int slot = -1;
+  for (int i = 0; i < 16; i++)
+    if (g_hot[i].hash == h) { slot = i; break; }
+  if (slot < 0) {
+    slot = 0;
+    for (int i = 0; i < 16; i++)
+      if (g_hot[i].hash == 0) { slot = i; break; }
+    if (g_hot[slot].hash != 0) {
+      int best = 0;
+      for (int i = 1; i < 16; i++)
+        if (g_hot[i].score < g_hot[best].score) best = i;
+      slot = best;
+    }
+    g_hot[slot].hash = h;
+    g_hot[slot].score = 0;
+    g_hot[slot].day = day;
+  }
+  g_hot[slot].score += 2;                  /* 一次明显升温学习 +2 */
+  if (g_hot[slot].score > 100) g_hot[slot].score = 100;
+}
+
+/* 斜率 bump：越陡越提前，满斜率 +120 */
+static int trend_bump_calc(int c, int slope, int hot_app) {
+  int minT, minS;
+  if (hot_app >= 2)      { minT = 38; minS = 1500; }   /* 边充边玩 */
+  else if (hot_app == 1) { minT = 40; minS = 2000; }   /* 热 App */
+  else                   { minT = 45; minS = 3000; }
+  if (c < minT || slope <= minS) return 0;
+  int span = 12000 - minS;
+  if (span <= 0) return 0;
+  int over = slope - minS;
+  if (over > span) over = span;
+  return (120 * over) / span;
+}
+
+static int thermal_trend_shift(int a, int c, int charging, int veto) {
+  long now = (long)time(NULL);
+  if (c <= 0) { g_tr_ts = 0; g_tr_slope = 0; return a; }
+  if (g_tr_ts == 0 || now - g_tr_ts > 180 || now < g_tr_ts) {
+    g_tr_c = c;
+    g_tr_ts = (int)now;
+    g_tr_slope = 0;
+    return a;
+  }
+  long dt = now - g_tr_ts;
+  if (dt >= 30) {
+    long raw = ((long)(c - g_tr_c) * 60000L) / dt;     /* m℃/min */
+    if (raw > 60000) raw = 60000;
+    else if (raw < -60000) raw = -60000;
+    g_tr_slope = (g_tr_slope + (int)raw) / 2;
+    g_tr_c = c;
+    g_tr_ts = (int)now;
+    if (g_tr_slope >= 6000 && c >= 40 && g_fg[0])
+      hot_bump(fg_hash(g_fg), now / 86400);
+  }
+  if (veto) return a;
+  int hot = hot_score(fg_hash(g_fg), now / 86400) >= 10 ? 1 : 0;
+  if (charging) hot = 2;
+  return a + trend_bump_calc(c, g_tr_slope, hot);
+}
+
+/* ── 内存压力（ASB memory_pressure）：avg10 ≥20 → +100，≥5 → +50 ── */
+static int mem_pressure_shift(void) {
+  char b[256];
+  if (read_file("/proc/pressure/memory", b, sizeof b)) return 0;
+  char *p = strstr(b, "some ");
+  if (!p || !(p = strstr(p, "avg10="))) return 0;
+  int v = atoi(p + 6);
+  if (v >= 20) return 100;
+  if (v >= 5) return 50;
+  return 0;
+}
+
 /* 当前时段的桶 -> 生效 alpha（含覆盖层）。raw/conf 供状态与日志用。 */
 static int lrn_alpha_now(int *out_raw, int *out_conf, int *out_bucket) {
   lrn_load();
@@ -1457,11 +1599,20 @@ static int lrn_alpha_now(int *out_raw, int *out_conf, int *out_bucket) {
   int cap = ad.capacity;
   int hour = tmv.tm_hour;
 
+  int night_ov = 0, lowbat_ov = 0, veto = 0;
   /* 夜间安静：息屏且未充电才强制（对齐 Kin：屏幕亮着不降体验） */
   int night = (hour >= LRN_NIGHT_START || hour < LRN_NIGHT_END);
-  if (night && g_screen_off && !charging && a < LRN_NIGHT_ALPHA) a = LRN_NIGHT_ALPHA;
-  /* 低电：不充电且 ≤20% */
-  if (!charging && cap >= 0 && cap <= LRN_LOWBAT_PCT && a < LRN_LOWBAT_ALPHA) a = LRN_LOWBAT_ALPHA;
+  if (night && g_screen_off && !charging && a < LRN_NIGHT_ALPHA) {
+    a = LRN_NIGHT_ALPHA;
+    night_ov = 1;
+  }
+  /* 低电：带迟滞闩（≤batt_low 触发，≥40% 或充电解除），危急档 900 */
+  batt_policy_update(cap, charging);
+  int lowf = batt_alpha_floor(cap, charging);
+  if (lowf > 0) {
+    if (a < lowf) a = lowf;
+    lowbat_ov = 1;
+  }
   /* 热：皮肤优先的决策温；warm..veto 线性加，≥veto 直接 700 */
   int td = g_fsm_skin > 0 ? g_fsm_skin : (ad.temp_m > 0 ? ad.temp_m / 1000 : -1);
   if (td >= 0) {
@@ -1469,10 +1620,32 @@ static int lrn_alpha_now(int *out_raw, int *out_conf, int *out_bucket) {
       int span = LRN_VETO_TEMP - LRN_WARM_TEMP;
       if (span > 0) a += (LRN_WARM_RAMP * (td - LRN_WARM_TEMP)) / span;
     }
-    if (td >= LRN_VETO_TEMP && a < LRN_VETO_ALPHA) a = LRN_VETO_ALPHA;
+    if (td >= LRN_VETO_TEMP) {
+      if (a < LRN_VETO_ALPHA) a = LRN_VETO_ALPHA;
+      veto = 1;
+    }
   }
-  if (a < 0) a = 0;
-  if (a > 1000) a = 1000;
+  /* 充电感知（护温 / 满速充 / 去省电延迟） */
+  {
+    int cur = (int)batt_current_ma_now();
+    a = charge_aware_alpha(a, charging, !g_screen_off,
+                           batt_temp_dc(), batt_power_w(cur > 0 ? cur : 0),
+                           night_ov, lowbat_ov, veto);
+  }
+  /* 热趋势（升温斜率 + App 发热） */
+  a = thermal_trend_shift(a, td, charging, veto);
+  /* 内存压力（只亮屏；息屏已深睡） */
+  if (!g_screen_off) a += mem_pressure_shift();
+  /* 厂商软钳：headroom 可信且软钳时上抬 alpha（不硬拼厂商热钳） */
+  {
+    int hrv = 0, hrs = 0, hrh = 0;
+    vendor_headroom(&hrv, &hrs, &hrh);
+    (void)hrh;
+    if (hrv && hrs) a += 40;
+  }
+  /* 不再钳 0..1000：学习/覆盖可越过两端，频率侧由 fsm_scale_khz 钳到物理边界 */
+  if (a < -2000) a = -2000;
+  if (a > 2000) a = 2000;
   if (out_raw) *out_raw = raw;
   if (out_conf) *out_conf = conf;
   if (out_bucket) *out_bucket = bk;
@@ -1485,15 +1658,19 @@ static int fsm_alpha_eff(void) {
 }
 
 /* 方向信号（可单测）：极热/热/掉电/持续重载/热否决推省电，干净凉快拉回放开 */
-static int fsm_learn_dt(int max_temp, int drainy, int heavy_pct, int thermal_hit, int clean) {
+static int fsm_learn_dt_w(int max_temp, int drainy, int heavy_pct, int thermal_hit,
+                          int thermal_w, int clean) {
   int dt = 0;
   if (max_temp >= LRN_VHOT_TEMP)      dt += 80;
   else if (max_temp >= LRN_HOT_TEMP)  dt += 40;
   if (drainy) dt += 30;
   if (heavy_pct >= 50) dt += 20;
-  if (thermal_hit) dt += 100;
+  if (thermal_hit) dt += thermal_w;
   if (clean) dt -= 60;
   return dt;
+}
+static int fsm_learn_dt(int max_temp, int drainy, int heavy_pct, int thermal_hit, int clean) {
+  return fsm_learn_dt_w(max_temp, drainy, heavy_pct, thermal_hit, 100, clean);
 }
 
 static int lrn_dur_weight(long dur) {
@@ -1513,6 +1690,7 @@ static void lrn_sess_begin(void) {
   adapt_snapshot(&ad);
   g_ls.batt_start = ad.capacity;
   g_ls.td_max = (g_fsm_skin > 0) ? g_fsm_skin : (ad.temp_m > 0 ? ad.temp_m / 1000 : -1);
+  g_ls.skin_max = g_fsm_skin > 0 ? g_fsm_skin : -1;
   time_t now = time(NULL);
   struct tm tmv;
   localtime_r(&now, &tmv);
@@ -1532,9 +1710,10 @@ static void lrn_sess_begin(void) {
 }
 
 /* 每拍累计 */
-static void lrn_sess_tick(int td, int cur_ma, int heavy) {
+static void lrn_sess_tick(int td, int skin, int cur_ma, int heavy) {
   if (!g_ls.active) return;
   if (td > g_ls.td_max) g_ls.td_max = td;
+  if (skin > g_ls.skin_max) g_ls.skin_max = skin;
   g_ls.ticks++;
   if (heavy) g_ls.heavy_ticks++;
   if (td >= 0 && td >= LRN_VETO_TEMP) g_ls.thermal_hit = 1;
@@ -1587,7 +1766,10 @@ static void lrn_sess_commit(void) {
   int sustained = heavy_pct >= 50;
   int clean = (g_ls.td_max >= 0 && g_ls.td_max < LRN_COOL_TEMP && trust == LRN_TW_CLEAN);
 
-  int dt = fsm_learn_dt(g_ls.td_max, drainy, sustained ? 50 : 0, g_ls.thermal_hit, clean);
+  /* 热否决推力：皮肤凉(<40℃)说明散热吃住了，只加一半（ASB V64） */
+  int therm_w = (g_ls.skin_max > 0 && g_ls.skin_max < 40) ? 50 : 100;
+  int dt = fsm_learn_dt_w(g_ls.td_max, drainy, sustained ? 50 : 0,
+                          g_ls.thermal_hit, therm_w, clean);
 
   /* 桶内一致性：dt 的 EWMA 均值与 MAD（×100，α=1/8） */
   {
@@ -1689,9 +1871,7 @@ static long fsm_clamp_floor_hz(long khz_hz, long hw, long floor) {
    返回该状态的目标上限/下限（Hz）。 */
 static void fsm_caps_of(int slot, int state, long hw_max, long hw_min,
                         long *out_max, long *out_min) {
-  int a = fsm_alpha_eff();
-  if (a < 0) a = 0;
-  if (a > 1000) a = 1000;
+  int a = fsm_alpha_eff();   /* 不在这里钳 0..1000：频率侧由 fsm_scale_khz 钳 */
   if (state < 0 || state >= SMART_STATE_COUNT) state = SMART_DEEP_IDLE;
   const float t = kFsmLevel[state];
   int ref = slot ? FSM_REF_MAX_B : FSM_REF_MAX_L;
@@ -2290,7 +2470,12 @@ static int smart_tick(int app_switch, int game_hint) {
   {
     struct adapt a;
     adapt_snapshot(&a);
-    g_fsm_chg = a.charging ? 1 : 0;
+    int chg = a.charging ? 1 : 0;
+    if (cfg.strategy == 1 && chg != g_fsm_chg && g_ls.active) {
+      lrn_sess_commit();      /* 插拔电是一个会话边界（Kin 同） */
+      lrn_sess_begin();
+    }
+    g_fsm_chg = chg;
   }
   if (g_smart_warmup) {
     app_switch = 1;
@@ -2318,7 +2503,7 @@ static int smart_tick(int app_switch, int game_hint) {
   if (!g_screen_off) {
     if (!g_ls.active) lrn_sess_begin();
     int td = g_fsm_skin > 0 ? g_fsm_skin : temp;
-    lrn_sess_tick(td, (int)batt_current_ma_now(), g_sm.fsm >= SMART_HEAVY);
+    lrn_sess_tick(td, g_fsm_skin, (int)batt_current_ma_now(), g_sm.fsm >= SMART_HEAVY);
   }
   return smart_tick_ex(cpu, gpu_busy_pct(), temp, !g_screen_off,
                        app_switch, below, g_cat_idx >= 0);
