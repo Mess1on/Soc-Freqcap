@@ -3745,6 +3745,21 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
   ok(/int therm_w = \(g_ls.skin_max > 0 && g_ls.skin_max < 40\) \? 50 : 100;/.test(csrc),
      '热否决推力：皮肤 <40℃ 时减半（ASB V64）');
 
+  /* 前台检测 1:1 Kin getTopAppFast */
+  ok(/static int fg_scan_top_app\(char \*best, size_t bn, int \*want_found, const char \*want,\s*\n?\s*int \*saw_black\)/.test(csrc) &&
+     /\"\/dev\/cpuset\/top-app\/cgroup.procs\",/.test(csrc) &&
+     /\"\/dev\/cpuset\/top-app\/tasks\",/.test(csrc),
+     '前台快路径：top-app cgroup.procs 优先、tasks 兜底（与 Kin 同序）');
+  ok(/now - g_fast_ms < 300/.test(csrc) && /g_fast_black = black;/.test(csrc),
+     '300ms 缓存（空结果也缓存）+ 黑名单标记');
+  ok(/static int fg_valid_pkg\(const char \*p\)/.test(csrc) &&
+     /static int fg_blacklisted\(const char \*p\)/.test(csrc) &&
+     /com\.miui\.home/.test(csrc) && /launcher/.test(csrc),
+     '包名校验 + 桌面/输入法/systemui 黑名单');
+  ok(/g_last_good\[0\] && g_last_good_ms > 0 && now - g_last_good_ms < 2000/.test(csrc) &&
+     /fg_scan_top_app\(tmp, sizeof tmp, &in_top, g_last_good, NULL\)/.test(csrc),
+     '黑名单/取空时回 last_good，并要求它仍在 top-app（小窗盖住游戏）');
+
   /* DND / WiFi 省电（只做这两条，不做厂商限制组件恢复） */
   ok(/static void dnd_engage\(void\)/.test(csrc) && /static void dnd_release\(void\)/.test(csrc) &&
      /\/system\/bin\/settings put global zen_mode/.test(csrc) &&

@@ -212,6 +212,16 @@ PSI 争用、皮肤/外壳温也参与选档；ADPF 从 `/data/adb/soc_freqcap/a
 
 排查"为什么是这个值"时把 `LOG_VERBOSE` 改成 1（隐藏项），恢复每拍明细。
 
+### 前台检测（1:1 Kin `getTopAppFast`）
+
+- 主路径：读 `/dev/cpuset/top-app/cgroup.procs`（优先）→ `/dev/cpuset/top-app/tasks`
+  → `/proc/<pid>/cmdline`，剥掉 `:xxx` 后缀；**300ms 缓存**，空结果也缓存，
+  不 fork、不 dumpsys；
+- 黑名单：桌面（各种 `*launcher*`、`com.miui.home`）、输入法、systemui、phone ——
+  命中时按"没有前台应用"处理，**不再回退 dumpsys**；
+- 取不到时用 **2 秒内的 last_good**，并要求它仍出现在 top-app（小窗盖住游戏时游戏仍在）；
+- 以上都拿不到才走原来的 dumpsys 解析（手动/兜底路径）。
+
 ### 游戏免打扰 / WiFi 省电
 
 - **`GAME_DND=1`**：进 GAMING 前读 `settings get global zen_mode` 记住原值，切到 1（仅优先）；

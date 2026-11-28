@@ -1159,6 +1159,20 @@ int sf_test_main(void) {
     sf_check(!g_dnd_engaged, "release 幂等（未接管也不报错）", NULL);
   }
 
+  printf("\n== 前台检测（1:1 Kin getTopAppFast）==\n");
+  {
+    sf_check(fg_valid_pkg("com.tencent.tmgp.sgame") == 1, "合法包名", NULL);
+    sf_check(fg_valid_pkg("noDot") == 0, "没有点号的不是包名", NULL);
+    sf_check(fg_valid_pkg("a/b") == 0, "带斜杠拒绝", NULL);
+    sf_check(fg_valid_pkg("") == 0, "空串拒绝", NULL);
+    sf_check(fg_valid_pkg("com.foo:remote") == 0, "带冒号（未剥后缀）拒绝", NULL);
+
+    sf_check(fg_blacklisted("com.android.systemui") == 1, "systemui 是黑名单", NULL);
+    sf_check(fg_blacklisted("com.miui.home") == 1, "MIUI 桌面", NULL);
+    sf_check(fg_blacklisted("com.google.android.inputmethod.latin") == 1, "Gboard", NULL);
+    sf_check(fg_blacklisted("com.tencent.tmgp.sgame") == 0, "游戏不是黑名单", NULL);
+  }
+
   printf("\n== 老 MTK GPU OPP 解析 ==\n");
   {
     const char *txt =

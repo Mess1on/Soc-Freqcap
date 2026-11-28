@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.5.6"
+#define SF_VERSION "2.5.7"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -5501,8 +5501,138 @@ static int same_pids(const long *a, int na, const long *b, int nb) {
   return 1;
 }
 
+/* ── 前台快路径：1:1 Kin Utils::getTopAppFast ──
+   top-app cpuset 的 cgroup.procs（优）→ tasks → /proc/<pid>/cmdline，
+   剥掉 ":xxx" 子进程后缀；300ms 缓存（空结果也缓存，避免扫描风暴）。
+   不 fork、不 dumpsys，是 Kin 在 auto 模式下的标准前台来源。 */
+static char g_fast_pkg[PKG_LEN];
+static long g_fast_ms;
+static int  g_fast_ready;
+static char g_last_good[PKG_LEN];
+static int  g_fast_black;
+static long g_last_good_ms;
+
+static int fg_valid_pkg(const char *p) {
+  if (!p || !*p || strlen(p) > 255) return 0;
+  if (!strchr(p, '.')) return 0;
+  if (strchr(p, '/')) return 0;
+  for (const char *c = p; *c; c++)
+    if (!(isalnum((unsigned char)*c) || *c == '.' || *c == '_')) return 0;
+  return 1;
+}
+
+/* Kin 的黑名单语义：桌面 / 输入法 / systemui 不算"前台应用" */
+static int fg_blacklisted(const char *p) {
+  if (!p || !*p) return 1;
+  static const char *exact[] = {
+    "com.android.systemui", "com.android.inputmethod.latin",
+    "com.google.android.inputmethod.latin", "com.android.phone",
+    "com.miui.home", "com.oppo.launcher", "com.android.launcher3",
+    "com.google.android.apps.nexuslauncher", "com.bbk.launcher2",
+    "com.huawei.android.launcher", "com.sec.android.app.launcher",
+    "com.coloros.launcher", "com.realme.launcher",
+  };
+  for (size_t i = 0; i < sizeof exact / sizeof *exact; i++)
+    if (!strcmp(p, exact[i])) return 1;
+  if (strstr(p, "launcher")) return 1;      /* 各种桌面 */
+  if (strstr(p, "inputmethod")) return 1;
+  return 0;
+}
+
+/* 扫一遍 top-app，返回最像前台的包；want != NULL 时额外报告它是否还在 top-app。 */
+static int fg_scan_top_app(char *best, size_t bn, int *want_found, const char *want,
+                           int *saw_black) {
+  static const char *paths[] = {
+    "/dev/cpuset/top-app/cgroup.procs",
+    "/dev/cpuset/top-app/tasks",
+  };
+  if (want_found) *want_found = 0;
+  if (saw_black) *saw_black = 0;
+  if (best && bn) best[0] = 0;
+  for (size_t pi = 0; pi < sizeof paths / sizeof *paths; pi++) {
+    int fd = open(paths[pi], O_RDONLY);
+    if (fd < 0) continue;
+    char buf[4096];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) continue;
+    buf[n] = 0;
+    char *save = NULL;
+    for (char *t = strtok_r(buf, "\n", &save); t; t = strtok_r(NULL, "\n", &save)) {
+      int pid = atoi(t);
+      if (pid <= 0) continue;
+      char cmdp[64], cmd[256];
+      snprintf(cmdp, sizeof cmdp, "/proc/%d/cmdline", pid);
+      int cf = open(cmdp, O_RDONLY);
+      if (cf < 0) continue;
+      ssize_t cn = read(cf, cmd, sizeof cmd - 1);
+      close(cf);
+      if (cn <= 0) continue;
+      cmd[cn] = 0;
+      char *colon = strchr(cmd, ':');
+      if (colon) *colon = 0;
+      if (!fg_valid_pkg(cmd)) continue;
+      if (want && !strcmp(cmd, want) && want_found) *want_found = 1;
+      if (fg_blacklisted(cmd)) {
+        if (saw_black) *saw_black = 1;
+        continue;
+      }
+      if (best && bn && !best[0]) snprintf(best, bn, "%s", cmd);
+    }
+    if (best && best[0]) return 0;
+  }
+  return best && best[0] ? 0 : -1;
+}
+
+/* 300ms 缓存的快路径；拿不到返回 -1（并缓存空结果）。 */
+static int fg_top_app_fast(char *out, size_t n) {
+  long now = mono_ms();
+  if (g_fast_ready && now - g_fast_ms < 300) {
+    if (!g_fast_pkg[0]) return -1;
+    snprintf(out, n, "%s", g_fast_pkg);
+    return 0;
+  }
+  g_fast_ready = 1;
+  g_fast_ms = now;
+  int black = 0;
+  if (fg_scan_top_app(g_fast_pkg, sizeof g_fast_pkg, NULL, NULL, &black)) {
+    g_fast_pkg[0] = 0;
+    g_fast_black = black;      /* 只有桌面/输入法：别再去 dumpsys */
+    return -1;
+  }
+  g_fast_black = 0;
+  snprintf(out, n, "%s", g_fast_pkg);
+  return 0;
+}
+
 /* 带节流的前台探测。语义与 foreground_pkg 相同：0 = 拿到包名，-1 = 没拿到。 */
 static int foreground_pkg_throttled_ex(char *out, int force) {
+  /* 1:1 Kin：优先 top-app cpuset 快路径（300ms 缓存、不 fork）；
+     黑名单（桌面/输入法/systemui）→ 用 2s 内的 last_good；都没有才退回 dumpsys。 */
+  {
+    char fast[PKG_LEN];
+    int fr = fg_top_app_fast(fast, sizeof fast);
+    if (fr != 0 && g_fast_black) {
+      out[0] = 0;
+      return -1;                     /* 前台是桌面/输入法：按"没有前台应用"处理 */
+    }
+    if (fr == 0 && fast[0]) {
+      snprintf(out, PKG_LEN, "%s", fast);
+      snprintf(g_last_good, sizeof g_last_good, "%s", fast);
+      g_last_good_ms = mono_ms();
+      return 0;
+    }
+    long now = mono_ms();
+    if (g_last_good[0] && g_last_good_ms > 0 && now - g_last_good_ms < 2000) {
+      int in_top = 0;
+      char tmp[PKG_LEN];
+      fg_scan_top_app(tmp, sizeof tmp, &in_top, g_last_good, NULL);
+      if (in_top) {                       /* 小窗盖住游戏时游戏仍在 top-app */
+        snprintf(out, PKG_LEN, "%s", g_last_good);
+        return 0;
+      }
+    }
+  }
   long pids[FG_PIDS_MAX];
   int np = topapp_pids(pids, FG_PIDS_MAX);
   long now = mono_sec();
