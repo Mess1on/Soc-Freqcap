@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.5.1"
+#define SF_VERSION "2.5.2"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -174,6 +174,10 @@ struct cfg {
   int fsm_alpha;
   /* 放电电流闸门（mA）：HEAVY 需 ≥cur_heavy，读不到 CPU% 时 ≥cur_mod 可判 MODERATE */
   int fsm_cur_heavy, fsm_cur_mod;
+  /* 限频模式的"跟随下限"（Scene 式）：上限不变，下限随负载在 hardware_min~cap*N% 之间动 */
+  int cap_min_follow;
+  int cap_min_lo, cap_min_hi;          /* 负载阈值（%） */
+  int cap_min_pct_lo, cap_min_pct_hi;  /* 相对当前封顶的百分比 */
   /* CPU 封顶后端：auto=有 PPM/msm 节点就加第二道锁；sysfs=只写 sysfs */
   int cap_backend;
   /* 实时偏移（adapt.c）。都是"百分点"，只加在生效值上，不写回配置。 */
@@ -5767,6 +5771,16 @@ static long g_capfloor_log_at = -600;  /* 初值 -600：开机头 10 分钟也�
 /* 厂商 perf/热控每隔几秒把 max 顶回去时，巡检每拍都会写一次 */
 static long g_restore_log_at[MAX_POLICY];
 
+/* 限频模式的跟随下限（Scene 式）：
+   负载落在 [lo, hi) 用低档百分比，≥ hi 用高档；< lo 回硬件最低。
+   hi_mode 带迟滞（由 cpu_min_patrol 维护），避免在阈值上抖动。 */
+static int g_capmin_hi_mode;
+static int cap_min_pct_for_load(int load, int hi_mode) {
+  if (!cfg.cap_min_follow || load < 0) return 0;
+  if (hi_mode) return cfg.cap_min_pct_hi;
+  return load >= cfg.cap_min_lo ? cfg.cap_min_pct_lo : 0;
+}
+
 /* 平台帽退避阶梯：5 → 15 → 60 → 180 秒，封顶 3 分钟。 */
 static long vcap_backoff_sec(int fails) {
   static const long step[] = {5, 15, 60, 180};
@@ -6252,7 +6266,8 @@ static void cpu_min_patrol(void) {
       if (cfg.fsm_min[g_sm.fsm][g] > 0) { fsm_any = 1; break; }
   /* 动态封顶开启时，硬件最低由压制的低载静置接管；但用户明确设了 */
   if (suppress_on() && !user_any) return;
-  if (!cfg.cpu_min_lock && !user_any && !fsm_any) {
+  int follow_any = (cfg.strategy != 1 && cfg.cap_min_follow);
+  if (!cfg.cpu_min_lock && !user_any && !fsm_any && !follow_any) {
     for (int i = 0; i < g_npol; i++) {
       if (g_min_target[i] <= 0) continue;
       char path[256];
@@ -6265,6 +6280,14 @@ static void cpu_min_patrol(void) {
   /* 省电静态档的下限已由压制写入；用户显式设了最低频时仍要巡检。 */
   if (suppress_on() && cfg.sup_style && g_sup_level == SUP_FLOOR_LV && !user_any) return;
   long now = mono_sec();
+  int follow_load = -1;
+  if (follow_any) {
+    follow_load = cpu_busy_pct();
+    if (follow_load >= 0) {
+      if (follow_load >= cfg.cap_min_hi) g_capmin_hi_mode = 1;
+      else if (follow_load < cfg.cap_min_lo) g_capmin_hi_mode = 0;
+    }
+  }
   /* 插拔电是平台下限的主要开关：状态一变就清零重探，别把插电时的
      夹回次数记到拔电头上（issue #1 里 21:37 那两条就是这么来的）。 */
   {
@@ -6322,8 +6345,15 @@ static void cpu_min_patrol(void) {
       }
       continue;
     }
+    long follow_target = 0;
+    if (follow_any && user_target <= 0 && fsm_target <= 0) {
+      int fp = cap_min_pct_for_load(follow_load, g_capmin_hi_mode);
+      follow_target = fp > 0 ? snap_freq(&g_pol[i], g_pol[i].cap * fp / 100)
+                             : g_pol[i].hw_min;
+    }
     long target = fsm_target > 0 ? fsm_target
-                 : user_target > 0 ? user_target : g_pol[i].hw_min;
+                 : user_target > 0 ? user_target
+                 : follow_target > 0 ? follow_target : g_pol[i].hw_min;
     /* 用户最低频只要“不低于目标”就算成功；CPU_MIN_LOCK 的下限是硬件最低 */
     int soft = user_target > 0 || fsm_target > 0;
     if (target != g_min_target[i]) {
@@ -6545,6 +6575,11 @@ static void load_cfg(void) {
   cfg.fsm_alpha = 0;
   cfg.fsm_cur_heavy = 150;
   cfg.fsm_cur_mod = 120;
+  cfg.cap_min_follow = 1;
+  cfg.cap_min_lo = 30;
+  cfg.cap_min_hi = 70;
+  cfg.cap_min_pct_lo = 45;
+  cfg.cap_min_pct_hi = 75;
   cfg.cap_backend = CAP_BE_AUTO;
   /* 熄屏策略：基准 keep（旧行为）。全新安装的 conf 写 uncap */
   cfg.screen_uncap = 0;
@@ -6764,6 +6799,14 @@ static void load_cfg(void) {
     cfg.big_min = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("BIG_OFFLINE", v) == 0)
     cfg.big_offline = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("CAP_MIN_FOLLOW", v) == 0)
+    cfg.cap_min_follow = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("CAP_MIN_LO", v) == 0)  cfg.cap_min_lo  = clampi(atoi(v), 0, 100, 30);
+  if (cfg_get("CAP_MIN_HI", v) == 0)  cfg.cap_min_hi  = clampi(atoi(v), 0, 100, 70);
+  if (cfg_get("CAP_MIN_PCT_LO", v) == 0) cfg.cap_min_pct_lo = clampi(atoi(v), 0, 100, 45);
+  if (cfg_get("CAP_MIN_PCT_HI", v) == 0) cfg.cap_min_pct_hi = clampi(atoi(v), 0, 100, 75);
+  if (cfg.cap_min_hi <= cfg.cap_min_lo) cfg.cap_min_hi = cfg.cap_min_lo + 5;
+  if (cfg.cap_min_hi > 100) cfg.cap_min_hi = 100;
   if (cfg_get("FSM_BOUNDS", v) == 0)
     cfg.fsm_bounds = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("FSM_ALPHA", v) == 0) cfg.fsm_alpha = clampi(atoi(v), 0, 1000, 0);

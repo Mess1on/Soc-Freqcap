@@ -16,6 +16,9 @@
 | `GPU_PCT` | 45 | GPU 封顶百分比 |
 | `STRATEGY` | cap | `cap` 固定百分比封顶；`smart` 六态智能调度，`CPU_PCT_*` 只当天花板 |
 | `APP_SWITCH_TIER` | 2 | 智能模式切前台首拍预热档：0=关、1=轻载、2=中载(85%)、3=重载；只升不降 |
+| `CAP_MIN_FOLLOW` | 1 | 限频模式跟随下限（Scene 式）：上限不变，下限随负载在硬件最低与封顶×N% 之间移动 |
+| `CAP_MIN_LO` / `CAP_MIN_HI` | 30 / 70 | 跟随下限的负载阈值（%，带回差） |
+| `CAP_MIN_PCT_LO` / `CAP_MIN_PCT_HI` | 45 / 75 | 中载/高载时下限占当前封顶的百分比 |
 | `FSM_BOUNDS` | 1 | 智能模式封顶模型：1 = ASB/Kin 频阶曲线（包络+级别+本机缩放），0 = 旧的百分比查表 |
 | `FSM_ALPHA` | 0 | 包络混合 0~1000：0 均衡、1000 省电 |
 | `FSM_CUR_HEAVY` / `FSM_CUR_MOD` | 150 / 120 | 放电电流闸门（mA），充电或读不到时旁路 |
@@ -200,6 +203,26 @@ PSI 争用、皮肤/外壳温也参与选档；ADPF 从 `/data/adb/soc_freqcap/a
 同一簇 60 秒最多一条、`下限原值顶住封顶` 每簇只报一次、预热和状态切换不再各打一行。
 
 排查"为什么是这个值"时把 `LOG_VERBOSE` 改成 1（隐藏项），恢复每拍明细。
+
+### 限频模式的"跟随下限"（Scene 式，`CAP_MIN_FOLLOW`）
+
+Scene 那种"min/max 都在动"不是锁频，而是在推 cpufreq 的**窗口**：
+
+- `scaling_max_freq` 决定 governor 能升到哪（功耗/温度上限）；
+- `scaling_min_freq` 决定能降到哪（响应地板）；
+- 两端都动 = 控制实际工作带；只有一个值（min==max）= 关掉 DVFS，空载也跑那个频点。
+
+我们的限频模式默认开了跟随下限，上限仍是 `CPU_PCT_*` 封顶：
+
+| 负载 | `scaling_min_freq` |
+|---|---|
+| < `CAP_MIN_LO`（30%） | 硬件最低（让 governor 随便降） |
+| ≥ 30% | 封顶 × `CAP_MIN_PCT_LO`（45%） |
+| ≥ `CAP_MIN_HI`（70%） | 封顶 × `CAP_MIN_PCT_HI`（75%） |
+
+带 30/70 回差防抖，且始终至少比封顶低 `MIN_WINDOW_STEPS` 档（窗口守护），
+不会把窗口压成一个点。`CAP_MIN_FOLLOW=0` 回到"下限永远是硬件最低"的老行为。
+智能模式不用这套（它的下限来自 FSM 包络）。
 
 ### 智能模式的封顶曲线（对齐 ASB / Kin）
 

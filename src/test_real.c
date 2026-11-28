@@ -989,6 +989,21 @@ int sf_test_main(void) {
     cfg.fsm_alpha = save_alpha;
   }
 
+  printf("\n== 限频模式跟随下限（Scene 式）==\n");
+  {
+    int save = cfg.cap_min_follow;
+    cfg.cap_min_follow = 1;
+    cfg.cap_min_lo = 30; cfg.cap_min_hi = 70;
+    cfg.cap_min_pct_lo = 45; cfg.cap_min_pct_hi = 75;
+    sf_check(cap_min_pct_for_load(10, 0) == 0, "低载：下限回硬件最低", NULL);
+    sf_check(cap_min_pct_for_load(50, 0) == 45, "中载：下限 = 封顶 45%", NULL);
+    sf_check(cap_min_pct_for_load(90, 1) == 75, "高载（迟滞高档）：下限 = 封顶 75%", NULL);
+    sf_check(cap_min_pct_for_load(-1, 1) == 0, "读不到负载：不抬下限", NULL);
+    cfg.cap_min_follow = 0;
+    sf_check(cap_min_pct_for_load(90, 1) == 0, "开关关闭：完全不干预", NULL);
+    cfg.cap_min_follow = save;
+  }
+
   printf("\n== 老 MTK GPU OPP 解析 ==\n");
   {
     const char *txt =

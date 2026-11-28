@@ -3895,7 +3895,7 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /SUP_LEVEL_HOLD_S/.test(csrc) &&
      /cpu_busy_pct_ex\(1\)/.test(csrc) &&
      /g_sup_floor_busy_n/.test(csrc) &&
-     /if \(suppress_on\(\) && !user_any\) return;[\s\S]{0,1600}if \(!cfg\.cpu_min_lock && !user_any && !fsm_any\)/.test(csrc),
+     /if \(suppress_on\(\) && !user_any\) return;[\s\S]{0,1600}if \(!cfg\.cpu_min_lock && !user_any && !fsm_any && !follow_any\)/.test(csrc),
      '动态封顶：1s 快拍、持续负载驱动三档天花板（地板 60 / 中间 75 才回升，换档后先稳 6s）');
   ok(/g_sup_up_n < 2/.test(csrc) &&
      /suppress_boost_apply\(\);[\s\S]{0,160}?g_sup_reapply_at[\s\S]{0,120}?suppress_uclamp_apply\(\)/.test(csrc) &&

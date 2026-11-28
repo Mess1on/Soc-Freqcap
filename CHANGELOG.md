@@ -12,8 +12,9 @@
 > 模块**只负责报版本号**，安装包统一放网盘，地址写在 `update.json` 的 `zipUrl`。
 > 每次发版请把网盘链接一起更新，并在这里置顶写清楚。
 
-## V2.5.1 — 2026-11-28 ｜ versionCode 25001
+## V2.5.2 — 2026-11-28 ｜ versionCode 25002
 
+- **限频模式改为 Scene 式窗口**：新增 `CAP_MIN_FOLLOW`（默认开），上限照旧 `CPU_PCT_*`，下限随负载在硬件最低 ↔ 封顶 45%/75% 之间移动，30/70 回差防抖，始终至少低 `MIN_WINDOW_STEPS` 档；`=0` 回到下限恒为硬件最低
 - **智能模式按 ASB / Kin 重做封顶曲线**：六态级别 `LEVEL={0,.15,.45,.72,.62,1}` 在 battery/balanced 两条包络间按 `FSM_ALPHA` 取值，再按本机 `cpuinfo_max_freq` 缩放；下限同源（`clampFloor`）。用户 `CPU_PCT_*` 仍是硬天花板，`CPU_MIN_PCT_*` 设了就优先
 - 补上 ASB 的**放电电流闸门**（`FSM_CUR_HEAVY/FSM_CUR_MOD`，默认 150/120mA；充电或读不到旁路）
 - 热源对齐 ASB：默认只用 CPU 温度（54/48），皮肤温与 ADPF 默认关
