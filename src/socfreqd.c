@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.5.5"
+#define SF_VERSION "2.5.6"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -189,6 +189,10 @@ struct cfg {
   int idle_uclamp;
   /* 未显式配置的应用自动套用「其他」画像档 */
   int app_profile;
+  /* 游戏态自动免打扰（默认关，会改用户可见行为） */
+  int game_dnd;
+  /* WiFi 省电：0=auto（不动）, 1=on, 2=off */
+  int wifi_ps;
   /* CPU 封顶后端：auto=有 PPM/msm 节点就加第二道锁；sysfs=只写 sysfs */
   int cap_backend;
   /* 实时偏移（adapt.c）。都是"百分点"，只加在生效值上，不写回配置。 */
@@ -3724,6 +3728,62 @@ static int bg_uclamp_write(const char *path, const char *val) {
 
 static int g_cpuset_static, g_cpuset_bg_cfg;
 
+/* ── WiFi 省电（node 优先；auto = 不动/还原）── */
+#define WIFI_PS_NODE "/sys/module/wlan/parameters/wlan_pm"
+#define WIFI_PS_JOURNAL RUN_DIR "/wifi_ps.saved"
+static void wifi_ps_apply(void) {
+  if (access(WIFI_PS_NODE, F_OK)) return;
+  if (cfg.wifi_ps == 0) { str_restore_all(WIFI_PS_JOURNAL, "WiFi 省电"); return; }
+  const char *v = cfg.wifi_ps == 1 ? "on" : "off";
+  str_write_journaled(WIFI_PS_JOURNAL, WIFI_PS_NODE, v);
+}
+
+/* ── 游戏态自动免打扰（settings zen_mode；默认关）── */
+static int g_dnd_engaged, g_dnd_saved_valid, g_dnd_saved;
+
+static int dnd_read_zen(void) {
+  FILE *f = popen("/system/bin/settings get global zen_mode 2>/dev/null", "r");
+  if (!f) return -1;
+  char b[32] = {0};
+  size_t n = fread(b, 1, sizeof b - 1, f);
+  pclose(f);
+  if (!n) return -1;
+  for (size_t i = 0; i < n; i++)
+    if (b[i] == '\n' || b[i] == '\r') { b[i] = 0; break; }
+  if (!strcmp(b, "null")) return 0;
+  return atoi(b);
+}
+
+static int dnd_write_zen(int mode) {
+  char cmd[96];
+  snprintf(cmd, sizeof cmd, "/system/bin/settings put global zen_mode %d", mode);
+  FILE *f = popen(cmd, "r");
+  if (!f) return 0;
+  return pclose(f) == 0;
+}
+
+static void dnd_engage(void) {
+  if (!cfg.game_dnd || g_dnd_engaged) return;
+  int cur = dnd_read_zen();
+  if (cur < 0) return;                 /* 读不到就别乱改 */
+  if (cur == 1) { g_dnd_engaged = 1; g_dnd_saved_valid = 0; return; }
+  if (!dnd_write_zen(1)) return;
+  g_dnd_saved = cur;
+  g_dnd_saved_valid = 1;
+  g_dnd_engaged = 1;
+  log("游戏免打扰：zen_mode %d → 1", cur);
+}
+
+static void dnd_release(void) {
+  if (!g_dnd_engaged) return;
+  if (g_dnd_saved_valid) {
+    dnd_write_zen(g_dnd_saved);
+    log("游戏免打扰：还原 zen_mode %d", g_dnd_saved);
+  }
+  g_dnd_engaged = 0;
+  g_dnd_saved_valid = 0;
+}
+
 #define IDLE_UCL_JOURNAL RUN_DIR "/idle_uclamp.saved"
 
 /* 息屏(DEEP_IDLE)把 background 组 uclamp.max 压到 18%（ASB V64）：
@@ -6839,6 +6899,7 @@ static void hand_back_mode(const char *path) {
 }
 
 static void hand_back_full(const char *why) {
+  dnd_release();
   log("→ %s", why);
   /* 先放掉 PPM/msm 第二道锁，否则 sysfs 写回硬件最高也会被厂商硬限压着。 */
   be_handback();
@@ -6912,6 +6973,7 @@ static void hand_back_full(const char *why) {
 
 /* 游戏解锁路径的日志文案保持稳定：外部脚本按这一行判断解锁是否生效。 */
 static void unlock_game(void) {
+  dnd_engage();
   char why[PKG_LEN + 24];
   big_offline_restore("游戏");
   snprintf(g_reason, sizeof g_reason, "game");
@@ -7389,6 +7451,8 @@ static void load_cfg(void) {
   cfg.quiet_night = 1; cfg.quiet_night_s = 300;
   cfg.idle_uclamp = 18;
   cfg.app_profile = 1;
+  cfg.game_dnd = 0;
+  cfg.wifi_ps = 0;
   cfg.cap_backend = CAP_BE_AUTO;
   /* 熄屏策略：基准 keep（旧行为）。全新安装的 conf 写 uncap */
   cfg.screen_uncap = 0;
@@ -7608,6 +7672,13 @@ static void load_cfg(void) {
     cfg.big_min = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("BIG_OFFLINE", v) == 0)
     cfg.big_offline = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("GAME_DND", v) == 0)
+    cfg.game_dnd = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("WIFI_PS", v) == 0) {
+    if (!strcasecmp(v, "on")) cfg.wifi_ps = 1;
+    else if (!strcasecmp(v, "off")) cfg.wifi_ps = 2;
+    else cfg.wifi_ps = 0;
+  }
   if (cfg_get("PROBE_CADENCE", v) == 0)
     cfg.probe_cadence = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("QUIET_NIGHT", v) == 0)
@@ -7854,6 +7925,8 @@ static void publish_status(void) {
 /* 清理                                                               */
 
 static void cleanup(void) {
+  str_restore_all(WIFI_PS_JOURNAL, "WiFi 省电");
+  dnd_release();
   if (!g_have_lock) return;
   log("停止，恢复启动前状态");
   restore_governors();
@@ -8464,6 +8537,7 @@ int main(int argc, char **argv) {
   }
   topology_save();
   cap_backend_init();
+  wifi_ps_apply();
   assign_pct(g_pol, g_npol);
   detect_gpu(0);
   suppress_gov_load();   /* adapt/<soc>.conf 的 gov_ 行：有数据才调节工作点 */

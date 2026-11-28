@@ -16,6 +16,8 @@
 | `GPU_PCT` | 45 | GPU 封顶百分比 |
 | `STRATEGY` | cap | `cap` 固定百分比封顶；`smart` 六态智能调度，`CPU_PCT_*` 只当天花板 |
 | `APP_SWITCH_TIER` | 2 | 智能模式切前台首拍预热档：0=关、1=轻载、2=中载(85%)、3=重载；只升不降 |
+| `GAME_DND` | 0 | 游戏态自动免打扰：进 GAMING 切「仅优先」，离开还原（默认关，改系统行为） |
+| `WIFI_PS` | auto | WiFi 省电：`auto` 不动、`on`/`off` 写 `wlan_pm`（记账，停守护还原） |
 | `PROBE_CADENCE` | 1 | 多窗口扫描节流：重载/高负载 8s、中等 25s、安静 120s（省 fork） |
 | `QUIET_NIGHT` / `QUIET_NIGHT_S` | 1 / 300 | 夜间静默：学到的夜间窗口里息屏，巡检拉长到 N 秒 |
 | `IDLE_UCLAMP` | 18 | 息屏把 background 组 uclamp.max 收到 N%（只压不抬，亮屏还原） |
@@ -209,6 +211,16 @@ PSI 争用、皮肤/外壳温也参与选档；ADPF 从 `/data/adb/soc_freqcap/a
 同一簇 60 秒最多一条、`下限原值顶住封顶` 每簇只报一次、预热和状态切换不再各打一行。
 
 排查"为什么是这个值"时把 `LOG_VERBOSE` 改成 1（隐藏项），恢复每拍明细。
+
+### 游戏免打扰 / WiFi 省电
+
+- **`GAME_DND=1`**：进 GAMING 前读 `settings get global zen_mode` 记住原值，切到 1（仅优先）；
+  离开游戏/交还系统/守护退出时还原。读不到（无 settings、命令失败）就完全不动作；
+  本来就是「仅优先」时只记在位、不记原值，还原时不写。
+- **`WIFI_PS`**：`auto` = 不动；`on`/`off` 写 `/sys/module/wlan/parameters/wlan_pm`，
+  写前记账，守护停止时还原。
+
+> 没有做厂商性能限制组件恢复（perfd/thermal-engine 替空还原、emul_temp 清零）——按你的要求撤掉了。
 
 ### 探测节流 / 夜间静默 / 空闲 uclamp / 画像
 

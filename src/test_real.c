@@ -1147,6 +1147,18 @@ int sf_test_main(void) {
     g_cat_idx = -1;
   }
 
+  printf("\n== DND / WiFi 省电 ==\n");
+  {
+    int save = cfg.game_dnd;
+    cfg.game_dnd = 0;
+    g_dnd_engaged = 0;
+    dnd_engage();
+    sf_check(!g_dnd_engaged, "GAME_DND=0：完全不动作", NULL);
+    cfg.game_dnd = save;
+    dnd_release();
+    sf_check(!g_dnd_engaged, "release 幂等（未接管也不报错）", NULL);
+  }
+
   printf("\n== 老 MTK GPU OPP 解析 ==\n");
   {
     const char *txt =

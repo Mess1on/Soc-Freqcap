@@ -3745,6 +3745,24 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
   ok(/int therm_w = \(g_ls.skin_max > 0 && g_ls.skin_max < 40\) \? 50 : 100;/.test(csrc),
      '热否决推力：皮肤 <40℃ 时减半（ASB V64）');
 
+  /* DND / WiFi 省电（只做这两条，不做厂商限制组件恢复） */
+  ok(/static void dnd_engage\(void\)/.test(csrc) && /static void dnd_release\(void\)/.test(csrc) &&
+     /\/system\/bin\/settings put global zen_mode/.test(csrc) &&
+     /cur == 1\) \{ g_dnd_engaged = 1; g_dnd_saved_valid = 0; return; \}/.test(csrc),
+     'DND：记住用户 zen_mode、切「仅优先」、离开还原；本来就是 1 时不写');
+  ok(/dnd_engage\(\);/.test(csrc) &&
+     /static void hand_back_full[\s\S]{0,120}?dnd_release\(\);/.test(csrc),
+     'DND 挂在游戏交还/离开两条边上');
+  ok(/WIFI_PS_NODE "\/sys\/module\/wlan\/parameters\/wlan_pm"/.test(csrc) &&
+     /str_write_journaled\(WIFI_PS_JOURNAL, WIFI_PS_NODE, v\)/.test(csrc) &&
+     /str_restore_all\(WIFI_PS_JOURNAL, "WiFi 省电"\)/.test(csrc),
+     'WiFi 省电：写 wlan_pm、记账、停守护/退出还原');
+  ok(/^GAME_DND=0$/m.test(conf) && /^WIFI_PS=auto$/m.test(conf) &&
+     /GAME_DND/.test(apiSrc) && /WIFI_PS/.test(apiSrc),
+     'GAME_DND / WIFI_PS 配置与接口一致');
+  ok(!/kSysTune/.test(csrc) && !/perfguard_apply/.test(csrc),
+     '不含 sysctl 调优与厂商限制组件恢复（按用户要求撤掉）');
+
   /* 探测节流 / 夜间静默 / 空闲 uclamp / 画像自动匹配 */
   ok(/static int multi_window_ttl_s\(void\)/.test(csrc) &&
      /if \(g_sm\.fsm >= SMART_HEAVY\) return 8;/.test(csrc) &&
