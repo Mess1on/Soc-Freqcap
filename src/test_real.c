@@ -954,6 +954,41 @@ int sf_test_main(void) {
     sf_check(vcap_backoff_sec(99) == 180, "再往后封顶 180 秒", NULL);
   }
 
+  printf("\n== ASB/Kin 频阶模型（fsm_caps_of）==\n");
+  {
+    /* 用 SM8850 大核簇的真实量级：峰值 4.32GHz、最低 384MHz */
+    const long HW = 4320000, MIN = 384000;
+    long mx, mn;
+    int save_alpha = cfg.fsm_alpha;
+    cfg.fsm_alpha = 0;
+
+    fsm_caps_of(1, SMART_DEEP_IDLE, HW, MIN, &mx, &mn);
+    sf_check(mx == 1881600 && mn == 883200,
+             "DEEP_IDLE：t=0 → balanced 包络地板（大核 1881/883MHz）", NULL);
+
+    fsm_caps_of(1, SMART_GAMING, HW, MIN, &mx, &mn);
+    sf_check(mx == HW, "GAMING：t=1 → 吃满本机峰值（缩放后钳到 hwmax）", NULL);
+
+    long mxh, mnh, mxs, mns;
+    fsm_caps_of(1, SMART_HEAVY, HW, MIN, &mxh, &mnh);
+    fsm_caps_of(1, SMART_SUSTAINED, HW, MIN, &mxs, &mns);
+    sf_check(mxs < mxh, "SUSTAINED 上限必须低于 HEAVY（热降档不许反抬）", NULL);
+
+    cfg.fsm_alpha = 1000;   /* 省电包络 */
+    fsm_caps_of(1, SMART_GAMING, HW, MIN, &mx, &mn);
+    sf_check(mx < HW / 2, "alpha=1000：连 GAMING 也被压到 battery 包络", NULL);
+    cfg.fsm_alpha = 0;
+
+    fsm_caps_of(0, SMART_GAMING, HW, MIN, &mx, &mn);
+    sf_check(mx == HW, "小核 slot 同样钳到本机峰值", NULL);
+    sf_check(mn <= mx, "min 永远不大于 max", NULL);
+
+    long mxl, mnl;
+    fsm_caps_of(0, SMART_HEAVY, HW, MIN, &mxl, &mnl);
+    sf_check(mxl < mxh, "同一状态下小核包络低于大核包络", NULL);
+    cfg.fsm_alpha = save_alpha;
+  }
+
   printf("\n== 老 MTK GPU OPP 解析 ==\n");
   {
     const char *txt =

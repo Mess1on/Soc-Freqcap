@@ -3721,6 +3721,30 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /if \(game_hint\)[\s\S]{0,80}?d = SMART_GAMING;/.test(csrc) &&
      /g_smart_game_hint && want == SMART_GAMING/.test(csrc),
      '前台是游戏包时一拍进 GAMING，不等 GPU 6 拍确认');
+  /* 智能模式封顶模型：完全对齐 ASB/Kin（级别 + 包络 + 本机缩放 + 电流闸门） */
+  ok(/kFsmLevel\[SMART_STATE_COUNT\] = \{0\.0f, 0\.15f, 0\.45f, 0\.72f, 0\.62f, 1\.0f\}/.test(csrc) &&
+     /kBalMaxB_F = 1881600/.test(csrc) && /kBatMaxB_C = 1632000/.test(csrc) &&
+     /FSM_REF_MAX_B 3302400/.test(csrc),
+     'ASB 频阶常量：LEVEL 六级 + battery/balanced 包络 + SM8650 参考峰值');
+  ok(/static void fsm_caps_of\(int slot, int state, long hw_max, long hw_min/.test(csrc) &&
+     /fsm_scale_khz\(\(long\)maxK, hw, floor, ref, w\)/.test(csrc) &&
+     /state == SMART_SUSTAINED && w > 0\.45f/.test(csrc),
+     '模型：按状态级别 lerp、SUSTAINED 权重钳 0.45、按本机峰值缩放');
+  ok(/cfg\.strategy == 1 && cfg\.fsm_bounds && !big_min_hit/.test(csrc) &&
+     /long user_ceil = cap_from_pct\(&p\[i\], eff_pct\(cfg\.pct\[tierkey\], 0\)\)/.test(csrc) &&
+     /p\[i\]\.fsm_min_hz = mn;/.test(csrc) &&
+     /cfg\.fsm_bounds && g_pol\[i\]\.fsm_min_hz > 0 && user_target <= 0/.test(csrc),
+     '封顶与下限都接模型；用户 CPU_PCT_* 仍是硬天花板');
+  ok(/int ma_valid = g_fsm_cur_ma > 0 && !g_fsm_chg;/.test(csrc) &&
+     /d = \(!ma_valid \|\| g_fsm_cur_ma >= cfg\.fsm_cur_heavy\) \? SMART_HEAVY : SMART_MODERATE/.test(csrc),
+     'ASB 电流闸门：放电才生效，充电/读不到旁路');
+  ok(/^FSM_BOUNDS=1$/m.test(conf) && /^FSM_ALPHA=0$/m.test(conf) &&
+     /FSM_BOUNDS/.test(apiSrc) && /FSM_ALPHA/.test(apiSrc) &&
+     /cfg\.fsm_bounds = 1;/.test(csrc) && /cfg\.fsm_alpha = 0;/.test(csrc),
+     'FSM_BOUNDS / FSM_ALPHA 三处一致（默认开、均衡包络）');
+  ok(/cfg\.fsm_skin_hi = 0; cfg\.fsm_skin_lo = 0;/.test(csrc) && /cfg\.fsm_adpf_hi = 0;/.test(csrc),
+     '热源对齐 ASB：默认只用 CPU 温度，皮肤温/ADPF 关闭');
+
   /* 日志精简：默认只打"变化"，LOG_VERBOSE=1 才恢复每拍明细 */
   ok(/^LOG_VERBOSE=0$/m.test(conf) && /cfg\.log_verbose = 0;/.test(csrc) &&
      /cfg_get\("LOG_VERBOSE"/.test(csrc) && /LOG_VERBOSE/.test(apiSrc),
@@ -4423,7 +4447,7 @@ console.log('\n== restart 不吊住调用者 ==');
   const mp = fs.readFileSync(MOD0 + '/module.prop', 'utf8');
   const ver = ((mp.match(/^version=(.+)$/m) || [])[1] || '').trim();
   const verCode = ((mp.match(/^versionCode=(\d+)$/m) || [])[1] || '').trim();
-  ok(/^V\d+\.\d+(?: Beta\d+)?$/.test(ver) && /^\d+$/.test(verCode),
+  ok(/^V\d+\.\d+(?:\.\d+)?(?: Beta\d+)?$/.test(ver) && /^\d+$/.test(verCode),
      `module.prop 版本号格式正常（${ver} / ${verCode}）`);
   /* 守护里的 SF_VERSION 不带 V 前缀，页面与 README 带；都以 module.prop 为准，
      发版只改一处，测试跟着版本走，不用每次改断言 */

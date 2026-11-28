@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.5"
+#define SF_VERSION "2.5.1"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -168,6 +168,12 @@ struct cfg {
   int fsm_game_hint;
   /* 1 = 详细日志（每拍/每状态都打封顶明细）；0 = 精简（只在数值变了才打） */
   int log_verbose;
+  /* 1 = 智能模式用 ASB/Kin 频阶模型（包络 + 级别），0 = 旧的百分比查表 */
+  int fsm_bounds;
+  /* 0..1000：0 = 均衡包络，1000 = 省电包络（ASB alpha） */
+  int fsm_alpha;
+  /* 放电电流闸门（mA）：HEAVY 需 ≥cur_heavy，读不到 CPU% 时 ≥cur_mod 可判 MODERATE */
+  int fsm_cur_heavy, fsm_cur_mod;
   /* CPU 封顶后端：auto=有 PPM/msm 节点就加第二道锁；sysfs=只写 sysfs */
   int cap_backend;
   /* 实时偏移（adapt.c）。都是"百分点"，只加在生效值上，不写回配置。 */
@@ -204,6 +210,7 @@ static int g_have_lock;
 static int g_lock_fd = -1;
 
 static void cpu_min_patrol(void);
+static long batt_current_ma_now(void);
 static void cpu_min_refresh(void);
 static void cpu_min_restore_user(void);
 static void cpu_min_restore(void);
@@ -814,6 +821,8 @@ struct policy {
   /* 精简日志：上一次打过的「档位/意图/封顶」，一样就不重复打 */
   long log_cap;
   int  log_eff;
+  /* 智能模型给该簇算出的下限（Hz，0 = 不用模型） */
+  long fsm_min_hz;
   /* 第二道锁（PPM/MSM）：用哪条后端、PPM cluster 号、最后写入值和连续失败数。 */
   int be;          /* CAP_BE_SYSFS / CAP_BE_PPM / CAP_BE_MSM */
   int ppm_idx;     /* PPM cluster 号，-1 = 不使用 */
@@ -1239,6 +1248,83 @@ static const int kSmartFracM2Low[SMART_STATE_COUNT] = { 55, 75, 90, 100, 85, 100
 static const int kSmartFracM2Big[SMART_STATE_COUNT] = { 40, 60, 80, 100, 70, 100 };
 /* 状态 GPU 天花板：只和现有全局/分类/应用 GPU 取更低，不抬帽。 */
 static const int kSmartGpuPct[SMART_STATE_COUNT] = { 40, 45, 60, 85, 80, 100 };
+/* ── ASB / Kin 频阶模型（逐行对齐 kin-daemon AutoFsm::computeCaps）────────
+   状态级别 t 在 [balanced, battery] 两条包络间按 alpha 混合，再按本机
+   cpuinfo_max_freq / SM8650 参考峰值缩放：空闲保持参考值，重载才吃满本机峰值。
+   参考值来自 asb_fsm_bounds.generated.h（BAT/BAL × FLOOR/CEIL × L/B，单位 kHz）。 */
+static const float kFsmLevel[SMART_STATE_COUNT] = {0.0f, 0.15f, 0.45f, 0.72f, 0.62f, 1.0f};
+#define FSM_REF_MAX_L 2035200   /* SM8650 小核簇参考峰值 kHz */
+#define FSM_REF_MAX_B 3302400   /* SM8650 大核簇参考峰值 kHz */
+
+/* BAT = battery 包络，BAL = balanced 包络；F=floor，C=ceil */
+static const int kBatMaxL_F = 921600,  kBatMaxL_C = 1670400;
+static const int kBatMinL_F = 307200,  kBatMinL_C = 921600;
+static const int kBatMaxB_F = 921600,  kBatMaxB_C = 1632000;
+static const int kBatMinB_F = 614400,  kBatMinB_C = 921600;
+static const int kBalMaxL_F = 1190400, kBalMaxL_C = 2611200;
+static const int kBalMinL_F = 787200,  kBalMinL_C = 1190400;
+static const int kBalMaxB_F = 1881600, kBalMaxB_C = 3974400;
+static const int kBalMinB_F = 883200,  kBalMinB_C = 1881600;
+
+/* alpha 0..1000：0 = 均衡包络，1000 = 省电包络 */
+static int fsm_blend(int bal, int bat, int alpha) {
+  long v = (long)bal + (long)(bat - bal) * (long)alpha / 1000;
+  return (int)v;
+}
+
+static int fsm_lerp(int a, int b, float t) {
+  return (int)(a + (b - a) * t + 0.5f);
+}
+
+/* kHz → 本机 Hz：先按 hw/ref 缩放并钳到 [floor, hw]，再按权重 w 从原值过渡。
+   w 用状态级别 t（SUSTAINED 被钳到 0.45，热降档不许因级别高反而抬频）。 */
+/* 注意单位：policy 的 hw_max/hw_min 与包络表都是 kHz（内核 cpufreq 口径）。 */
+static long fsm_scale_khz(long khz, long hw, long floor, int ref, float w) {
+  if (khz <= 0) return floor > 0 ? floor : 300000L;
+  long scaled = (long)((long long)khz * hw / (ref > 0 ? ref : 1));
+  if (scaled > hw) scaled = hw;
+  if (scaled < floor) scaled = floor;
+  long v = khz + (long)((double)(scaled - khz) * w);
+  if (v > hw) v = hw;
+  if (v < floor) v = floor;
+  return v;
+}
+
+static long fsm_clamp_floor_hz(long khz_hz, long hw, long floor) {
+  if (floor > 0 && khz_hz < floor) khz_hz = floor;
+  if (hw > 0 && khz_hz > hw) khz_hz = hw;
+  return khz_hz;
+}
+
+/* slot 1 = 最高频簇（大核包络），0 = 其余（小核包络）。
+   返回该状态的目标上限/下限（Hz）。 */
+static void fsm_caps_of(int slot, int state, long hw_max, long hw_min,
+                        long *out_max, long *out_min) {
+  int a = cfg.fsm_alpha;
+  if (a < 0) a = 0;
+  if (a > 1000) a = 1000;
+  if (state < 0 || state >= SMART_STATE_COUNT) state = SMART_DEEP_IDLE;
+  const float t = kFsmLevel[state];
+  int ref = slot ? FSM_REF_MAX_B : FSM_REF_MAX_L;
+  int maxK = fsm_lerp(fsm_blend(slot ? kBalMaxB_F : kBalMaxL_F,
+                                slot ? kBatMaxB_F : kBatMaxL_F, a),
+                      fsm_blend(slot ? kBalMaxB_C : kBalMaxL_C,
+                                slot ? kBatMaxB_C : kBatMaxL_C, a), t);
+  int minK = fsm_lerp(fsm_blend(slot ? kBalMinB_F : kBalMinL_F,
+                                slot ? kBatMinB_F : kBatMinL_F, a),
+                      fsm_blend(slot ? kBalMinB_C : kBalMinL_C,
+                                slot ? kBatMinB_C : kBatMinL_C, a), t);
+  float w = t;
+  if (state == SMART_SUSTAINED && w > 0.45f) w = 0.45f;
+  long floor = hw_min > 0 ? hw_min : 300000L;
+  long hw = hw_max > 0 ? hw_max : 0;
+  long mx = (hw > 0) ? fsm_scale_khz((long)maxK, hw, floor, ref, w) : (long)maxK;
+  long mn = fsm_clamp_floor_hz((long)minK, hw, floor);
+  if (mn > mx) mn = mx;
+  if (out_max) *out_max = mx;
+  if (out_min) *out_min = mn;
+}
+
 static int fsm_ticks_from_s(int sec) {
   return sec > 0 ? (sec + kSmartTickSec - 1) / kSmartTickSec : 0;
 }
@@ -1287,6 +1373,9 @@ static int g_prime_state = -1;
 static int g_smart_warmup;
 /* 1 = 本拍前台命中游戏名单（smart_tick 每拍刷新，FSM 用它直判 GAMING）。 */
 static int g_smart_game_hint;
+/* 本拍放电电流（mA）与充电态：ASB 的电流闸门用（充电/读不到 → 旁路）。 */
+static int g_fsm_cur_ma;
+static int g_fsm_chg;
 /* 上一次「前台:」日志的时间（毫秒），做 60s 心跳。 */
 static long g_smart_fg_log_ms;
 #ifdef SF_TEST
@@ -1641,6 +1730,8 @@ static int smart_fsm_desired(int cpu, int gpu, int temp, int fg_not_game,
   else if (g_fsm_psi >= 0 && cfg.fsm_psi_mod > 0 && g_fsm_psi >= cfg.fsm_psi_mod)
     cpu_mod = 1;
   int cpu_some = cpu >= 0 && cpu >= 50;
+  /* ASB 电流佐证：只有"放电且读得到"时才作为闸门，充电/读不到一律旁路 */
+  int ma_valid = g_fsm_cur_ma > 0 && !g_fsm_chg;
   int gpu_game_in = cfg.fsm_gpu_game_in > 0 ? cfg.fsm_gpu_game_in : 90;
   int gpu_game_out = cfg.fsm_gpu_game_out > 0 ? cfg.fsm_gpu_game_out : 78;
   int gpu_hi_in = cfg.fsm_gpu_hi_in > 0 ? cfg.fsm_gpu_hi_in : 80;
@@ -1666,8 +1757,10 @@ static int smart_fsm_desired(int cpu, int gpu, int temp, int fg_not_game,
   else if (gaming_by_gpu)
     d = g_sm.gaming_streak >= 6 ? SMART_GAMING : SMART_HEAVY;
   else if (cpu_heavy || (gpu_heavy && cpu_some))
-    d = SMART_HEAVY;
-  else if (cpu_mod || gpu_heavy)
+    /* 高负载还得电流跟上才算真重载（ASB fsm_desired） */
+    d = (!ma_valid || g_fsm_cur_ma >= cfg.fsm_cur_heavy) ? SMART_HEAVY : SMART_MODERATE;
+  else if (cpu_mod || gpu_heavy ||
+           (cpu < 0 && ma_valid && g_fsm_cur_ma >= cfg.fsm_cur_mod))
     d = SMART_MODERATE;
   else
     d = SMART_LIGHT_IDLE;
@@ -1805,6 +1898,12 @@ static int smart_tick_ex(int busy, int gpu, int temp, int screen_on,
 
 static int smart_tick(int app_switch, int game_hint) {
   g_smart_game_hint = game_hint ? 1 : 0;
+  g_fsm_cur_ma = (int)batt_current_ma_now();
+  {
+    struct adapt a;
+    adapt_snapshot(&a);
+    g_fsm_chg = a.charging ? 1 : 0;
+  }
   if (g_smart_warmup) {
     app_switch = 1;
     g_smart_warmup = 0;
@@ -1882,7 +1981,28 @@ static void assign_pct(struct policy *p, int n) {
     p[i].pct = eff;
     p[i].tier = tierkey;
     long vendor = p[i].vendor_max;
-    p[i].cap = cap_floor_apply(&p[i], snap_freq(&p[i], cap_from_pct(&p[i], eff)));
+    p[i].fsm_min_hz = 0;
+    if (cfg.strategy == 1 && cfg.fsm_bounds && !big_min_hit) {
+      /* ASB/Kin 频阶模型：按状态级别在两条包络间取值，再按本机峰值缩放。
+         用户天花板仍然生效：模型上限只做「不许超过 CPU_PCT_*」的收紧。 */
+      int st = smart_effective_state(tierkey, g_sm.fsm, g_prime_state, m);
+      long mx, mn;
+      fsm_caps_of((tierkey & 3) == 0 ? 1 : 0, st, p[i].hw_max, p[i].hw_min, &mx, &mn);
+      /* 用户天花板 = CPU_PCT_*（实时偏移后），不是状态目标：
+         模型只在"不越过用户设定"的前提下决定状态给多少。 */
+      long user_ceil = cap_from_pct(&p[i], eff_pct(cfg.pct[tierkey], 0));
+      if (mx > user_ceil) mx = user_ceil;
+      p[i].cap = cap_floor_apply(&p[i], snap_freq(&p[i], mx));
+      p[i].fsm_min_hz = mn;
+      pct = p[i].hw_max > 0 ? (int)(p[i].cap * 100 / p[i].hw_max) : 1;
+      if (pct < 1) pct = 1;
+      if (pct > 100) pct = 100;
+      eff = pct;
+      p[i].tpct = pct;
+      p[i].pct = eff;
+    } else {
+      p[i].cap = cap_floor_apply(&p[i], snap_freq(&p[i], cap_from_pct(&p[i], eff)));
+    }
     /* 精简：同一组（生效% + 封顶）只打一次；LOG_VERBOSE=1 恢复每拍打 */
     if (cfg.log_verbose || p[i].log_cap != p[i].cap || p[i].log_eff != eff) {
       p[i].log_cap = p[i].cap;
@@ -6177,8 +6297,15 @@ static void cpu_min_patrol(void) {
     if (g_pol[i].hw_min <= 0) continue;
     long user_target = user_min_for(&g_pol[i]);
     int grp = (g_pol[i].tier & 3) == 0 ? 0 : 1;
-    int fm = cfg.strategy == 1 ? cfg.fsm_min[g_sm.fsm][grp] : 0;
-    long fsm_target = fm > 0 ? g_pol[i].hw_max * fm / 100 : 0;
+    long fsm_target = 0;
+    if (cfg.strategy == 1) {
+      if (cfg.fsm_bounds && g_pol[i].fsm_min_hz > 0 && user_target <= 0) {
+        fsm_target = g_pol[i].fsm_min_hz;   /* ASB/Kin：下限也来自包络 */
+      } else {
+        int fm = cfg.fsm_min[g_sm.fsm][grp];
+        fsm_target = fm > 0 ? g_pol[i].hw_max * fm / 100 : 0;
+      }
+    }
     if (fsm_target > 0) {
       if (fsm_target > g_pol[i].cap) fsm_target = g_pol[i].cap;
       if (fsm_target < g_pol[i].hw_min) fsm_target = g_pol[i].hw_min;
@@ -6414,6 +6541,10 @@ static void load_cfg(void) {
   cfg.cpu_min_lock = 0;
   cfg.fsm_game_hint = 1;
   cfg.log_verbose = 0;
+  cfg.fsm_bounds = 1;
+  cfg.fsm_alpha = 0;
+  cfg.fsm_cur_heavy = 150;
+  cfg.fsm_cur_mod = 120;
   cfg.cap_backend = CAP_BE_AUTO;
   /* 熄屏策略：基准 keep（旧行为）。全新安装的 conf 写 uncap */
   cfg.screen_uncap = 0;
@@ -6439,8 +6570,8 @@ static void load_cfg(void) {
   cfg.fsm_dwell_sustain_s = cfg.fsm_thermal_hold_s = 0;
   cfg.fsm_temp_in = 54; cfg.fsm_temp_out = 48;
   cfg.fsm_psi_mod = 30; cfg.fsm_psi_hi = 50;
-  cfg.fsm_skin_hi = 46; cfg.fsm_skin_lo = 42;
-  cfg.fsm_adpf_hi = 85;
+  cfg.fsm_skin_hi = 0; cfg.fsm_skin_lo = 0;   /* 对齐 ASB：只用 CPU 温度，皮肤温/ADPF 默认关 */
+  cfg.fsm_adpf_hi = 0;
   cfg.fsm_hr_soft = 70; cfg.fsm_hr_hard = 45;
   /* 按簇给不同的升降频节奏。这组等于均衡基准，gov_rate_for() */
   cfg.gov_up_us[0] = 500; cfg.gov_down_us[0] = 0;
@@ -6633,6 +6764,11 @@ static void load_cfg(void) {
     cfg.big_min = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("BIG_OFFLINE", v) == 0)
     cfg.big_offline = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("FSM_BOUNDS", v) == 0)
+    cfg.fsm_bounds = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("FSM_ALPHA", v) == 0) cfg.fsm_alpha = clampi(atoi(v), 0, 1000, 0);
+  if (cfg_get("FSM_CUR_HEAVY", v) == 0) cfg.fsm_cur_heavy = clampi(atoi(v), 0, 3000, 150);
+  if (cfg_get("FSM_CUR_MOD", v) == 0) cfg.fsm_cur_mod = clampi(atoi(v), 0, 3000, 120);
   if (cfg_get("LOG_VERBOSE", v) == 0)
     cfg.log_verbose = (!strcmp(v, "1") || !strcasecmp(v, "true")) ? 1 : 0;
   if (cfg_get("FSM_GAME_HINT", v) == 0)
