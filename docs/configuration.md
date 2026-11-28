@@ -16,6 +16,10 @@
 | `GPU_PCT` | 45 | GPU 封顶百分比 |
 | `STRATEGY` | cap | `cap` 固定百分比封顶；`smart` 六态智能调度，`CPU_PCT_*` 只当天花板 |
 | `APP_SWITCH_TIER` | 2 | 智能模式切前台首拍预热档：0=关、1=轻载、2=中载(85%)、3=重载；只升不降 |
+| `PROBE_CADENCE` | 1 | 多窗口扫描节流：重载/高负载 8s、中等 25s、安静 120s（省 fork） |
+| `QUIET_NIGHT` / `QUIET_NIGHT_S` | 1 / 300 | 夜间静默：学到的夜间窗口里息屏，巡检拉长到 N 秒 |
+| `IDLE_UCLAMP` | 18 | 息屏把 background 组 uclamp.max 收到 N%（只压不抬，亮屏还原） |
+| `APP_PROFILE` | 1 | 画像自动匹配：未显式配置的应用落到「其他」档（tool） |
 | `FSM_LEARN` | 1 | 智能模式会话学习：按 ASB 的方向信号漂移 alpha（热/掉电/重载/热否决↑，干净凉快↓） |
 | `FSM_LEARN_RATE` | 100 | 学习率（千分比）：100 = 每次会话只走信号的 10% |
 | `CAP_MIN_FOLLOW` | 1 | 限频模式跟随下限（Scene 式）：上限不变，下限随负载在硬件最低与封顶×N% 之间移动 |
@@ -205,6 +209,20 @@ PSI 争用、皮肤/外壳温也参与选档；ADPF 从 `/data/adb/soc_freqcap/a
 同一簇 60 秒最多一条、`下限原值顶住封顶` 每簇只报一次、预热和状态切换不再各打一行。
 
 排查"为什么是这个值"时把 `LOG_VERBOSE` 改成 1（隐藏项），恢复每拍明细。
+
+### 探测节流 / 夜间静默 / 空闲 uclamp / 画像
+
+- **探测节流**（`PROBE_CADENCE`）：只有"游戏不是顶层包"时才需要扫多窗口，按活动度分 8s/25s/120s
+  三档缓存（ASB V64 同思路），省掉大量 dumpsys fork；关掉就回到每次强制扫描。
+- **夜间静默**（`QUIET_NIGHT`）：学到的夜间窗口（或固定 23–6）里息屏，巡检间隔拉长到
+  `QUIET_NIGHT_S`（默认 300s），屏幕唤醒检测也随之变慢——夜里没人看屏幕。
+- **空闲 uclamp**（`IDLE_UCLAMP=18`）：息屏把 `background` / `system-background` 的
+  `uclamp.max` 收到 18%（只压不抬，写进账本，亮屏还原）。对应 ASB V64 的 DEEP_IDLE 背景封顶：
+  一个被唤醒的同步任务不能再向调度器要三成峰值算力。
+- **画像自动匹配**（`APP_PROFILE`）：前台应用按 `游戏名单 → 视频/社交/阅读 → 其他(tool)` 自动归画像；
+  显式 `app_modes.conf` 档位优先。「其他」档的数值用 `app_categories.conf` 的
+  `tool_cpu` / `tool_cpu_big` / `tool_gpu` 配（默认 0 = 不覆盖）。切换时会打
+  `前台: com.x → 画像档[tool]`。
 
 ### 智能模式会学习（`FSM_LEARN`，完整 ASB Smart）
 

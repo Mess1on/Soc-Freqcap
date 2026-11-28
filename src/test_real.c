@@ -1089,6 +1089,64 @@ int sf_test_main(void) {
              "皮肤凉时热否决只加一半（100→50）", NULL);
   }
 
+  printf("\n== 夜间窗口自学 / App 发热表 ==\n");
+  {
+    sf_check(min_in_window(1380, 1365, 400) == 1, "23:00 落在 [22:45,06:40)", NULL);
+    sf_check(min_in_window(60, 1365, 400) == 1, "01:00 在窗口内", NULL);
+    sf_check(min_in_window(720, 1365, 400) == 0, "12:00 不在窗口内", NULL);
+
+    int v = -1;
+    night_ewma(&v, 1380);
+    sf_check(v == 1380, "夜间 EWMA：第一个样本直接采用", NULL);
+    night_ewma(&v, 1381);
+    sf_check(v == 1380, "夜间 EWMA：+1 分钟不足 1/4 不动", NULL);
+    v = 10;
+    night_ewma(&v, 1430);
+    sf_check(v == 5, "夜间 EWMA：跨零点取最短弧（1430→5）", NULL);
+
+    g_nt_sleep = 1380; g_nt_wake = 420; g_nt_samples = 3;
+    sf_check(night_ready() == 1, "满 3 晚窗口就绪", NULL);
+    sf_check(min_in_window((g_nt_sleep - NIGHT_MARGIN_PRE + 1440) % 1440,
+                           1365, 400) == 1,
+             "入睡前 15 分钟已在窗口内", NULL);
+
+    memset(g_hot, 0, sizeof g_hot);
+    g_hot_loaded = 1;
+    unsigned h = fg_hash("com.test.game");
+    hot_bump(h, 100);
+    hot_bump(h, 100);
+    sf_check(hot_score(h, 100) == 4, "热 App：两次升温 = 4 分", NULL);
+    sf_check(hot_score(h, 103) == 1, "热 App：3 天后衰减到 1 分", NULL);
+    sf_check(hot_score(fg_hash("com.other"), 100) == 0, "未记录包 = 0 分", NULL);
+    memset(g_hot, 0, sizeof g_hot);
+  }
+
+  printf("\n== 探测节流 / 画像自动匹配 ==\n");
+  {
+    int save = cfg.probe_cadence;
+    cfg.probe_cadence = 0;
+    sf_check(multi_window_ttl_s() == 0, "关掉节流 = 每次都扫（返回 0）", NULL);
+    cfg.probe_cadence = 1;
+    g_sm.fsm = SMART_HEAVY;
+    sf_check(multi_window_ttl_s() == 8, "重载态 → 8s 档", NULL);
+    g_sm.fsm = SMART_LIGHT_IDLE;
+    cfg.probe_cadence = save;
+
+    int save_prof = cfg.app_profile;
+    cfg.app_profile = 1;
+    memset(g_catpkgs, 0, sizeof g_catpkgs);
+    g_ncatpkg = 0;
+    category_apply("com.example.unknown");
+    sf_check(g_cat_idx == CAT_TOOL, "未配置的应用 → 画像档[tool]", NULL);
+    sf_check(g_cat_names[CAT_TOOL] && !strcmp(g_cat_names[CAT_TOOL], "tool"),
+             "画像档名与 Kin 一致（tool）", NULL);
+    cfg.app_profile = 0;
+    category_apply("com.example.unknown");
+    sf_check(g_cat_idx == -1, "关掉自动匹配 → 回到无画像", NULL);
+    cfg.app_profile = save_prof;
+    g_cat_idx = -1;
+  }
+
   printf("\n== 老 MTK GPU OPP 解析 ==\n");
   {
     const char *txt =

@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.5.4"
+#define SF_VERSION "2.5.5"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -181,6 +181,14 @@ struct cfg {
   /* 智能模式会话学习：1 = 按 ASB 的会话信号漂移 alpha */
   int fsm_learn;
   int fsm_learn_rate;   /* 千分比，默认 100 = 每次只动信号的 10% */
+  /* 前台/多窗口探测节流档位（ASB V64 ProbeCadence）：8s/25s/120s */
+  int probe_cadence;
+  /* 夜间静默轮询：夜间息屏时把巡检间隔拉长到 quiet_night_s */
+  int quiet_night, quiet_night_s;
+  /* DEEP_IDLE 背景 uclamp 上限（%，0/>=100 = 关） */
+  int idle_uclamp;
+  /* 未显式配置的应用自动套用「其他」画像档 */
+  int app_profile;
   /* CPU 封顶后端：auto=有 PPM/msm 节点就加第二道锁；sysfs=只写 sysfs */
   int cap_backend;
   /* 实时偏移（adapt.c）。都是"百分点"，只加在生效值上，不写回配置。 */
@@ -1471,9 +1479,174 @@ static int charge_aware_alpha(int a, int charging, int screen_on, int dc, int w,
   return a;
 }
 
+/* ── 夜间时段自学（ASB asb_governor.c night_window）──
+   学你实际的入睡/起床分钟数（EWMA 1/4，跨零点环绕），满 3 晚后替换固定 23–6 窗口。
+   入睡：傍晚(19:00–05:00)息屏持续 ≥1h；起床：累计黑屏 ≥3h 后亮屏，且亮屏撑过 10 分钟
+   （防半夜瞄一眼），落在 04:00–14:00 才认。窗口 = [入睡-15min, 起床-20min)。 */
+#define NIGHT_ONSET_HOLD_S  3600
+#define NIGHT_MIN_SLEEP_S   10800
+#define NIGHT_MIN_SAMPLES   3
+#define NIGHT_MARGIN_PRE    15
+#define NIGHT_MARGIN_POST   20
+#define NIGHT_WAKE_CONFIRM_S 600
+#define NIGHT_FILE          RUN_DIR "/night_window.conf"
+
+static int  g_nt_prev = -1;
+static int  g_nt_sleep = -1, g_nt_wake = -1, g_nt_samples;
+static int  g_nt_onset_done;
+static int  g_nt_off_min = -1, g_nt_pend_wake = -1;
+static long g_nt_off_since, g_nt_dark_acc, g_nt_pend_ts;
+static int  g_nt_loaded;
+
+static int minute_of_day(long now) {
+  time_t t = (time_t)now;
+  struct tm lt;
+  if (!localtime_r(&t, &lt)) return -1;
+  return lt.tm_hour * 60 + lt.tm_min;
+}
+
+static int min_in_window(int m, int from, int to) {
+  if (m < 0) return 0;
+  return (from > to) ? (m >= from || m < to) : (m >= from && m < to);
+}
+
+/* 跨零点环绕的 EWMA：1/4 步长 */
+static void night_ewma(int *cur, int sample) {
+  if (*cur < 0) { *cur = sample; return; }
+  int d = ((sample - *cur) % 1440 + 1440) % 1440;
+  if (d > 720) d -= 1440;
+  *cur = ((*cur + (d * 1) / 4) + 1440) % 1440;
+}
+
+static void night_load(void) {
+  if (g_nt_loaded) return;
+  g_nt_loaded = 1;
+  FILE *f = fopen(NIGHT_FILE, "r");
+  if (!f) return;
+  char line[64];
+  int v;
+  while (fgets(line, sizeof line, f)) {
+    if (sscanf(line, "sleep_min=%d", &v) == 1 && v >= -1 && v < 1440) g_nt_sleep = v;
+    else if (sscanf(line, "wake_min=%d", &v) == 1 && v >= -1 && v < 1440) g_nt_wake = v;
+    else if (sscanf(line, "samples=%d", &v) == 1 && v >= 0 && v <= 100000) g_nt_samples = v;
+  }
+  fclose(f);
+}
+
+static void night_save(void) {
+  FILE *f = fopen(NIGHT_FILE, "w");
+  if (!f) return;
+  fprintf(f, "sleep_min=%d\nwake_min=%d\nsamples=%d\n", g_nt_sleep, g_nt_wake, g_nt_samples);
+  fclose(f);
+}
+
+static int night_ready(void) {
+  return g_nt_samples >= NIGHT_MIN_SAMPLES && g_nt_sleep >= 0 && g_nt_wake >= 0;
+}
+
+static int night_active(long now) {
+  if (!night_ready()) return 0;
+  int m = minute_of_day(now);
+  if (m < 0) return 0;
+  int from = (g_nt_sleep - NIGHT_MARGIN_PRE + 1440) % 1440;
+  int to = (g_nt_wake - NIGHT_MARGIN_POST + 1440) % 1440;
+  return min_in_window(m, from, to);
+}
+
+/* 每拍观测屏幕状态；screen_on = 1/0，now = wall clock 秒 */
+static void night_tick(int screen_on, long now) {
+  night_load();
+  int on = screen_on ? 1 : 0;
+  if (g_nt_prev < 0) {
+    g_nt_prev = on;
+    if (!on) { g_nt_off_since = now; g_nt_off_min = minute_of_day(now); }
+    return;
+  }
+  if (on != g_nt_prev) {
+    if (!on) {                                  /* 亮→灭 */
+      long pend = g_nt_pend_ts > 0 ? now - g_nt_pend_ts : -1;
+      if (pend >= 0 && pend < NIGHT_WAKE_CONFIRM_S) {  /* 半夜瞄一眼：取消起床候选 */
+        g_nt_pend_wake = -1;
+        g_nt_pend_ts = 0;
+      }
+      g_nt_off_since = now;
+      g_nt_off_min = minute_of_day(now);
+      g_nt_onset_done = 0;
+    } else {                                    /* 灭→亮 */
+      long off = g_nt_off_since > 0 ? now - g_nt_off_since : 0;
+      if (off > 0) g_nt_dark_acc += off;
+      if (g_nt_dark_acc >= NIGHT_MIN_SLEEP_S) {
+        int m = minute_of_day(now);
+        if (min_in_window(m, 4 * 60, 14 * 60)) {
+          g_nt_pend_wake = m;
+          g_nt_pend_ts = now;
+        } else {
+          g_nt_dark_acc = 0;                    /* 不合理时段起床（小睡/出行）丢弃 */
+        }
+      }
+      g_nt_off_since = 0;
+    }
+    g_nt_prev = on;
+    return;
+  }
+  if (on) {
+    if (g_nt_pend_wake >= 0 && now - g_nt_pend_ts >= NIGHT_WAKE_CONFIRM_S) {
+      night_ewma(&g_nt_wake, g_nt_pend_wake);
+      if (g_nt_samples < 100000) g_nt_samples++;
+      log("夜间自学：起床 → %02d:%02d（样本=%d）",
+          g_nt_wake / 60, g_nt_wake % 60, g_nt_samples);
+      g_nt_pend_wake = -1;
+      g_nt_pend_ts = 0;
+      g_nt_dark_acc = 0;
+      night_save();
+    }
+    return;
+  }
+  if (!g_nt_onset_done && g_nt_off_since > 0 &&
+      g_nt_dark_acc < NIGHT_MIN_SLEEP_S &&
+      now - g_nt_off_since >= NIGHT_ONSET_HOLD_S &&
+      min_in_window(g_nt_off_min, 19 * 60, 5 * 60)) {
+    night_ewma(&g_nt_sleep, g_nt_off_min);
+    g_nt_onset_done = 1;
+    log("夜间自学：入睡 → %02d:%02d", g_nt_sleep / 60, g_nt_sleep % 60);
+    night_save();
+  }
+}
+
 /* ── 热趋势 + App 发热（ASB thermal trend / appheat）── */
 static int g_tr_c, g_tr_ts, g_tr_slope;
 static struct { unsigned hash; int score; long day; } g_hot[16];
+
+#define HOT_FILE RUN_DIR "/appheat.conf"
+static int g_hot_loaded;
+static void hot_save(void);
+
+static void hot_load(void) {
+  if (g_hot_loaded) return;
+  g_hot_loaded = 1;
+  FILE *f = fopen(HOT_FILE, "r");
+  if (!f) return;
+  unsigned h;
+  int sc;
+  long d;
+  int i = 0;
+  while (i < 16 && fscanf(f, "%u %d %ld", &h, &sc, &d) == 3) {
+    g_hot[i].hash = h;
+    g_hot[i].score = sc;
+    g_hot[i].day = d;
+    i++;
+  }
+  fclose(f);
+}
+
+static void hot_save(void) {
+  FILE *f = fopen(HOT_FILE, "w");
+  if (!f) return;
+  for (int i = 0; i < 16; i++)
+    if (g_hot[i].hash)
+      fprintf(f, "%u %d %ld\n", g_hot[i].hash, g_hot[i].score, g_hot[i].day);
+  fclose(f);
+}
 
 static unsigned fg_hash(const char *s) {
   unsigned h = 2166136261u;
@@ -1482,6 +1655,7 @@ static unsigned fg_hash(const char *s) {
 }
 static int hot_score(unsigned h, long day) {
   if (!h) return 0;
+  hot_load();
   for (int i = 0; i < 16; i++) {
     if (g_hot[i].hash != h) continue;
     long d = day - g_hot[i].day;
@@ -1489,6 +1663,7 @@ static int hot_score(unsigned h, long day) {
       g_hot[i].score -= (int)(d > 100 ? 100 : d);
       if (g_hot[i].score < 0) g_hot[i].score = 0;
       g_hot[i].day = day;
+      hot_save();                 /* 衰减也落盘，重启不回到旧分 */
     }
     return g_hot[i].score;
   }
@@ -1496,6 +1671,7 @@ static int hot_score(unsigned h, long day) {
 }
 static void hot_bump(unsigned h, long day) {
   if (!h) return;
+  hot_load();
   int slot = -1;
   for (int i = 0; i < 16; i++)
     if (g_hot[i].hash == h) { slot = i; break; }
@@ -1515,6 +1691,7 @@ static void hot_bump(unsigned h, long day) {
   }
   g_hot[slot].score += 2;                  /* 一次明显升温学习 +2 */
   if (g_hot[slot].score > 100) g_hot[slot].score = 100;
+  hot_save();
 }
 
 /* 斜率 bump：越陡越提前，满斜率 +120 */
@@ -1601,7 +1778,9 @@ static int lrn_alpha_now(int *out_raw, int *out_conf, int *out_bucket) {
 
   int night_ov = 0, lowbat_ov = 0, veto = 0;
   /* 夜间安静：息屏且未充电才强制（对齐 Kin：屏幕亮着不降体验） */
-  int night = (hour >= LRN_NIGHT_START || hour < LRN_NIGHT_END);
+  night_load();
+  int night = night_ready() ? night_active(now)
+                            : (hour >= LRN_NIGHT_START || hour < LRN_NIGHT_END);
   if (night && g_screen_off && !charging && a < LRN_NIGHT_ALPHA) {
     a = LRN_NIGHT_ALPHA;
     night_ov = 1;
@@ -2500,6 +2679,7 @@ static int smart_tick(int app_switch, int game_hint) {
   g_fsm_psi = psi_cpu_pct();
   g_fsm_skin = skin_temp_c();
   g_fsm_adpf = adpf_headroom();
+  night_tick(!g_screen_off, (long)time(NULL));
   if (!g_screen_off) {
     if (!g_ls.active) lrn_sess_begin();
     int td = g_fsm_skin > 0 ? g_fsm_skin : temp;
@@ -3543,6 +3723,38 @@ static int bg_uclamp_write(const char *path, const char *val) {
 }
 
 static int g_cpuset_static, g_cpuset_bg_cfg;
+
+#define IDLE_UCL_JOURNAL RUN_DIR "/idle_uclamp.saved"
+
+/* 息屏(DEEP_IDLE)把 background 组 uclamp.max 压到 18%（ASB V64）：
+   只是给调度器一个"别为看不见的同步任务要三成峰值算力"的上限，不抬任何组。 */
+static void idle_uclamp_apply(void) {
+  if (cfg.idle_uclamp <= 0 || cfg.idle_uclamp >= 100) return;
+  for (size_t i = 0; i < sizeof g_bg_umax / sizeof *g_bg_umax; i++) {
+    const char *p = g_bg_umax[i].path;
+    if (access(p, F_OK)) continue;
+    int scale = uclamp_max_scale(p);
+    if (!scale) continue;
+    char want[24];
+    if (scale == 100) snprintf(want, sizeof want, "%d", cfg.idle_uclamp);
+    else snprintf(want, sizeof want, "%ld", (cfg.idle_uclamp * 1024L + 50) / 100);
+    char cur[64] = {0};
+    if (!read_file(p, cur, sizeof cur)) {
+      trim(cur);
+      if (strcmp(cur, "max")) {
+        char *ce, *we;
+        double d = strtod(cur, &ce);
+        double target = strtod(want, &we);
+        if (ce != cur && we != want && d <= target) continue;   /* 只压不抬 */
+      }
+    }
+    str_write_journaled(IDLE_UCL_JOURNAL, p, want);
+  }
+}
+
+static void idle_uclamp_restore(void) {
+  str_restore_all(IDLE_UCL_JOURNAL, "熄屏 uclamp");
+}
 
 static void bg_light_apply(void) {
   if (!cfg.bg_light) { bg_light_restore(); return; }
@@ -5263,6 +5475,18 @@ static int foreground_pkg_throttled(char *out) {
   return foreground_pkg_throttled_ex(out, 0);
 }
 
+/* 多窗口扫描 TTL（ASB V64 / Kin ProbeCadence）：重载或 GPU/CPU 已起来 8s，
+   中等活动 25s，安静 120s。省掉的是"游戏不是顶层包时才用得上"的那次 fork。 */
+static int multi_window_ttl_s(void) {
+  if (!cfg.probe_cadence) return 0;          /* 0 = 每次强制探测（旧行为） */
+  int gpu = gpu_busy_pct();
+  int cpu = g_cpu_overall;
+  if (g_sm.fsm >= SMART_HEAVY) return 8;
+  if ((gpu >= 50) || (cpu >= 50)) return 8;
+  if ((gpu >= 25) || (cpu >= 30)) return 25;
+  return 120;
+}
+
 /* 包名比较：忽略进程后缀（:xxx）。部分游戏的前台窗口报的是 */
 static int pkg_base_eq(const char *a, const char *b) {
   size_t la = strcspn(a, ":");
@@ -5397,11 +5621,11 @@ static int load_app_modes_from(const char *path) {
 static void load_app_modes(void) { load_app_modes_from(MODE_FILE); }
 
 /* 应用分类：视频/社交/阅读。分类上限只压不抬，写入时与全局/应用档取更低。 */
-enum { CAT_VIDEO = 0, CAT_SOCIAL = 1, CAT_READING = 2, CAT_COUNT = 3 };
-static const char *const g_cat_names[CAT_COUNT] = {"video", "social", "reading"};
+enum { CAT_VIDEO = 0, CAT_SOCIAL = 1, CAT_READING = 2, CAT_TOOL = 3, CAT_COUNT = 4 };
+static const char *const g_cat_names[CAT_COUNT] = {"video", "social", "reading", "tool"};
 static int g_cat_cpu[CAT_COUNT][4] = {
-  {44, 44, 44, 44}, {55, 55, 55, 55}, {50, 50, 50, 50}};
-static int g_cat_gpu[CAT_COUNT] = {0, 0, 0};
+  {44, 44, 44, 44}, {55, 55, 55, 55}, {50, 50, 50, 50}, {0, 0, 0, 0}};
+static int g_cat_gpu[CAT_COUNT] = {0, 0, 0, 0};
 struct cat_pkg { char pkg[PKG_LEN]; int cat; };
 static struct cat_pkg g_catpkgs[MAX_PKG];
 static int g_ncatpkg;
@@ -5467,10 +5691,10 @@ static void cat_parse_file(const char *path, int with_packages) {
 
 static void cat_load_paths(const char *user, const char *defs) {
   for (int c = 0; c < CAT_COUNT; c++) {
-    int d = c == CAT_VIDEO ? 44 : c == CAT_SOCIAL ? 55 : 50;
+    int d = c == CAT_VIDEO ? 44 : c == CAT_SOCIAL ? 55 : c == CAT_TOOL ? 0 : 50;
     for (int t = 0; t < 4; t++) g_cat_cpu[c][t] = d;
   }
-  g_cat_gpu[CAT_VIDEO] = g_cat_gpu[CAT_SOCIAL] = g_cat_gpu[CAT_READING] = 0;
+  g_cat_gpu[CAT_VIDEO] = g_cat_gpu[CAT_SOCIAL] = g_cat_gpu[CAT_READING] = g_cat_gpu[CAT_TOOL] = 0;
   g_ncatpkg = 0;
   /* defaults 只提供按芯片算好的数值；包名归属仍以用户文件为准。 */
   if (defs) cat_parse_file(defs, 0);
@@ -5503,6 +5727,8 @@ static long cap_with_cat(const struct policy *p, long want) {
 
 static void category_apply(const char *pkg) {
   int cat = cat_lookup(pkg);
+  /* 画像自动匹配：没显式配置、也没命中分类的应用，落到「其他」档（默认 0 = 不覆盖） */
+  if (cat < 0 && cfg.app_profile && pkg && pkg[0]) cat = CAT_TOOL;
   g_cat_idx = cat;
   g_cat_gpu_cur = cat >= 0 ? g_cat_gpu[cat] : 0;
   for (int i = 0; i < g_npol; i++) {
@@ -6999,6 +7225,7 @@ static void enter_screen_off(void) {
                    !soff_full;
   int keep = global_cap || (have_mode && mpct == MODE_KEEP);
   g_screen_off = 1;
+  idle_uclamp_apply();                     /* 息屏：背景 uclamp 收到 18% */
   set_timer_slack(3000000000UL);
   g_scr_check = 0;
   g_deep = 0;
@@ -7056,6 +7283,7 @@ static void enter_screen_off(void) {
 static void leave_screen_off(void) {
   if (!g_screen_off) return;
   g_screen_off = 0;
+  idle_uclamp_restore();
   set_timer_slack(50000UL);
   g_scr_check = 0;
   g_deep = 0;
@@ -7157,6 +7385,10 @@ static void load_cfg(void) {
   cfg.cap_min_pct_hi = 75;
   cfg.fsm_learn = 1;
   cfg.fsm_learn_rate = 100;
+  cfg.probe_cadence = 1;
+  cfg.quiet_night = 1; cfg.quiet_night_s = 300;
+  cfg.idle_uclamp = 18;
+  cfg.app_profile = 1;
   cfg.cap_backend = CAP_BE_AUTO;
   /* 熄屏策略：基准 keep（旧行为）。全新安装的 conf 写 uncap */
   cfg.screen_uncap = 0;
@@ -7376,6 +7608,14 @@ static void load_cfg(void) {
     cfg.big_min = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("BIG_OFFLINE", v) == 0)
     cfg.big_offline = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("PROBE_CADENCE", v) == 0)
+    cfg.probe_cadence = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("QUIET_NIGHT", v) == 0)
+    cfg.quiet_night = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("QUIET_NIGHT_S", v) == 0) cfg.quiet_night_s = clampi(atoi(v), 60, 1800, 300);
+  if (cfg_get("IDLE_UCLAMP", v) == 0) cfg.idle_uclamp = clampi(atoi(v), 0, 100, 18);
+  if (cfg_get("APP_PROFILE", v) == 0)
+    cfg.app_profile = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("FSM_LEARN", v) == 0)
     cfg.fsm_learn = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("FSM_LEARN_RATE", v) == 0) cfg.fsm_learn_rate = clampi(atoi(v), 0, 1000, 100);
@@ -8317,7 +8557,12 @@ int main(int argc, char **argv) {
             }
           }
           publish_status();
-          sleep(g_deep ? cfg.idle_interval : cfg.soff_interval);
+          long nap = g_deep ? cfg.idle_interval : cfg.soff_interval;
+          /* 夜间静默：学到的夜间窗口里息屏，把巡检拉长（Kin quiet_night） */
+          if (cfg.quiet_night && night_active((long)time(NULL)) &&
+              cfg.quiet_night_s > nap)
+            nap = cfg.quiet_night_s;
+          sleep(nap);
           continue;
         }
         leave_screen_off();
@@ -8375,14 +8620,27 @@ int main(int argc, char **argv) {
     load_app_modes();
     int fg_rc = foreground_pkg_throttled(fg);
     /* 游戏态下 top-app PID 集合可能没变（小窗和游戏同进程组） */
-    if (fg_rc == 0 && !strcmp(g_state, "game") && !is_game(fg))
-      fg_rc = foreground_pkg_throttled_ex(fg, 1);
+    if (fg_rc == 0 && !strcmp(g_state, "game") && !is_game(fg)) {
+      /* 只有到点才扫描多窗口；没扫就沿用上一拍的游戏判断，别把游戏态误退掉 */
+      int ttl = multi_window_ttl_s();
+      int force = ttl == 0 || g_fg_probed_at == 0 ||
+                  mono_sec() - g_fg_probed_at >= ttl;
+      if (force) {
+        fg_rc = foreground_pkg_throttled_ex(fg, 1);
+      } else if (g_game[0]) {
+        snprintf(fg, PKG_LEN, "%s", g_game);
+        fg_rc = 0;
+      }
+    }
     int game = fg_rc == 0 && g_npkg && is_game(fg);
     uint64_t cat_stamp0 = g_cat_stamp;
     load_app_categories();
     int cat_prev = g_cat_idx;
     category_apply(fg);
     int cat_changed = (g_cat_idx != cat_prev) || (g_cat_stamp != cat_stamp0);
+    if (cat_changed)
+      log("前台: %s → 画像档[%s]", fg[0] ? fg : "-",
+          g_cat_idx >= 0 ? g_cat_names[g_cat_idx] : "-");
     /* 前台包名无条件记下来（命中名单与否都要）。 */
     int fg_changed = fg[0] && strcmp(fg, g_fg) != 0;
     if (fg[0]) snprintf(g_fg, sizeof g_fg, "%s", fg);

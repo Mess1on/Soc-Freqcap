@@ -3745,6 +3745,27 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
   ok(/int therm_w = \(g_ls.skin_max > 0 && g_ls.skin_max < 40\) \? 50 : 100;/.test(csrc),
      '热否决推力：皮肤 <40℃ 时减半（ASB V64）');
 
+  /* 探测节流 / 夜间静默 / 空闲 uclamp / 画像自动匹配 */
+  ok(/static int multi_window_ttl_s\(void\)/.test(csrc) &&
+     /if \(g_sm\.fsm >= SMART_HEAVY\) return 8;/.test(csrc) &&
+     /return 25;/.test(csrc) && /return 120;/.test(csrc),
+     '多窗口扫描 TTL：8s / 25s / 120s 三档');
+  ok(/cfg\.quiet_night && night_active\(\(long\)time\(NULL\)\)/.test(csrc) &&
+     /cfg\.quiet_night_s > nap/.test(csrc),
+     '夜间静默：学到的夜间窗口里息屏，巡检拉长到 QUIET_NIGHT_S');
+  ok(/static void idle_uclamp_apply\(void\)/.test(csrc) &&
+     /cfg\.idle_uclamp <= 0 \|\| cfg\.idle_uclamp >= 100/.test(csrc) &&
+     /idle_uclamp_restore\(\);/.test(csrc),
+     'DEEP_IDLE 背景 uclamp 收到 18%（只压不抬，亮屏还原）');
+  ok(/CAT_READING = 2, CAT_TOOL = 3, CAT_COUNT = 4/.test(csrc) &&
+     /"video", "social", "reading", "tool"/.test(csrc) &&
+     /cat < 0 && cfg\.app_profile/.test(csrc),
+     '画像档：video/social/reading/tool，未配置应用自动落 tool');
+  ok(/^PROBE_CADENCE=1$/m.test(conf) && /^QUIET_NIGHT=1$/m.test(conf) &&
+     /^IDLE_UCLAMP=18$/m.test(conf) && /^APP_PROFILE=1$/m.test(conf) &&
+     /PROBE_CADENCE/.test(apiSrc) && /APP_PROFILE/.test(apiSrc),
+     '四个新键：配置 / 接口 / 守护三处一致');
+
   /* 智能学习：12 桶 × 6 时段 / 置信度 / 衰减 / 回退链 / 覆盖 / 探索 */
   ok(/#define LRN_BUCKETS      12/.test(csrc) &&
      /lrn_bucket\(int dp, int weekend\) \{ return dp \* 2 \+ \(weekend \? 1 : 0\); \}/.test(csrc) &&
