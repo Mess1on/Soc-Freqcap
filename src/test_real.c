@@ -1004,6 +1004,49 @@ int sf_test_main(void) {
     cfg.cap_min_follow = save;
   }
 
+  printf("\n== 智能学习方向信号（fsm_learn_dt）==\n");
+  {
+    sf_check(fsm_learn_dt(85, 0, 0, 0, 0) == 80, "结温 ≥80 → +80（省电方向）", NULL);
+    sf_check(fsm_learn_dt(72, 0, 0, 0, 0) == 40, "结温 70~80 → +40", NULL);
+    sf_check(fsm_learn_dt(50, 1, 0, 0, 0) == 30, "掉电快 → +30", NULL);
+    sf_check(fsm_learn_dt(50, 0, 60, 0, 0) == 20, "重载占比 ≥50% → +20", NULL);
+    sf_check(fsm_learn_dt(50, 0, 0, 1, 0) == 100, "热否决 → +100", NULL);
+    sf_check(fsm_learn_dt(45, 0, 10, 0, 1) == -60, "干净凉快 → -60（更放开）", NULL);
+    sf_check(fsm_learn_dt(85, 1, 60, 1, 0) == 230, "多项叠加", NULL);
+  }
+
+  printf("\n== 学习分桶 / 衰减 / 置信度 ==\n");
+  {
+    sf_check(lrn_daypart(3) == 0 && lrn_daypart(7) == 1 && lrn_daypart(10) == 2 &&
+             lrn_daypart(14) == 3 && lrn_daypart(19) == 4 && lrn_daypart(22) == 5,
+             "daypart：睡/醒/上午/白天/傍晚/深夜六段", NULL);
+    sf_check(lrn_bucket(3, 0) == 6 && lrn_bucket(3, 1) == 7 &&
+             (lrn_bucket(3, 0) ^ 1) == lrn_bucket(3, 1),
+             "bucket = daypart*2 + weekend，反周末 = xor 1", NULL);
+
+    long now = (long)time(NULL);
+    sf_check(lrn_decay_x100(0) == 100 && lrn_decay_x100(now - 5L * 86400) == 100,
+             "衰减：7 天内 100%", NULL);
+    sf_check(lrn_decay_x100(now - 20L * 86400) == 70,
+             "衰减：20 天 = 100-70*13/30 = 70%", NULL);
+    sf_check(lrn_decay_x100(now - 37L * 86400) == 30,
+             "衰减：37 天端点 = 30%", NULL);
+    sf_check(lrn_decay_x100(now - 40L * 86400) == 0,
+             "衰减：超过 37 天归零", NULL);
+
+    memset(&g_lrn, 0, sizeof g_lrn);
+    g_lrn.loaded = 1;
+    g_lrn.obs[6] = LRN_OBS_FULL;      /* 满样本 */
+    g_lrn.last[6] = now;
+    g_lrn.dn[6] = 1;
+    sf_check(lrn_conf(6) == 1000, "置信度：obs 满 + 新鲜 = 1000", NULL);
+    g_lrn.obs[6] = LRN_OBS_FULL / 2;
+    sf_check(lrn_conf(6) == 500, "置信度：半个样本量 = 500", NULL);
+    g_lrn.obs[6] = 0;
+    sf_check(lrn_conf(6) == 0, "置信度：没学过 = 0", NULL);
+    memset(&g_lrn, 0, sizeof g_lrn);
+  }
+
   printf("\n== 老 MTK GPU OPP 解析 ==\n");
   {
     const char *txt =

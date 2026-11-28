@@ -3721,6 +3721,30 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /if \(game_hint\)[\s\S]{0,80}?d = SMART_GAMING;/.test(csrc) &&
      /g_smart_game_hint && want == SMART_GAMING/.test(csrc),
      '前台是游戏包时一拍进 GAMING，不等 GPU 6 拍确认');
+  /* 智能学习：12 桶 × 6 时段 / 置信度 / 衰减 / 回退链 / 覆盖 / 探索 */
+  ok(/#define LRN_BUCKETS      12/.test(csrc) &&
+     /lrn_bucket\(int dp, int weekend\) \{ return dp \* 2 \+ \(weekend \? 1 : 0\); \}/.test(csrc) &&
+     /lrn_daypart\(int hour\)/.test(csrc),
+     '学习分桶：daypart*2+weekend，共 12 桶');
+  ok(/static int lrn_decay_x100\(long last\)[\s\S]{0,300}?if \(days < 7\) return 100;[\s\S]{0,120}?if \(days > 37\) return 0;/.test(csrc) &&
+     /return 100 - \(int\)\(\(70 \* \(days - 7\)\) \/ 30\);/.test(csrc),
+     '学习衰减：7 天内 100%，7→37 天线性到 30%，之后归零');
+  ok(/int scale;[\s\S]{0,600}?int a = 500 \+ \(\(raw - 500\) \* scale\) \/ 1000;/.test(csrc) &&
+     /LRN_CONF_LOW/.test(csrc) && /LRN_CONF_HIGH/.test(csrc),
+     '生效 alpha = 500 + (raw-500)×effScale/1000（置信门控三段）');
+  ok(/int src = lrn_resolve\(bk\);/.test(csrc) &&
+     /bucket \^ 1/.test(csrc) && /lrn_class\(lrn_dp_of\(bucket\)\)/.test(csrc),
+     '回退链：EXACT → 反周末 → 弱 EXACT → 时段类 → 全局');
+  ok(/LRN_NIGHT_ALPHA  900/.test(csrc) && /LRN_VETO_ALPHA   700/.test(csrc) &&
+     /LRN_LOWBAT_ALPHA 800/.test(csrc) &&
+     /g_screen_off && !charging && a < LRN_NIGHT_ALPHA/.test(csrc),
+     '覆盖层：夜间 900 / 低电 800 / 热否决 700（夜间只在息屏未充电）');
+  ok(/LRN_EXPLORE_PCT  4/.test(csrc) && /LRN_REWARD_STEP  8/.test(csrc) &&
+     /g_ls.expl_off = dir \* LRN_EXPLORE_OFF;/.test(csrc),
+     'ε-greedy 探索 ±60 + 会话均流奖励 ±8');
+  ok(/LRN_FILE         RUN_DIR "\/smart_learn.conf"/.test(csrc) &&
+     /fprintf\(f, "%d %d %d %ld %d %d %d %d\\n"/.test(csrc),
+     '学习结果持久化到 run/smart_learn.conf（12 桶全套）');
   /* 智能模式封顶模型：完全对齐 ASB/Kin（级别 + 包络 + 本机缩放 + 电流闸门） */
   ok(/kFsmLevel\[SMART_STATE_COUNT\] = \{0\.0f, 0\.15f, 0\.45f, 0\.72f, 0\.62f, 1\.0f\}/.test(csrc) &&
      /kBalMaxB_F = 1881600/.test(csrc) && /kBatMaxB_C = 1632000/.test(csrc) &&

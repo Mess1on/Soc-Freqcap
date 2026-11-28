@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.5.2"
+#define SF_VERSION "2.5.3"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -178,6 +178,9 @@ struct cfg {
   int cap_min_follow;
   int cap_min_lo, cap_min_hi;          /* 负载阈值（%） */
   int cap_min_pct_lo, cap_min_pct_hi;  /* 相对当前封顶的百分比 */
+  /* 智能模式会话学习：1 = 按 ASB 的会话信号漂移 alpha */
+  int fsm_learn;
+  int fsm_learn_rate;   /* 千分比，默认 100 = 每次只动信号的 10% */
   /* CPU 封顶后端：auto=有 PPM/msm 节点就加第二道锁；sysfs=只写 sysfs */
   int cap_backend;
   /* 实时偏移（adapt.c）。都是"百分点"，只加在生效值上，不写回配置。 */
@@ -1252,6 +1255,388 @@ static const int kSmartFracM2Low[SMART_STATE_COUNT] = { 55, 75, 90, 100, 85, 100
 static const int kSmartFracM2Big[SMART_STATE_COUNT] = { 40, 60, 80, 100, 70, 100 };
 /* 状态 GPU 天花板：只和现有全局/分类/应用 GPU 取更低，不抬帽。 */
 static const int kSmartGpuPct[SMART_STATE_COUNT] = { 40, 45, 60, 85, 80, 100 };
+static int g_fsm_psi = -1, g_fsm_skin = -1, g_fsm_adpf = -1;
+
+/* ── 智能模式学习：ASB Smart 的完整移植（12 桶 × 6 时段 / 置信度 / 衰减 / 覆盖）
+ *
+ * 对照 kin-daemon AutoMode.hpp（alphaFor / beginSession / commitSession /
+ * confOf / decayX100 / resolveBucket）与 ASB asb_smart.h：
+ *   · bucket = daypart*2 + is_weekend（12 个），daypart 0..5 = 睡/醒/上午/白天/傍晚/深夜
+ *   · 学习值 alphaRaw 不钳在 0..1000（证据可以继续累积），生效值 = 500 + (raw-500)*effScale/1000
+ *   · 置信度 conf = obs/800 × 衰减，obs += 时长权×信任权/100（97% 滑窗，上限 4000）
+ *   · 衰减：7 天内 100%，7→37 天线性到 30%，超过 37 天 0
+ *   · 分级回退：EXACT → 反周末同时段 → 弱 EXACT → 同时段类 → 全局 → 中性 500
+ *   · 覆盖层（只上抬）：夜间息屏 900 / 低电 800 / 热否决 700（warm..veto 线性 +150）
+ *   · 方向信号（dt）：极热 +80 / 热 +40 / 掉电 +30 / 持续重载 +20 / 热否决 +100 / 干净凉快 -60
+ */
+#define LRN_BUCKETS      12
+#define LRN_OBS_FULL     800     /* 置信度满值（=8 个等效会话） */
+#define LRN_OBS_CAP      4000
+#define LRN_CONF_LOW     350
+#define LRN_CONF_HIGH    650
+#define LRN_NIGHT_ALPHA  900
+#define LRN_VETO_ALPHA   700
+#define LRN_LOWBAT_ALPHA 800
+#define LRN_DRAIN_MIN    600     /* 掉电判定要求亮屏 ≥600s */
+#define LRN_DRAIN_MA     1200
+#define LRN_COOL_TEMP    55
+#define LRN_HOT_TEMP     70
+#define LRN_VHOT_TEMP    80
+#define LRN_WARM_TEMP    45
+#define LRN_VETO_TEMP    60
+#define LRN_WARM_RAMP    150
+#define LRN_LOWBAT_PCT   20
+#define LRN_EXPLORE_PCT  4
+#define LRN_EXPLORE_OFF  60
+#define LRN_REWARD_STEP  8
+#define LRN_MAD_SCALE    60
+#define LRN_OBS_RETAIN   97
+#define LRN_NIGHT_START  23
+#define LRN_NIGHT_END    6
+#define LRN_FILE         RUN_DIR "/smart_learn.conf"
+
+enum { LRN_TW_DIRTY = 0, LRN_TW_NOISY = 15, LRN_TW_PARTIAL = 40, LRN_TW_CLEAN = 100 };
+
+static struct {
+  int   loaded;
+  int   alpha[LRN_BUCKETS];    /* alphaRaw：可越界累积 */
+  int   obs[LRN_BUCKETS];      /* eff_obs ×100 */
+  long  last[LRN_BUCKETS];     /* 最后学习时间（epoch 秒） */
+  int   dmean[LRN_BUCKETS];    /* dt 均值 ×100 */
+  int   dmad[LRN_BUCKETS];     /* dt 平均绝对偏差 ×100 */
+  int   dn[LRN_BUCKETS];       /* 样本数 */
+  int   base_ma[LRN_BUCKETS];  /* 该桶会话均流基线（mA，-1 = 未建立） */
+} g_lrn;
+
+/* 一个亮屏会话 */
+static struct {
+  int  active;
+  int  bucket;
+  int  batt_start;
+  int  td_max;          /* 决策温（皮肤优先）峰值 */
+  int  ticks;
+  int  heavy_ticks;
+  int  thermal_hit;
+  int  charged;
+  long cur_sum;
+  int  cur_n;
+  int  expl_dir;
+  int  expl_off;
+  long start_sec;
+} g_ls;
+
+static int lrn_daypart(int hour) {
+  if (hour < 6) return 0;
+  if (hour < 9) return 1;
+  if (hour < 12) return 2;
+  if (hour < 17) return 3;
+  if (hour < 21) return 4;
+  return 5;
+}
+
+static int lrn_bucket(int dp, int weekend) { return dp * 2 + (weekend ? 1 : 0); }
+static int lrn_dp_of(int bucket) { return bucket / 2; }
+
+static int lrn_class(int dp) {
+  if (dp == 0 || dp == 5) return 0;          /* 夜 */
+  if (dp >= 1 && dp <= 3) return 1;          /* 日 */
+  return 2;                                  /* 傍晚 */
+}
+
+/* 7 天内 100%，7→37 天线性到 30%，超过 37 天 0（与 ASB 端点一致） */
+static int lrn_decay_x100(long last) {
+  if (last <= 0) return 100;
+  long now = (long)time(NULL);
+  if (now <= last) return 100;
+  long days = (now - last) / 86400;
+  if (days < 7) return 100;
+  if (days > 37) return 0;
+  return 100 - (int)((70 * (days - 7)) / 30);
+}
+
+static int lrn_consistency(int i) {
+  int mad = (g_lrn.dmad[i] > 0) ? g_lrn.dmad[i] / 100 : 0;
+  return (int)(1000L * LRN_MAD_SCALE / (LRN_MAD_SCALE + mad));
+}
+
+static int lrn_conf(int i) {
+  if (i < 0 || i >= LRN_BUCKETS || g_lrn.obs[i] <= 0) return 0;
+  long ratio = (long)g_lrn.obs[i] * 1000 / LRN_OBS_FULL;
+  if (ratio > 1000) ratio = 1000;
+  long conf = ratio * lrn_decay_x100(g_lrn.last[i]) / 100;
+  if (g_lrn.dn[i] >= 3) conf = conf * lrn_consistency(i) / 1000;
+  return conf > 1000 ? 1000 : (int)conf;
+}
+
+/* EXACT → 反周末同时段 → 弱 EXACT → 同时段类 → 全局 → -1（中性 500） */
+static int lrn_resolve(int bucket) {
+  int cx = lrn_conf(bucket);
+  if (cx >= LRN_CONF_LOW) return bucket;
+  int alt = bucket ^ 1;
+  int ca = lrn_conf(alt);
+  if (ca >= LRN_CONF_LOW && ca > cx) return alt;
+  if (cx > 0 && cx >= ca) return bucket;
+  int cls = lrn_class(lrn_dp_of(bucket));
+  int best = -1, bestc = -1;
+  for (int i = 0; i < LRN_BUCKETS; i++) {
+    if (lrn_class(lrn_dp_of(i)) != cls) continue;
+    int c = lrn_conf(i);
+    if (c > bestc) { bestc = c; best = i; }
+  }
+  if (best >= 0 && bestc >= LRN_CONF_LOW) return best;
+  best = -1;
+  bestc = -1;
+  for (int i = 0; i < LRN_BUCKETS; i++) {
+    int c = lrn_conf(i);
+    if (c > bestc) { bestc = c; best = i; }
+  }
+  if (best >= 0 && bestc >= LRN_CONF_LOW) return best;
+  return -1;
+}
+
+static void lrn_load(void) {
+  if (g_lrn.loaded) return;
+  g_lrn.loaded = 1;
+  for (int i = 0; i < LRN_BUCKETS; i++) {
+    g_lrn.alpha[i] = 500;
+    g_lrn.base_ma[i] = -1;
+  }
+  FILE *f = fopen(LRN_FILE, "r");
+  if (!f) return;
+  int b, a, o, n, m, md, base;
+  long last;
+  while (fscanf(f, "%d %d %d %ld %d %d %d %d", &b, &a, &o, &last, &m, &md, &n, &base) == 8) {
+    if (b < 0 || b >= LRN_BUCKETS) continue;
+    g_lrn.alpha[b] = a;
+    g_lrn.obs[b] = o;
+    g_lrn.last[b] = last;
+    g_lrn.dmean[b] = m;
+    g_lrn.dmad[b] = md;
+    g_lrn.dn[b] = n;
+    g_lrn.base_ma[b] = base;
+  }
+  fclose(f);
+}
+
+static void lrn_save(void) {
+  FILE *f = fopen(LRN_FILE, "w");
+  if (!f) return;
+  for (int i = 0; i < LRN_BUCKETS; i++)
+    fprintf(f, "%d %d %d %ld %d %d %d %d\n", i, g_lrn.alpha[i], g_lrn.obs[i],
+            g_lrn.last[i], g_lrn.dmean[i], g_lrn.dmad[i], g_lrn.dn[i], g_lrn.base_ma[i]);
+  fclose(f);
+}
+
+/* 当前时段的桶 -> 生效 alpha（含覆盖层）。raw/conf 供状态与日志用。 */
+static int lrn_alpha_now(int *out_raw, int *out_conf, int *out_bucket) {
+  lrn_load();
+  time_t now = time(NULL);
+  struct tm tmv;
+  localtime_r(&now, &tmv);
+  int dp = lrn_daypart(tmv.tm_hour);
+  int bk = lrn_bucket(dp, tmv.tm_wday == 0 || tmv.tm_wday == 6);
+  int src = lrn_resolve(bk);
+  int raw = src >= 0 ? g_lrn.alpha[src] : 500;
+  int conf = src >= 0 ? lrn_conf(src) : 0;
+
+  int scale;
+  if (conf < LRN_CONF_LOW) scale = 250;
+  else if (conf < LRN_CONF_HIGH) scale = 250 + 350 * (conf - LRN_CONF_LOW) / (LRN_CONF_HIGH - LRN_CONF_LOW);
+  else scale = 600 + 400 * (conf - LRN_CONF_HIGH) / (1000 - LRN_CONF_HIGH);
+  if (scale < 0) scale = 0;
+  if (scale > 1000) scale = 1000;
+
+  int a = 500 + ((raw - 500) * scale) / 1000;
+
+  /* 会话内探索扰动（只影响本会话） */
+  if (g_ls.active && g_ls.expl_off != 0 && bk == g_ls.bucket) a += g_ls.expl_off;
+
+  struct adapt ad;
+  adapt_snapshot(&ad);
+  int charging = ad.charging ? 1 : 0;
+  int cap = ad.capacity;
+  int hour = tmv.tm_hour;
+
+  /* 夜间安静：息屏且未充电才强制（对齐 Kin：屏幕亮着不降体验） */
+  int night = (hour >= LRN_NIGHT_START || hour < LRN_NIGHT_END);
+  if (night && g_screen_off && !charging && a < LRN_NIGHT_ALPHA) a = LRN_NIGHT_ALPHA;
+  /* 低电：不充电且 ≤20% */
+  if (!charging && cap >= 0 && cap <= LRN_LOWBAT_PCT && a < LRN_LOWBAT_ALPHA) a = LRN_LOWBAT_ALPHA;
+  /* 热：皮肤优先的决策温；warm..veto 线性加，≥veto 直接 700 */
+  int td = g_fsm_skin > 0 ? g_fsm_skin : (ad.temp_m > 0 ? ad.temp_m / 1000 : -1);
+  if (td >= 0) {
+    if (td > LRN_WARM_TEMP && td < LRN_VETO_TEMP) {
+      int span = LRN_VETO_TEMP - LRN_WARM_TEMP;
+      if (span > 0) a += (LRN_WARM_RAMP * (td - LRN_WARM_TEMP)) / span;
+    }
+    if (td >= LRN_VETO_TEMP && a < LRN_VETO_ALPHA) a = LRN_VETO_ALPHA;
+  }
+  if (a < 0) a = 0;
+  if (a > 1000) a = 1000;
+  if (out_raw) *out_raw = raw;
+  if (out_conf) *out_conf = conf;
+  if (out_bucket) *out_bucket = bk;
+  return a;
+}
+
+static int fsm_alpha_eff(void) {
+  if (!cfg.fsm_learn) return cfg.fsm_alpha;   /* 关学习：固定配置值 */
+  return lrn_alpha_now(NULL, NULL, NULL);
+}
+
+/* 方向信号（可单测）：极热/热/掉电/持续重载/热否决推省电，干净凉快拉回放开 */
+static int fsm_learn_dt(int max_temp, int drainy, int heavy_pct, int thermal_hit, int clean) {
+  int dt = 0;
+  if (max_temp >= LRN_VHOT_TEMP)      dt += 80;
+  else if (max_temp >= LRN_HOT_TEMP)  dt += 40;
+  if (drainy) dt += 30;
+  if (heavy_pct >= 50) dt += 20;
+  if (thermal_hit) dt += 100;
+  if (clean) dt -= 60;
+  return dt;
+}
+
+static int lrn_dur_weight(long dur) {
+  if (dur < 600) return 25;
+  if (dur < 1800) return 50;
+  if (dur < 5400) return 100;
+  return 125;
+}
+
+/* 会话开始：记录起始桶/电量/温，按 ε-greedy 决定是否给本会话一个探索偏移 */
+static void lrn_sess_begin(void) {
+  lrn_load();
+  memset(&g_ls, 0, sizeof g_ls);
+  g_ls.active = 1;
+  g_ls.start_sec = (long)time(NULL);
+  struct adapt ad;
+  adapt_snapshot(&ad);
+  g_ls.batt_start = ad.capacity;
+  g_ls.td_max = (g_fsm_skin > 0) ? g_fsm_skin : (ad.temp_m > 0 ? ad.temp_m / 1000 : -1);
+  time_t now = time(NULL);
+  struct tm tmv;
+  localtime_r(&now, &tmv);
+  g_ls.bucket = lrn_bucket(lrn_daypart(tmv.tm_hour),
+                           tmv.tm_wday == 0 || tmv.tm_wday == 6);
+  g_ls.expl_dir = 0;
+  g_ls.expl_off = 0;
+  if (cfg.fsm_learn && lrn_conf(g_ls.bucket) >= LRN_CONF_LOW &&
+      (rand() % 100) < LRN_EXPLORE_PCT) {
+    int perf_safe = !ad.charging &&
+                    (ad.capacity < 0 || ad.capacity > LRN_LOWBAT_PCT) &&
+                    (g_ls.td_max < 0 || g_ls.td_max < LRN_WARM_TEMP);
+    int dir = (perf_safe && (rand() % 3 != 0)) ? -1 : 1;   /* 偏性能侧探索，安全时三分之二 */
+    g_ls.expl_dir = dir;
+    g_ls.expl_off = dir * LRN_EXPLORE_OFF;
+  }
+}
+
+/* 每拍累计 */
+static void lrn_sess_tick(int td, int cur_ma, int heavy) {
+  if (!g_ls.active) return;
+  if (td > g_ls.td_max) g_ls.td_max = td;
+  g_ls.ticks++;
+  if (heavy) g_ls.heavy_ticks++;
+  if (td >= 0 && td >= LRN_VETO_TEMP) g_ls.thermal_hit = 1;
+  if (cur_ma > 0) {
+    g_ls.cur_sum += cur_ma;
+    g_ls.cur_n++;
+  }
+}
+
+/* 会话结算：信任分级 → obs/衰减 → 方向信号 → alphaRaw += dt*rate/1000（+探索奖励） */
+static void lrn_sess_commit(void) {
+  if (!g_ls.active) return;
+  g_ls.active = 0;
+  if (!cfg.fsm_learn) return;
+
+  long now = (long)time(NULL);
+  long dur = now - g_ls.start_sec;
+  struct adapt ad;
+  adapt_snapshot(&ad);
+  int charging = ad.charging ? 1 : 0;
+  int dp = lrn_dp_of(g_ls.bucket);
+  g_ls.charged = charging;
+
+  int trust;
+  if (dur < 60 || g_ls.ticks < 3 || charging)            trust = LRN_TW_DIRTY;
+  else if (dp == 0 || dp == 5)                            trust = LRN_TW_NOISY;
+  else if (g_ls.td_max >= 0 && g_ls.td_max < LRN_COOL_TEMP && g_ls.ticks >= 5)
+                                                          trust = LRN_TW_CLEAN;
+  else                                                    trust = LRN_TW_PARTIAL;
+  if (trust == LRN_TW_DIRTY) {
+    log("智能学习：会话脏（%lds / %d 拍 / 充电%d），不学", dur, g_ls.ticks, charging);
+    return;
+  }
+
+  int bk = g_ls.bucket;
+  int eff_add = lrn_dur_weight(dur) * trust / 100;
+  if (eff_add <= 0) return;
+  long decayed = (long)g_lrn.obs[bk] * LRN_OBS_RETAIN / 100;
+  g_lrn.obs[bk] = (int)(decayed + eff_add);
+  if (g_lrn.obs[bk] > LRN_OBS_CAP) g_lrn.obs[bk] = LRN_OBS_CAP;
+  g_lrn.last[bk] = now;
+
+  int drain_rate = -1;
+  if (g_ls.batt_start >= 0 && ad.capacity >= 0 && g_ls.batt_start >= ad.capacity && dur > 0)
+    drain_rate = (int)((long)(g_ls.batt_start - ad.capacity) * 3600 / dur);
+  int avg_ma = g_ls.cur_n > 0 ? (int)(g_ls.cur_sum / g_ls.cur_n) : -1;
+  int drainy = (dur >= LRN_DRAIN_MIN) &&
+               ((drain_rate >= 14) || (avg_ma >= LRN_DRAIN_MA));
+  int heavy_pct = g_ls.ticks > 0 ? g_ls.heavy_ticks * 100 / g_ls.ticks : 0;
+  int sustained = heavy_pct >= 50;
+  int clean = (g_ls.td_max >= 0 && g_ls.td_max < LRN_COOL_TEMP && trust == LRN_TW_CLEAN);
+
+  int dt = fsm_learn_dt(g_ls.td_max, drainy, sustained ? 50 : 0, g_ls.thermal_hit, clean);
+
+  /* 桶内一致性：dt 的 EWMA 均值与 MAD（×100，α=1/8） */
+  {
+    int dt100 = dt * 100;
+    if (g_lrn.dn[bk] == 0) {
+      g_lrn.dmean[bk] = dt100;
+      g_lrn.dmad[bk] = 0;
+    } else {
+      int diff = dt100 - g_lrn.dmean[bk];
+      g_lrn.dmean[bk] += diff / 8;
+      int ad2 = diff < 0 ? -diff : diff;
+      g_lrn.dmad[bk] += (ad2 - g_lrn.dmad[bk]) / 8;
+    }
+    if (g_lrn.dn[bk] < 1000000) g_lrn.dn[bk]++;
+  }
+
+  int lr = cfg.fsm_learn_rate;
+  if (lr < 1) lr = 1;
+  if (lr > 1000) lr = 1000;
+  int move = dt * lr / 1000;
+
+  /* 探索奖励：拿本会话均流与该桶基线比，省电侧真省到才奖，否则罚 */
+  int rew = 0;
+  if (!charging && trust >= LRN_TW_PARTIAL && avg_ma > 0) {
+    int base = g_lrn.base_ma[bk];
+    if (g_ls.expl_dir != 0 && base > 0) {
+      int thr = base / 20 > 30 ? base / 20 : 30;
+      int delta = avg_ma - base;
+      int thermal_bad = g_ls.thermal_hit || (g_ls.td_max >= LRN_HOT_TEMP);
+      if (g_ls.expl_dir > 0)
+        rew = (delta <= -thr && !thermal_bad) ? LRN_REWARD_STEP : -LRN_REWARD_STEP;
+      else
+        rew = (delta <= thr && !thermal_bad) ? -LRN_REWARD_STEP : LRN_REWARD_STEP;
+    }
+    g_lrn.base_ma[bk] = base > 0 ? (base * 3 + avg_ma) / 4 : avg_ma;
+  }
+
+  int before = g_lrn.alpha[bk];
+  g_lrn.alpha[bk] = before + move + rew;
+  lrn_save();
+
+  log("智能学习：桶%d alpha %d→%d（dt=%d lr=%d 探索=%d 奖励=%d 均流=%dmA "
+      "峰温=%d 热否决=%d 掉电=%d%%/h obs=%d conf=%d）",
+      bk, before, g_lrn.alpha[bk], dt, lr, g_ls.expl_dir, rew, avg_ma,
+      g_ls.td_max, g_ls.thermal_hit ? 1 : 0, drain_rate, g_lrn.obs[bk], lrn_conf(bk));
+  g_ls.expl_dir = 0;
+  g_ls.expl_off = 0;
+}
+
 /* ── ASB / Kin 频阶模型（逐行对齐 kin-daemon AutoFsm::computeCaps）────────
    状态级别 t 在 [balanced, battery] 两条包络间按 alpha 混合，再按本机
    cpuinfo_max_freq / SM8650 参考峰值缩放：空闲保持参考值，重载才吃满本机峰值。
@@ -1304,7 +1689,7 @@ static long fsm_clamp_floor_hz(long khz_hz, long hw, long floor) {
    返回该状态的目标上限/下限（Hz）。 */
 static void fsm_caps_of(int slot, int state, long hw_max, long hw_min,
                         long *out_max, long *out_min) {
-  int a = cfg.fsm_alpha;
+  int a = fsm_alpha_eff();
   if (a < 0) a = 0;
   if (a > 1000) a = 1000;
   if (state < 0 || state >= SMART_STATE_COUNT) state = SMART_DEEP_IDLE;
@@ -1631,7 +2016,6 @@ static int adpf_headroom(void) {
   return v >= 0 && v <= 100 ? (int)v : -1;
 }
 
-static int g_fsm_psi = -1, g_fsm_skin = -1, g_fsm_adpf = -1;
 
 /* 纯函数：busy% + 当前档 → 目标档。单测直接喂数。 */
 static int smart_target(int cur, int busy) {
@@ -1931,6 +2315,11 @@ static int smart_tick(int app_switch, int game_hint) {
   g_fsm_psi = psi_cpu_pct();
   g_fsm_skin = skin_temp_c();
   g_fsm_adpf = adpf_headroom();
+  if (!g_screen_off) {
+    if (!g_ls.active) lrn_sess_begin();
+    int td = g_fsm_skin > 0 ? g_fsm_skin : temp;
+    lrn_sess_tick(td, (int)batt_current_ma_now(), g_sm.fsm >= SMART_HEAVY);
+  }
   return smart_tick_ex(cpu, gpu_busy_pct(), temp, !g_screen_off,
                        app_switch, below, g_cat_idx >= 0);
 }
@@ -6415,6 +6804,7 @@ static void set_timer_slack(unsigned long ns) {
 
 static void enter_screen_off(void) {
   if (g_screen_off) return;
+  if (cfg.strategy == 1) lrn_sess_commit();   /* 亮屏会话结束：按信号漂移 alpha */
   int mpct = 0, mbig = 0, mlit = 0;
   /* 熄屏白名单优先：pkg=soff 的应用在前台时，熄屏照样交还系统 */
   int have_mode = !strcmp(g_state, "normal") && g_fg[0] &&
@@ -6580,6 +6970,8 @@ static void load_cfg(void) {
   cfg.cap_min_hi = 70;
   cfg.cap_min_pct_lo = 45;
   cfg.cap_min_pct_hi = 75;
+  cfg.fsm_learn = 1;
+  cfg.fsm_learn_rate = 100;
   cfg.cap_backend = CAP_BE_AUTO;
   /* 熄屏策略：基准 keep（旧行为）。全新安装的 conf 写 uncap */
   cfg.screen_uncap = 0;
@@ -6799,6 +7191,9 @@ static void load_cfg(void) {
     cfg.big_min = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("BIG_OFFLINE", v) == 0)
     cfg.big_offline = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("FSM_LEARN", v) == 0)
+    cfg.fsm_learn = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("FSM_LEARN_RATE", v) == 0) cfg.fsm_learn_rate = clampi(atoi(v), 0, 1000, 100);
   if (cfg_get("CAP_MIN_FOLLOW", v) == 0)
     cfg.cap_min_follow = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("CAP_MIN_LO", v) == 0)  cfg.cap_min_lo  = clampi(atoi(v), 0, 100, 30);
@@ -6962,7 +7357,7 @@ static void publish_status(void) {
              "state=%s\nscreen=%s\nsoff=%d\nsoff_keep=%d\ngame_pkg=%s\nreason=%s\n"
              "fg=%s\nfgtype=%d\napp_mode=%s\napp_big=%d\napp_little=%d\napp_gpu=%s\n"
              "pid=%d\nver=%s\nntier=%d\ncapbe=%s\n"
-             "strat=%d\nsmart=%d\nfsm=%d\nprime=%d\nsup=%d\ntick=%ld\nfgprobe=%ld\ngminw=%ld\n"
+             "strat=%d\nsmart=%d\nfsm=%d\nalpha=%d\nacnf=%d\nabkt=%d\nprime=%d\nsup=%d\ntick=%ld\nfgprobe=%ld\ngminw=%ld\n"
              "cminw=%ld\ncminf=%d\ncminpaused=%d\ncming=%d\ncat=%s\ncatcpu=%d\ncatgpu=%d\n",
           g_state, g_deep ? "deep" : (g_screen_off ? "off" : "on"),
           g_deep ? cfg.idle_interval : cfg.soff_interval, g_soff_keep,
@@ -6970,7 +7365,10 @@ static void publish_status(void) {
           g_fg[0] ? g_fg : "-", fg_type_code(), mode, g_app_big, g_app_little, gmode,
           getpid(), SF_VERSION, ntier,
           g_npol > 0 ? cap_backend_name(g_pol[0].be) : "sysfs",
-          cfg.strategy, g_sm.fsm, g_sm.fsm, g_prime_state,
+          cfg.strategy, g_sm.fsm, g_sm.fsm, fsm_alpha_eff(),
+          ({ int _c = 0; lrn_alpha_now(NULL, &_c, NULL); _c; }),
+          ({ int _b = 0; lrn_alpha_now(NULL, NULL, &_b); _b; }),
+          g_prime_state,
           suppress_on() ? sup_pct() : 0,
           g_tick_n, g_fg_probe_n, g_gmin_writes,
           g_min_writes, g_min_fails, cmin_paused, cmin_give,
