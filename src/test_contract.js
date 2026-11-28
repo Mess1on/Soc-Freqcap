@@ -610,8 +610,8 @@ console.log('\n== 出厂默认（熄屏轻巡检常开 / 充电不封顶 / 电�
      /static long window_floor\(const struct policy \*p, long cap\)/.test(csrc) &&
      /static long freq_gap_down\(const struct policy \*p, long from, int gap\)/.test(csrc),
      '窗口守护默认 3 档：配置键、默认值、窗口计算都在');
-  ok(/long wf = window_floor\(p, p->cap\);\n  if \(wf > 0 && want > wf\) want = wf;/.test(csrc) &&
-     /long wf = window_floor\(&g_pol\[i\], g_pol\[i\]\.cap\);/.test(csrc),
+  ok(/long wf = window_floor\(p, cap\);\n  if \(wf > 0 && want > wf\) want = wf;/.test(csrc) &&
+     /long wf = window_floor\(&g_pol\[i\], cap\);/.test(csrc),
      '进阶最低频与六态状态下限都套用窗口守护');
   ok(/long wf = window_floor\(&g_pol\[i\], want\);[\s\S]{0,700}?下限让到 %ld（留 %d 档下降空间）/.test(csrc) &&
      /if \(floor > 0 && want < floor\) \{[\s\S]{0,700}?want = floor;/.test(csrc),
@@ -2518,7 +2518,7 @@ console.log('\n== 分应用档位 ==');
   // 改完全局配置要把生效中的档位盖回去（施加点已从 reload_if_changed 挪到主循环，
   // 因为生效值还要叠加实时偏移，必须等本轮传感器算完）
   {
-    const body = (csrc.match(/if \(cfg_changed \|\| adapt_changed(?: \|\| smart_changed)?\) \{[\s\S]*?\n    \}/) || [''])[0];
+    const body = (csrc.match(/if \(cfg_changed \|\| adapt_changed(?: \|\| smart_changed)?(?: \|\| cam_changed)?\) \{[\s\S]*?\n    \}/) || [''])[0];
     ok(/if \(g_app_pct > 0 \|\| g_app_big > 0 \|\| g_app_little > 0\)[\s\S]{0,120}?set_caps_tiers\(g_app_pct, g_app_big, g_app_little,/.test(body),
        '重算块里 assign_pct 之后重新套上生效中的应用档位（含分核）', body ? '' : '重算块没抠到');
     ok(body.indexOf('assign_pct') < body.indexOf('set_caps_tiers(g_app_pct'),
@@ -3702,7 +3702,7 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
   ok(/static int reload_if_changed\(uint64_t seen\)/.test(csrc) &&
      !/static int reload_if_changed[\s\S]{0,400}apply_normal(caps_changed || adapt_changed(?: || cat_changed)?)/.test(csrc),
      'reload_if_changed 只吸收配置，不再自己施加封顶');
-  ok(/int cfg_changed = reload_if_changed\(seen\);[\s\S]{0,7000}if \(cfg_changed \|\| adapt_changed(?: \|\| smart_changed)?\) \{\s*\n\s*assign_pct/.test(csrc),
+  ok(/int cfg_changed = reload_if_changed\(seen\);[\s\S]{0,7000}if \(cfg_changed \|\| adapt_changed(?: \|\| smart_changed)?(?: \|\| cam_changed)?\) \{\s*\n\s*assign_pct/.test(csrc),
      '主循环里：偏移算完之后才统一重算并施加（顺序错了就会写一遍旧地板）');
   ok(/#from adapt\//.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')),
      '装机脚本写的来源标记和守护读的文件是同一份（撤表判据认它）');

@@ -333,6 +333,8 @@ cfg_set() {
     case "$_v" in bal|sav) ;; *) die "BAD_SUPSTYLE" ;; esac
   elif [ "$_k" = CAP_BACKEND ]; then
     case "$_v" in auto|sysfs|ppm|msm) ;; *) die "BAD_BACKEND" ;; esac
+  elif [ "$_k" = WIFI_PS ]; then
+    case "$_v" in auto|on|off) ;; *) die "BAD_WIFIPS" ;; esac
   else
     is_key "$_k" || die "BAD_KEY"
     is_uint "$_v" || die "NOT_NUM"

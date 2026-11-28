@@ -1329,7 +1329,7 @@ html.lg-pause .beat{animation-play-state:paused}
     </div>
     <div class="htxt">
       <h1>Soc智能限频</h1>
-      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.5.0</span></div>
+      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.5 Beta1</span></div>
     </div>
   </div>
   <!-- 主题开关：太阳=浅色，月亮=深色。点一下就换，选中哪个存到本地。 -->
@@ -1372,7 +1372,7 @@ html.lg-pause .beat{animation-play-state:paused}
       <div class="hero-foot">
         <span>桥接 <b id="m-bridge">—</b></span>
         <span class="sep">·</span>
-        <span>守护 <b id="ver2">V2.5.0</b></span>
+        <span>守护 <b id="ver2">V2.5 Beta1</b></span>
       </div>
     </div>
   </div>
@@ -3580,7 +3580,13 @@ async function loadConf(){
                               ['camera_hold_pct','CAMERA_HOLD_PCT',80],['quiet_night_s','QUIET_NIGHT_S',300],
                               ['idle_uclamp','IDLE_UCLAMP',18]]) {
       const el = document.getElementById(id);
-      if (el) { el.value = c[k] || d; pv(id); }
+      if (el) {
+        /* 0 是合法值（IDLE_UCLAMP=0 关闭、CAP_MIN_PCT=0 跟随硬件最低），
+           不能用 || 当成空值回落到默认。 */
+        const v = c[k];
+        el.value = (v === undefined || v === null || v === '') ? d : v;
+        pv(id);
+      }
     }
     const _wp = document.getElementById('wifi_ps');
     if (_wp && _wp.value !== undefined) { _wp.value = c.WIFI_PS || 'auto'; }

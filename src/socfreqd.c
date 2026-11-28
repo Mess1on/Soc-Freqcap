@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.5.0"
+#define SF_VERSION "2.5 Beta1"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -6103,14 +6103,20 @@ static int camera_is(const char *pkg) {
   return 0;
 }
 
-static void camera_hold_update(const char *fg) {
-  if (!cfg.camera_hold) { g_cam_hold = 0; return; }
+static int camera_hold_update(const char *fg) {
+  if (!cfg.camera_hold) {
+    int changed = g_cam_hold;
+    g_cam_hold = 0;
+    return changed;
+  }
   int on = camera_is(fg);
   if (on != g_cam_hold) {
     g_cam_hold = on;
     log("相机保持：%s（caps 软钳到 %d%%）", on ? "进入" : "退出",
         cfg.camera_hold_pct);
+    return 1;
   }
+  return 0;
 }
 
 /* 重算每个 policy 的封顶值。app_pct>0 = 四档统一；app_big/app_little>0 = */
@@ -6274,9 +6280,11 @@ static long user_min_for(const struct policy *p) {
   long want = p->hw_max * pct / 100;
   want = snap_freq(p, want);
   if (p->hw_min > 0 && want < p->hw_min) want = p->hw_min;
-  if (p->cap > 0 && want > p->cap) want = p->cap;
+  /* 分类帽才是实际生效的封顶；只按全局 cap 算会造出 min > max */
+  long cap = cap_with_cat(p, p->cap);
+  if (cap > 0 && want > cap) want = cap;
   /* 窗口守护：下限贴着封顶时 governor 没有下降空间，空载也跑在封顶上 */
-  long wf = window_floor(p, p->cap);
+  long wf = window_floor(p, cap);
   if (wf > 0 && want > wf) want = wf;
   return want;
 }
@@ -6311,10 +6319,12 @@ static long floor_pick(const struct policy *p, int i) {
   long t = p->hw_min > 0 ? p->hw_min : 0;
   for (int s = FLOOR_SUP; s < FLOOR_SRC_N; s++)
     if (g_floor_req[i][s] > t) t = g_floor_req[i][s];
-  long wf = window_floor(p, p->cap);
+  /* 实际生效帽可能是分类帽；按 p->cap 仲裁会让下限越过它，形成 min > max */
+  long cap = cap_with_cat(p, p->cap);
+  long wf = window_floor(p, cap);
   if (wf > 0 && t > wf) t = wf;
   if (p->hw_min > 0 && t < p->hw_min) t = p->hw_min;
-  if (p->cap > 0 && t > p->cap) t = p->cap;
+  if (cap > 0 && t > cap) t = cap;
   return t;
 }
 
@@ -6443,7 +6453,16 @@ static void sup_min_clamp(int on) {
     if (target <= 0) continue;
     snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
     if (on) {
-      /* 走仲裁：压制只是"一个请求"，不再自己写节点 */
+      /* 静置帽可能低于用户最低频或平台下限；下限先让路，
+         否则 min > max 会让封顶写入被内核直接拒绝。 */
+      long cap = cap_with_cat(&g_pol[i], sup_cap_for(&g_pol[i]));
+      if (cap > 0) {
+        long wf = window_floor(&g_pol[i], cap);
+        if (wf > 0 && target > wf) target = wf;
+        if (target > cap) target = cap;
+      }
+      /* 压制期间只保留这一条下限请求，避免旧 USER/FSM 请求把下限再抬上去 */
+      floor_req_clear(i);
       floor_req_set(i, FLOOR_SUP, target);
       long pick = floor_pick(&g_pol[i], i);
       long cur = read_num(path);
@@ -6598,6 +6617,30 @@ static void suppress_tick(void) {
         nows - g_sup_stuck_at[i] < 600)
       continue;                              /* 已知写不进去：退避 */
     if (cur > 0 && cur != want) {
+      /* 当前帽比目标更低：可能是厂商/官方调度压下来的，不要抬回去。
+         只有当前值确实是本模块上一轮写下的档位时，才允许随压制档位回升。 */
+      if (cur < want) {
+        int own = g_pol[i].last_got > 0 && cur == g_pol[i].last_got &&
+                  cur == g_pol[i].last_cap;
+        if (!own) continue;
+      }
+      /* 压制帽低于当前下限时先让下限让路，否则 min > max 会被内核拒绝，
+         既写不进封顶，又会每秒重复一次注定失败的写入。 */
+      char mpath[256];
+      snprintf(mpath, sizeof mpath, "%s/scaling_min_freq", g_pol[i].dir);
+      long floor = read_num(mpath);
+      if (floor > 0 && want > 0 && floor > want) {
+        long wf = window_floor(&g_pol[i], want);
+        if (wf > 0 && wf < floor && !write_journaled(NODES_JOURNAL, mpath, wf)) {
+          long got_min = read_num(mpath);
+          if (got_min > 0 && got_min < floor) floor = got_min;
+        }
+        if (floor > want) {
+          g_sup_stuck[i] = cur;
+          g_sup_stuck_at[i] = nows;
+          continue;
+        }
+      }
       if (!write_journaled(NODES_JOURNAL, path, want)) {
         long got = read_num(path);
         if (got == cur && got != want) {     /* 写了没动：被内核夹住 */
@@ -6609,6 +6652,10 @@ static void suppress_tick(void) {
         g_pol[i].last_cap = want;
         g_pol[i].last_got = got > 0 ? got : want;
         be_apply_max(&g_pol[i], want);
+      } else {
+        /* 内核直接拒写（例如平台下限仍高于目标）：按当前帽退避，别每拍重试 */
+        g_sup_stuck[i] = cur;
+        g_sup_stuck_at[i] = nows;
       }
     }
   }
@@ -7092,18 +7139,27 @@ static void caps_patrol(int force) {
     }
     long want = cap_with_cat(&g_pol[i], g_pol[i].cap);
     long now = mono_sec();
-    /* 已知平台帽还在生效期：往上写只会被夹回来，这一拍直接按帽算。 */
-    if (g_pol[i].vcap > 0 && want > g_pol[i].vcap && now < g_pol[i].vcap_at) {
-      long eff = g_pol[i].vcap;
-      if (g_pol[i].last_cap != eff && now - g_capfloor_log_at >= 300) {
-        g_capfloor_log_at = now;
-        log("%s 平台帽 %ld：目标 %ld 先按 %ld 生效（%ld 秒后重探）",
-            g_pol[i].name, eff, want, eff, g_pol[i].vcap_at - now);
+    int retest = 0;
+    /* 已知平台帽还在生效期：往上写只会被夹回来，这一拍直接按帽算。
+       到点后必须真的再写一次；否则 cur 还是被压低的值，下面的
+       “cur <= want 就跳过”会让重探永远不发生。 */
+    if (g_pol[i].vcap > 0 && want > g_pol[i].vcap) {
+      if (now < g_pol[i].vcap_at) {
+        long eff = g_pol[i].vcap;
+        if (g_pol[i].last_cap != eff && now - g_capfloor_log_at >= 300) {
+          g_capfloor_log_at = now;
+          log("%s 平台帽 %ld：目标 %ld 先按 %ld 生效（%ld 秒后重探）",
+              g_pol[i].name, eff, want, eff, g_pol[i].vcap_at - now);
+        }
+        want = eff;
+      } else if (cur == g_pol[i].vcap) {
+        /* 到点重探只针对“还停在当初那个平台帽值”的情况；
+           如果厂商已经压得更低，保留更低值，不要把它抬回去。 */
+        retest = 1;
       }
-      want = eff;
     }
-    /* 常态巡检：厂商把上限顶高了就压回去 */
-    if (!force && cur <= want) continue;
+    /* 常态巡检：厂商把上限顶高了就压回去；平台帽到期的那一拍例外。 */
+    if (!force && cur <= want && !(retest && cur < want)) continue;
     /* force 升帽时先确认当前值就是模块上一轮写的那个。 */
     if (force && cur <= want) {
       /* 厂商在模块写完后把上限压得更低：保留厂商值，不在 force 里抢回去。 */
@@ -7113,7 +7169,7 @@ static void caps_patrol(int force) {
         continue;
     }
     /* 同一目标、同一回读值刚刚已经证明写不动：10 分钟内不再重试。 */
-    if (want == g_pol[i].unreach_cap && cur == g_pol[i].unreach_got &&
+    if (!retest && want == g_pol[i].unreach_cap && cur == g_pol[i].unreach_got &&
         now - g_pol[i].unreach_at < 600)
       continue;
     /* 内核/平台可能把允许下限锁在 cpuinfo_min 之上（本机 1,017,600）。 */
@@ -7212,6 +7268,12 @@ static void caps_patrol(int force) {
               g_pol[i].name, cur, got);
         }
       }
+    } else {
+      /* 内核直接拒写：按平台帽退避，避免退避到期后每拍硬写一次 */
+      int f = ++g_pol[i].vcap_fails;
+      long w = vcap_backoff_sec(f);
+      g_pol[i].vcap = cur > 0 ? cur : want;
+      g_pol[i].vcap_at = now + w;
     }
     apply_governor(&g_pol[i]);
   }
@@ -7318,6 +7380,7 @@ static int reload_if_changed(uint64_t seen) {
   int prev_strategy = cfg.strategy;
   int prev_big_off = cfg.big_offline;
   load_cfg();
+  wifi_ps_apply();
   if (cfg.strategy != prev_strategy)
     smart_on_strategy_edge(prev_strategy, cfg.strategy);
   if (cfg.big_offline != prev_big_off) {
@@ -7419,12 +7482,14 @@ static void hand_back_full(const char *why) {
 
 /* 游戏解锁路径的日志文案保持稳定：外部脚本按这一行判断解锁是否生效。 */
 static void unlock_game(void) {
-  dnd_engage();
   char why[PKG_LEN + 24];
   big_offline_restore("游戏");
   snprintf(g_reason, sizeof g_reason, "game");
   snprintf(why, sizeof why, "游戏解锁并交还系统: %s", g_game);
   hand_back_full(why);
+  /* hand_back_full 会先 dnd_release；必须在它之后再进免打扰，
+     否则刚写入的 zen_mode 会被当场还原。 */
+  dnd_engage();
   snprintf(g_state, sizeof g_state, "game");
 }
 
@@ -7477,9 +7542,15 @@ static void cpu_min_patrol(void) {
   int user_any = 0, fsm_any = 0;
   for (int i = 0; i < g_npol; i++)
     if (cfg.min_pct[g_pol[i].tier & 3] > 0) { user_any = 1; break; }
-  if (cfg.strategy == 1)
+  if (cfg.strategy == 1) {
     for (int g = 0; g < 2; g++)
       if (cfg.fsm_min[g_sm.fsm][g] > 0) { fsm_any = 1; break; }
+    /* FSM_BOUNDS 的下限在 fsm_min_hz 里，不走旧的 FSM_MIN_* 配置；
+       默认 CPU_MIN_LOCK=0 时也要让状态包络下限有机会写入。 */
+    if (!fsm_any && cfg.fsm_bounds)
+      for (int i = 0; i < g_npol; i++)
+        if (g_pol[i].fsm_min_hz > 0) { fsm_any = 1; break; }
+  }
   /* 动态封顶开启时，硬件最低由压制的低载静置接管；但用户明确设了 */
   if (suppress_on() && !user_any) return;
   int follow_any = (cfg.strategy != 1 && cfg.cap_min_follow);
@@ -7537,6 +7608,7 @@ static void cpu_min_patrol(void) {
     floor_req_clear(i);
     long user_target = user_min_for(&g_pol[i]);
     floor_req_set(i, FLOOR_USER, user_target);
+    long cap = cap_with_cat(&g_pol[i], g_pol[i].cap);
     int grp = (g_pol[i].tier & 3) == 0 ? 0 : 1;
     long fsm_target = 0;
     if (cfg.strategy == 1) {
@@ -7548,10 +7620,10 @@ static void cpu_min_patrol(void) {
       }
     }
     if (fsm_target > 0) {
-      if (fsm_target > g_pol[i].cap) fsm_target = g_pol[i].cap;
+      if (cap > 0 && fsm_target > cap) fsm_target = cap;
       if (fsm_target < g_pol[i].hw_min) fsm_target = g_pol[i].hw_min;
       /* 状态下限同样不许贴着封顶：否则这个状态整簇钉死一点、空载也不降 */
-      long wf = window_floor(&g_pol[i], g_pol[i].cap);
+      long wf = window_floor(&g_pol[i], cap);
       if (wf > 0 && fsm_target > wf) fsm_target = wf;
     }
     if (fsm_target <= 0 && user_target <= 0 && !cfg.cpu_min_lock) {
@@ -7566,15 +7638,19 @@ static void cpu_min_patrol(void) {
     long follow_target = 0;
     if (follow_any && user_target <= 0 && fsm_target <= 0) {
       int fp = cap_min_pct_for_load(follow_load, g_capmin_hi_mode);
-      follow_target = fp > 0 ? snap_freq(&g_pol[i], g_pol[i].cap * fp / 100)
+      follow_target = fp > 0 ? snap_freq(&g_pol[i], cap * fp / 100)
                              : g_pol[i].hw_min;
     }
     floor_req_set(i, FLOOR_FSM, fsm_target);
     floor_req_set(i, FLOOR_FOLLOW, follow_target);
     /* 仲裁：优先级 + 窗口守护，唯一写入口 */
     long target = floor_pick(&g_pol[i], i);
-    int soft = user_target > 0 || fsm_target > 0;
-    if (target != g_min_target[i]) {
+    /* 只有“目标比上一轮高”才允许放宽回读；目标下调或首次写入时
+       必须真的写低，否则用户调低最低频后下限会永远停在高位。 */
+    long prev_target = g_min_target[i];
+    int soft = (user_target > 0 || fsm_target > 0) &&
+               prev_target > 0 && target > prev_target;
+    if (target != prev_target) {
       g_min_target[i] = target;
       g_min_giveup[i] = 0;
       g_min_pfails[i] = 0;
@@ -7693,7 +7769,9 @@ static void leave_screen_off(void) {
   g_idle_hold = 0;
   g_soff_keep = 0;
   g_soff_th = 0;
-  sup_exit();
+  /* 游戏态在熄屏期间没有交权，亮屏时不能再把普通封顶压回去；
+     否则同一个游戏不会触发包名变化，整局都停留在被压的封顶。 */
+  if (strcmp(g_state, "game") != 0) sup_exit();
   g_soff_pkg[0] = 0;
   log("亮屏，恢复常态巡检");
   /* 熄屏期间平台下限/上限帽可能已经变了（充电满/温控回落），亮屏直接清零重探 */
@@ -8298,6 +8376,7 @@ static void cleanup(void) {
   journal_restore(NODES_JOURNAL);
   cpuset_restore_all();             /* 字符串账本：cpuset 原掩码 */
   suppress_uclamp_max_restore();    /* 字符串账本：uclamp.max 原值 */
+  idle_uclamp_restore();            /* 熄屏 background uclamp 原值 */
   bg_light_restore();               /* 字符串账本：后台分组原值 */
   big_offline_restore("退出");       /* 先让核回在线再收权限 */
   perms_restore();
@@ -8908,6 +8987,7 @@ int main(int argc, char **argv) {
   journal_restore(NODES_JOURNAL);
   cpuset_restore_all();             /* 上次被 kill -9 时留下的 cpuset 原掩码 */
   suppress_uclamp_max_restore();    /* 上次被 kill -9 时留下的 uclamp.max 原值 */
+  idle_uclamp_restore();            /* 上次熄屏时留下的 background uclamp 原值 */
   bg_light_restore();               /* 上次被 kill -9 时留下的后台分组原值 */
   perms_restore();
   restore_governors();
@@ -9088,14 +9168,14 @@ int main(int argc, char **argv) {
       smart_changed = smart_tick(fg_changed && !game, game && cfg.fsm_game_hint);
     if (smart_changed) cpu_min_refresh();
     /* Kin 的日志契约：前台/类型/状态变化，以及亮屏 60s 心跳，都是同一行 */
-    if (fg[0]) camera_hold_update(fg);
+    int cam_changed = fg[0] ? camera_hold_update(fg) : 0;
     if (cfg.strategy == 1) {
       long nowms = mono_ms();
       int hb = !g_screen_off && g_smart_fg_log_ms > 0 &&
                nowms - g_smart_fg_log_ms >= 60000;
       if (fg_changed || cat_changed || smart_changed || hb) smart_log_fg();
     }
-    if (cfg_changed || adapt_changed || smart_changed) {
+    if (cfg_changed || adapt_changed || smart_changed || cam_changed) {
       assign_pct(g_pol, g_npol);
       /* 配置变更时压制收口一次：天花板/下限回到新封顶，压制随后 */
       if (cfg_changed) {

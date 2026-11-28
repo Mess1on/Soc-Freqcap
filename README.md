@@ -2,7 +2,7 @@
 
 Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏自动交还系统；附带 WebUI 与深度睡眠。
 
-作者：梦笙Mess1on & Ktwo　　版本：V2.5.0　　适用：KernelSU / Magisk / APatch · arm64-v8a
+作者：梦笙Mess1on & Ktwo　　版本：V2.5 Beta1　　适用：KernelSU / Magisk / APatch · arm64-v8a
 
 ## 核心特性
 
@@ -45,7 +45,7 @@ Android 的 CPU / GPU 频率封顶模块：平时按百分比限频，进游戏�
 模块**只负责报版本号，不下载、不安装**——新版统一放网盘，地址写在
 `update.json` 的 `zipUrl`，并同步置顶在 [CHANGELOG.md](CHANGELOG.md)。
 
-当前下载地址：[https://pan.quark.cn/s/0f699bcca039](https://pan.quark.cn/s/0f699bcca039)。
+当前下载地址：[https://pan.quark.cn/s/9efff9bed2cf](https://pan.quark.cn/s/9efff9bed2cf)。
 点管理器里的「更新」会下载失败，这是预期行为：GitHub 只放版本号，安装包在夸克网盘，
 复制上面的地址下载 zip 后再手动安装。
 
