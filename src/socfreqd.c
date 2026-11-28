@@ -37,7 +37,7 @@ int appinfo_labels_stdin(void);
 #define SF_DATADIR "/data/adb/soc_freqcap"
 #endif
 #ifndef SF_VERSION
-#define SF_VERSION "2.5.7"
+#define SF_VERSION "2.5.0"
 #endif
 
 /* policy 的容器目录。里面只有 policyN/ 子目录，没有 cpuN/。 */
@@ -189,6 +189,11 @@ struct cfg {
   int idle_uclamp;
   /* 未显式配置的应用自动套用「其他」画像档 */
   int app_profile;
+  /* Kin 旁路子系统 */
+  int camera_hold, camera_hold_pct;   /* 相机前台时把 caps 软钳到 hwmax*pct% */
+  char camera_pkgs[256];              /* 额外相机包名，逗号分隔 */
+  int fsm_joint;                      /* zTT：热受限 GAMING 且 GPU≥90 时削大核 8% */
+  int game_cpuset_fix;                /* 游戏态 top-app cpuset 被收窄后矫正 */
   /* 游戏态自动免打扰（默认关，会改用户可见行为） */
   int game_dnd;
   /* WiFi 省电：0=auto（不动）, 1=on, 2=off */
@@ -722,7 +727,7 @@ static int journal_restore(const char *file) {
   if (!f) return -1;
   char line[512], node[512];
   long val;
-  int mode, failed = 0, count = 0;
+  int mode, failed = 0, count = 0, clamped = 0, skipped = 0;
   /* 先还 max/普通节点，最后再还 min：内核要求 min <= max */
   for (int pass = 0; pass < 2; pass++) {
     rewind(f);
@@ -732,7 +737,16 @@ static int journal_restore(const char *file) {
                    strstr(node, "/min_freq");
       if ((pass == 1) != !!is_min) continue;
       chmod(node, 0644);
-      if (write_num(node, val) || read_num(node) != val) failed = 1;
+      if (write_num(node, val)) {
+        /* 拒写（只读 / 多值 proc 节点 / 值越界）：跳过并记账，不再无限重试——
+           原来一个节点写不进去就让整本账永远删不掉，每次启动刷 WARN。 */
+        skipped++;
+      } else if (read_num(node) != val) {
+        /* 写成功但回读不同：平台帽/平台下限接管。重试一次就认了，
+           不能因为它永远删不掉账本、每次启动都刷 WARN。 */
+        write_num(node, val);
+        if (read_num(node) != val) clamped++;
+      }
       chmod(node, mode);
       count++;
     }
@@ -743,7 +757,7 @@ static int journal_restore(const char *file) {
     return -1;
   }
   unlink(file);
-  log("已恢复 %d 个节点", count);
+  log("已恢复 %d 个节点（跳过 %d / 平台接管 %d）", count, skipped, clamped);
   return 0;
 }
 
@@ -1750,6 +1764,29 @@ static int mem_pressure_shift(void) {
   return 0;
 }
 
+/* ── 皮肤锚定决策温 + 双热源争议（Kin ThermalDecision）──
+   皮肤 5<skin<70 时按 skin+(veto-skinLimit) 对齐到结温刻度；结温≥硬顶则强制到 veto。
+   争议 = 皮肤侧认为没到 veto，但结温已到硬顶把它硬抬上来 —— 此时负载迁移多要一拍确认。 */
+#define TD_VETO        60
+#define TD_SKIN_LIMIT  47
+#define TD_JUNCTION_HW 100
+
+static int thermal_decision(int junction, int skin) {
+  if (skin <= 5 || skin >= 70) return junction;
+  int d = skin + (TD_VETO - TD_SKIN_LIMIT);
+  if (TD_JUNCTION_HW > 0 && junction >= 0 && junction >= TD_JUNCTION_HW)
+    d = d > TD_VETO ? d : TD_VETO;
+  return d;
+}
+
+static int thermal_disputed(int junction, int skin) {
+  if (skin <= 5 || skin >= 70) return 0;          /* 单一热源：缺失不是矛盾 */
+  if (junction < 0 || junction < TD_JUNCTION_HW) return 0;
+  return (skin + (TD_VETO - TD_SKIN_LIMIT)) < TD_VETO;
+}
+
+static int g_fsm_disputed;
+
 /* 当前时段的桶 -> 生效 alpha（含覆盖层）。raw/conf 供状态与日志用。 */
 static int lrn_alpha_now(int *out_raw, int *out_conf, int *out_bucket) {
   lrn_load();
@@ -1797,7 +1834,10 @@ static int lrn_alpha_now(int *out_raw, int *out_conf, int *out_bucket) {
     lowbat_ov = 1;
   }
   /* 热：皮肤优先的决策温；warm..veto 线性加，≥veto 直接 700 */
-  int td = g_fsm_skin > 0 ? g_fsm_skin : (ad.temp_m > 0 ? ad.temp_m / 1000 : -1);
+  int junction = ad.temp_m > 0 ? ad.temp_m / 1000 : -1;
+  int skin = g_fsm_skin;
+  int td = thermal_decision(junction, skin);
+  g_fsm_disputed = thermal_disputed(junction, skin);
   if (td >= 0) {
     if (td > LRN_WARM_TEMP && td < LRN_VETO_TEMP) {
       int span = LRN_VETO_TEMP - LRN_WARM_TEMP;
@@ -2127,6 +2167,9 @@ static int g_smart_warmup;
 static int g_smart_game_hint;
 /* 本拍放电电流（mA）与充电态：ASB 的电流闸门用（充电/读不到 → 旁路）。 */
 static int g_fsm_cur_ma;
+static int g_fsm_gpu = -1;
+static int g_fsm_temp = -1;
+static int g_cam_hold;
 static int g_fsm_chg;
 /* 上一次「前台:」日志的时间（毫秒），做 60s 心跳。 */
 static long g_smart_fg_log_ms;
@@ -2216,10 +2259,15 @@ static int smart_on_enter_screen_off(int keep) {
   return 1;
 }
 
+static void smart_fsm_enter(int s, const char *why);
+
 static void smart_request_warmup(void) {
+  /* Kin：亮屏沿直接进 MODERATE（不是"预热"，就是状态机的亮屏入口）。
+     我们原来那套"切前台预热到某档"是自加的，ASB/Kin 没有，已默认关闭。 */
   g_smart_warmup = 0;
-  if (cfg.strategy == 1 && cfg.app_switch_tier > 0 && strcmp(g_state, "game") != 0)
-    g_smart_warmup = 1;
+  if (cfg.strategy != 1) return;
+  smart_fsm_enter(SMART_MODERATE, "亮屏");
+  g_sm.session_tick = g_sm.tick;
 }
 
 static void smart_on_leave_screen_off(void) {
@@ -2231,7 +2279,13 @@ static void smart_on_leave_screen_off(void) {
 static void smart_on_strategy_edge(int prev, int now) {
   (void)prev;
   smart_reset_idle();
-  if (now == 1) smart_request_warmup();
+  if (now == 1) {
+    /* Kin AutoFsm::reset()：状态回到 LIGHT_IDLE，不做任何"预热"跳档 */
+    g_sm.fsm = SMART_LIGHT_IDLE;
+    g_sm.state = SMART_LIGHT_IDLE;
+    g_sm.fsm_pending = SMART_LIGHT_IDLE;
+    g_sm.reason[0] = 0;
+  }
 }
 
 
@@ -2288,6 +2342,16 @@ static int cpu_busy_pct_ex(int skip_cpu0) {
 }
 
 static int cpu_busy_pct(void) { return cpu_busy_pct_ex(0); }
+
+/* /proc/loadavg 第一列 ×100（读不到返回 -1）。只在 CPU% 读不到时兜底。 */
+static int loadavg1_x100(void) {
+  char b[64];
+  if (read_file("/proc/loadavg", b, sizeof b)) return -1;
+  char *end = NULL;
+  double v = strtod(b, &end);
+  if (end == b || v < 0) return -1;
+  return (int)(v * 100.0 + 0.5);
+}
 
 static long g_gpu_busy_prev, g_gpu_busy_total_prev;
 static int g_gpu_busy_prev_ok;
@@ -2474,13 +2538,21 @@ static int smart_fsm_desired(int cpu, int gpu, int temp, int fg_not_game,
   int cpu_mod_out = cfg.fsm_cpu_mod_out > 0 ? cfg.fsm_cpu_mod_out : 45;
   int cpu_heavy_th = cur >= SMART_HEAVY ? cpu_hi_out : cpu_hi_in;
   int cpu_mod_th = cur >= SMART_MODERATE ? cpu_mod_out : cpu_mod_in;
-  int cpu_heavy = cpu >= 0 && cpu >= cpu_heavy_th;
-  int cpu_mod = cpu >= 0 && cpu >= cpu_mod_th;
+  int cpu_heavy, cpu_mod;
+  if (cpu >= 0) {
+    cpu_heavy = cpu >= cpu_heavy_th;
+    cpu_mod = cpu >= cpu_mod_th;
+  } else {
+    /* Kin：读不到 CPU% 时退回 loadavg（8 核均摊的口径不同，阈值也按 ASB 的 22/16） */
+    int l1 = loadavg1_x100();
+    cpu_heavy = l1 >= 2200;
+    cpu_mod = l1 >= 1600;
+  }
   if (g_fsm_psi >= 0 && cfg.fsm_psi_hi > 0 && g_fsm_psi >= cfg.fsm_psi_hi)
     cpu_heavy = 1;
   else if (g_fsm_psi >= 0 && cfg.fsm_psi_mod > 0 && g_fsm_psi >= cfg.fsm_psi_mod)
     cpu_mod = 1;
-  int cpu_some = cpu >= 0 && cpu >= 50;
+  int cpu_some = cpu >= 0 ? cpu >= 50 : loadavg1_x100() >= 1600;
   /* ASB 电流佐证：只有"放电且读得到"时才作为闸门，充电/读不到一律旁路 */
   int ma_valid = g_fsm_cur_ma > 0 && !g_fsm_chg;
   int gpu_game_in = cfg.fsm_gpu_game_in > 0 ? cfg.fsm_gpu_game_in : 90;
@@ -2520,6 +2592,8 @@ static int smart_fsm_desired(int cpu, int gpu, int temp, int fg_not_game,
   int warm_ticks = fsm_ticks_from_s(cfg.fsm_warmup_s > 0 ? cfg.fsm_warmup_s : kSmartWarmupTicks * kSmartTickSec);
   int warming = g_sm.session_tick > 0 &&
                 g_sm.tick - g_sm.session_tick < warm_ticks;
+  /* Kin：真烫（≥bypass）就旁路宽限，照常进 SUSTAINED，不牺牲热安全 */
+  if (warming && temp >= 0 && temp >= 60) warming = 0;
   int enter_temp = cfg.fsm_temp_in > 0 ? cfg.fsm_temp_in : 54;
   int exit_temp = cfg.fsm_temp_out > 0 ? cfg.fsm_temp_out : 48;
   int skin_hot = cfg.fsm_skin_hi > 0 && g_fsm_skin >= cfg.fsm_skin_hi;
@@ -2551,7 +2625,7 @@ static int smart_tick_ex(int busy, int gpu, int temp, int screen_on,
   int want = smart_fsm_desired(cpu, gpu, temp, fg_not_game, screen_on);
   int changed = 0, forced = 0, logged = 0;
 
-  if (app_switch && cfg.app_switch_tier > 0) {
+  if (app_switch && cfg.app_switch_tier > 0) {   /* 遗留开关：默认 0，保持 ASB/Kin 行为 */
     int target = cfg.app_switch_tier == 1 ? SMART_LIGHT_IDLE
                : cfg.app_switch_tier == 2 ? SMART_MODERATE : SMART_HEAVY;
     if (want > target) target = want;
@@ -2601,6 +2675,8 @@ static int smart_tick_ex(int busy, int gpu, int temp, int screen_on,
     if (down_window < 1) down_window = 1;
     if (pair_window < 1) pair_window = 1;
     int window = want > g_sm.fsm ? up_window : down_window;
+    /* Kin/ASB：双热源争议时，负载驱动的迁移多要一拍；热降 SUSTAINED 不受影响 */
+    if (g_fsm_disputed && want != SMART_SUSTAINED) window += 1;
     if ((g_sm.fsm == SMART_MODERATE &&
          (want == SMART_HEAVY || want == SMART_SUSTAINED)) ||
         ((g_sm.fsm == SMART_HEAVY || g_sm.fsm == SMART_SUSTAINED) &&
@@ -2680,6 +2756,8 @@ static int smart_tick(int app_switch, int game_hint) {
   struct adapt a;
   adapt_snapshot(&a);
   int temp = (cfg.ad.th && a.temp_m > 0) ? a.temp_m / 1000 : -1;
+  g_fsm_temp = temp;
+  g_fsm_gpu = gpu_busy_pct();
   g_fsm_psi = psi_cpu_pct();
   g_fsm_skin = skin_temp_c();
   g_fsm_adpf = adpf_headroom();
@@ -2689,7 +2767,7 @@ static int smart_tick(int app_switch, int game_hint) {
     int td = g_fsm_skin > 0 ? g_fsm_skin : temp;
     lrn_sess_tick(td, g_fsm_skin, (int)batt_current_ma_now(), g_sm.fsm >= SMART_HEAVY);
   }
-  return smart_tick_ex(cpu, gpu_busy_pct(), temp, !g_screen_off,
+  return smart_tick_ex(cpu, g_fsm_gpu, temp, !g_screen_off,
                        app_switch, below, g_cat_idx >= 0);
 }
 
@@ -2764,6 +2842,35 @@ static void assign_pct(struct policy *p, int n) {
       p[i].pct = eff;
     } else {
       p[i].cap = cap_floor_apply(&p[i], snap_freq(&p[i], cap_from_pct(&p[i], eff)));
+    }
+    /* BIG_MIN = 压到最低频，不是 1%：1% 会算出 46MHz，低于硬件最低，
+       写下去必被内核/平台拒（日志里"目标 46080 低于内核下限 768000"就是它） */
+    if (big_min_hit && p[i].hw_min > 0) {
+      p[i].cap = p[i].hw_min;
+      pct = p[i].hw_max > 0 ? (int)(p[i].hw_min * 100 / p[i].hw_max) : 1;
+      if (pct < 1) pct = 1;
+      p[i].tpct = pct;
+      p[i].pct = pct;
+      eff = pct;          /* 日志里的"生效"也按硬件最低显示，别留 1% */
+    }
+    /* 任何情况下封顶不低于硬件最低 */
+    if (p[i].hw_min > 0 && p[i].cap < p[i].hw_min) p[i].cap = p[i].hw_min;
+    /* 相机保持：不冲满，够 4K60 即可 */
+    if (g_cam_hold && cfg.camera_hold_pct >= 40 && cfg.camera_hold_pct < 100 &&
+        p[i].hw_max > 0) {
+      long lim = snap_freq(&p[i], p[i].hw_max * cfg.camera_hold_pct / 100);
+      if (lim > 0 && p[i].cap > lim) p[i].cap = lim;
+    }
+    /* zTT：热受限 GAMING 且 GPU 明确是瓶颈 → 削大核（只削非瓶颈方向） */
+    if (cfg.strategy == 1 && cfg.fsm_joint && (tierkey & 3) == 0 &&
+        g_sm.fsm == SMART_GAMING && g_fsm_gpu >= 90) {
+      int tight = (g_fsm_temp >= 0 && cfg.fsm_temp_in > 0 && g_fsm_temp >= cfg.fsm_temp_in) ||
+                  (g_fsm_adpf >= 85);
+      if (tight) {
+        long trimmed = snap_freq(&p[i], p[i].cap * 92 / 100);
+        if (trimmed > 0 && trimmed >= p[i].hw_min && trimmed < p[i].cap)
+          p[i].cap = trimmed;
+      }
     }
     /* 精简：同一组（生效% + 封顶）只打一次；LOG_VERBOSE=1 恢复每拍打 */
     if (cfg.log_verbose || p[i].log_cap != p[i].cap || p[i].log_eff != eff) {
@@ -3520,11 +3627,13 @@ static void str_restore_all(const char *file, const char *tag) {
       count++;
       continue;
     }
-    if (write_str(path, val) || read_file(path, now, sizeof now) ||
-        strcmp(now, val))
+    if (write_str(path, val)) {
       failed = 1;
-    else
+    } else if (read_file(path, now, sizeof now) || strcmp(now, val)) {
+      write_str(path, val);          /* 平台接管：重试一次，不计失败 */
+    } else {
       wrote++;
+    }
     chmod(path, (mode_t)mode);
     count++;
   }
@@ -5255,13 +5364,13 @@ static int restore_governors_core(int keep) {
   FILE *f = fopen(GOV_JOURNAL, "r");
   if (!f) return 0;
   char line[512], node[512], gov[64];
-  int mode, failed = 0, count = 0;
+  int mode, failed = 0, count = 0, skipped = 0;
   while (fgets(line, sizeof line, f)) {
     /* govs.saved 里同一个节点有两行 */
     if (sscanf(line, "%511s %63s %o", node, gov, &mode) == 3) {
       /* 权限那一行：名字位置是占位的 0，不许写 */
       if (access(node, F_OK)) continue;
-      if (chmod(node, (mode_t)mode)) failed = 1;
+      if (chmod(node, (mode_t)mode)) skipped++;
       else count++;
       continue;
     }
@@ -5271,9 +5380,10 @@ static int restore_governors_core(int keep) {
     /* 权限先记下来，写完再还回去。 */
     int before = read_mode(node);
     chmod(node, 0644);
-    if (write_str(node, gov)) failed = 1;
+    /* 写不进去（该调速器本机不可用 / 只读）：跳过，不能因为它让整本账永远删不掉 */
+    if (write_str(node, gov)) skipped++;
     else count++;
-    if (chmod(node, before)) failed = 1;
+    if (chmod(node, before)) skipped++;
   }
   fclose(f);
   if (failed) {
@@ -5282,7 +5392,7 @@ static int restore_governors_core(int keep) {
   }
   if (!keep) {
     unlink(GOV_JOURNAL);
-    log("已恢复 %d 个调速器", count);
+    log("已恢复 %d 个调速器（跳过 %d）", count, skipped);
   }
   return count;
 }
@@ -5536,6 +5646,8 @@ static int fg_blacklisted(const char *p) {
     if (!strcmp(p, exact[i])) return 1;
   if (strstr(p, "launcher")) return 1;      /* 各种桌面 */
   if (strstr(p, "inputmethod")) return 1;
+  if (strstr(p, "accessibility")) return 1; /* 无障碍服务常驻 top-app，不是前台 */
+  if (strstr(p, "ttsengine")) return 1;
   return 0;
 }
 
@@ -5573,11 +5685,12 @@ static int fg_scan_top_app(char *best, size_t bn, int *want_found, const char *w
       if (colon) *colon = 0;
       if (!fg_valid_pkg(cmd)) continue;
       if (want && !strcmp(cmd, want) && want_found) *want_found = 1;
+      /* Kin：best = cmd（后面的覆盖前面的），黑名单只在选出结果后判 */
       if (fg_blacklisted(cmd)) {
         if (saw_black) *saw_black = 1;
         continue;
       }
-      if (best && bn && !best[0]) snprintf(best, bn, "%s", cmd);
+      if (best && bn) snprintf(best, bn, "%s", cmd);
     }
     if (best && best[0]) return 0;
   }
@@ -5969,6 +6082,37 @@ static void smart_log_fg(void) {
   g_smart_fg_log_ms = mono_ms();
 }
 
+/* ── 相机保持（Kin camera_hold）：相机前台时 caps 软钳到 hwmax×pct%（默认 80） ── */
+static int camera_is(const char *pkg) {
+  if (!pkg || !*pkg) return 0;
+  static const char *builtin[] = {
+    "com.android.camera", "com.oplus.camera", "com.coloros.camera",
+    "com.google.android.GoogleCamera", "com.miui.camera", "com.huawei.camera",
+    "com.samsung.android.cameraxservice", "com.meitu.meiyancamera",
+    "com.lemon.lv", "com.ss.android.ugc.aweme.lite.camera",
+  };
+  for (size_t i = 0; i < sizeof builtin / sizeof *builtin; i++)
+    if (!strcmp(pkg, builtin[i])) return 1;
+  if (cfg.camera_pkgs[0]) {
+    char b[256];
+    snprintf(b, sizeof b, "%s", cfg.camera_pkgs);
+    char *save = NULL;
+    for (char *t = strtok_r(b, ", ", &save); t; t = strtok_r(NULL, ", ", &save))
+      if (!strcmp(t, pkg)) return 1;
+  }
+  return 0;
+}
+
+static void camera_hold_update(const char *fg) {
+  if (!cfg.camera_hold) { g_cam_hold = 0; return; }
+  int on = camera_is(fg);
+  if (on != g_cam_hold) {
+    g_cam_hold = on;
+    log("相机保持：%s（caps 软钳到 %d%%）", on ? "进入" : "退出",
+        cfg.camera_hold_pct);
+  }
+}
+
 /* 重算每个 policy 的封顶值。app_pct>0 = 四档统一；app_big/app_little>0 = */
 static void set_caps_tiers(int app_pct, int app_big, int app_little, const char *why) {
   for (int i = 0; i < g_npol; i++) {
@@ -6144,6 +6288,152 @@ static long min_floor_for(const struct policy *p) {
 }
 
 /* 下限压放（记账）。on=0 时只还原本策略压过的，不动系统后来的改写。 */
+/* ── 下限仲裁层（唯一写 scaling_min_freq 的地方）──
+   各子系统只"提交请求"，不再自己写节点。优先级（高→低）：
+     用户 CPU_MIN_PCT > 状态包络(FSM) > 跟随下限(限频) > 压制静置 > 硬件最低
+   仲裁结果再过窗口守护（至少比封顶低 N 档），最后交给 floor_commit() 写。 */
+enum { FLOOR_HW = 0, FLOOR_SUP, FLOOR_FOLLOW, FLOOR_FSM, FLOOR_USER, FLOOR_SRC_N };
+
+static long g_floor_req[MAX_POLICY][FLOOR_SRC_N];
+
+static void floor_req_set(int i, int src, long hz) {
+  if (i < 0 || i >= MAX_POLICY || src < 0 || src >= FLOOR_SRC_N) return;
+  g_floor_req[i][src] = hz > 0 ? hz : 0;
+}
+
+static void floor_req_clear(int i) {
+  if (i < 0 || i >= MAX_POLICY) return;
+  memset(g_floor_req[i], 0, sizeof g_floor_req[i]);
+}
+
+/* 仲裁：取最高优先级的有效请求；再过窗口守护 */
+static long floor_pick(const struct policy *p, int i) {
+  long t = p->hw_min > 0 ? p->hw_min : 0;
+  for (int s = FLOOR_SUP; s < FLOOR_SRC_N; s++)
+    if (g_floor_req[i][s] > t) t = g_floor_req[i][s];
+  long wf = window_floor(p, p->cap);
+  if (wf > 0 && t > wf) t = wf;
+  if (p->hw_min > 0 && t < p->hw_min) t = p->hw_min;
+  if (p->cap > 0 && t > p->cap) t = p->cap;
+  return t;
+}
+
+/* 亮屏常态的 CPU 下限巡检（CPU_MIN_LOCK）。
+ *
+ * 平台侧（MTK PPM / 厂商 powerhint / perfd）在插电、boost 期间会把 cpufreq
+ * 的硬下限抬到 1.8~2.2GHz。这时写 scaling_min_freq 是"写成功但被当场夹回"：
+ * store_scaling_min_freq() 返回写入长度（不算错），policy->min 却停在平台的
+ * 下限上，回读拿到的那个数不是"内核拒绝写入"，而是平台此刻的下限，会随
+ * 插拔电/温控漂移（本机 policy7 在 1.85M / 2.0M / 2.15M 之间跳）。
+ *
+ * 所以夹回不再算"失败"：记下"被平台钉在 X"，按簇退避 60→180→300→600 秒
+ * 封顶，永不"本启动放弃"；插拔电、亮屏、改配置/状态立刻清零重探。
+ * 写完隔一拍（约 1 秒）再复核，区分"当场被夹"和"写成功后被人覆盖"。 */
+static long g_min_writes, g_min_last, g_min_fail_at;
+static int  g_min_fails;                  /* 夹回累计，只在 status 里展示 */
+static int  g_min_pfails[MAX_POLICY];     /* 每簇连续夹回次数，决定退避长度 */
+static int  g_min_giveup[MAX_POLICY];     /* 1 = 该簇正被平台下限钉住 */
+static long g_min_pinned[MAX_POLICY];     /* 最近一次夹回值（平台下限） */
+static long g_min_logpin[MAX_POLICY];     /* 上次打过日志的钉住值，同值不重复报 */
+static long g_min_log_at[MAX_POLICY];     /* 上次打日志的时间（同一簇 60s 一条） */
+static long g_min_target[MAX_POLICY];
+static long g_min_next[MAX_POLICY];       /* 该簇下次允许重探的时间 */
+static long g_min_pend_at[MAX_POLICY];    /* > now：写完还没复核 */
+static long g_min_pend_val[MAX_POLICY];
+static int  g_min_pend_soft[MAX_POLICY];  /* 1 = 只要"不低于目标"就算成功 */
+static int  g_min_pend_chg[MAX_POLICY];   /* 写入时的充电态，只给日志用 */
+static int  g_min_chg = -1;               /* 上一拍充电态，-1 = 还没读过 */
+
+/* 退避阶梯：封顶 10 分钟，绝不"本启动放弃"。 */
+static long min_backoff_sec(int fails) {
+  static const long step[] = {60, 180, 300, 600};
+  int n = (int)(sizeof step / sizeof step[0]);
+  if (fails <= 1) return step[0];
+  return step[fails >= n ? n - 1 : fails - 1];
+}
+
+/* 清掉所有退避/夹回记忆，下一拍立刻重探（why 只用于日志）。 */
+static void cpu_min_reset_backoff(const char *why) {
+  int any = 0;
+  for (int i = 0; i < g_npol; i++) {
+    if (g_min_pfails[i] || g_min_giveup[i] || g_min_next[i]) any = 1;
+    g_min_pfails[i] = 0;
+    g_min_giveup[i] = 0;
+    g_min_next[i] = 0;
+    g_min_pinned[i] = 0;
+    g_min_logpin[i] = 0;
+    g_min_pend_at[i] = 0;
+  }
+  if (g_min_fails) any = 1;
+  g_min_fails = 0;
+  g_min_fail_at = 0;
+  g_min_last = 0;
+  if (any && why) log("CPU 下限：%s，退避清零重新探底", why);
+}
+
+/* 一簇"达成"：清掉该簇退避；之前被钉过的补一行放开日志。 */
+static void min_note_ok(int i, long cur) {
+  if (g_min_giveup[i] || g_min_pfails[i])
+    log("CPU 下限：%s 已生效（%ld），平台下限放开",
+        g_pol[i].name, cur > 0 ? cur : g_min_target[i]);
+  g_min_pfails[i] = 0;
+  g_min_giveup[i] = 0;
+  g_min_next[i] = 0;
+  g_min_pinned[i] = 0;
+  g_min_logpin[i] = 0;
+  g_min_fails = 0;
+}
+
+/* 一簇"没达成"：记平台下限 + 按簇退避，日志带上充电态便于定位。 */
+static void min_note_clamp(int i, long target, long got, int charging) {
+  int n = ++g_min_pfails[i];
+  long wait = min_backoff_sec(n);
+  long now = mono_sec();
+  g_min_giveup[i] = 1;
+  g_min_pinned[i] = got;
+  g_min_next[i] = now + wait;
+  g_min_fails++;
+  g_min_fail_at = now;
+  /* 同一个钉住值只报一次；平台换档（回读值变了）再报，且同一簇 60s 最多一条 */
+  if (got > 0 && got != g_min_logpin[i] && now - g_min_log_at[i] >= 60) {
+    g_min_logpin[i] = got;
+    g_min_log_at[i] = now;
+    log("CPU 下限：%s 目标 %ld，平台下限夹在 %ld（%s，第 %d 次，%ld 秒后重探）",
+        g_pol[i].name, target, got, charging ? "插电中" : "未插电", n, wait);
+  }
+}
+
+/* 平台帽（max 侧）清零：配置/状态/亮屏/插拔电一变就重探，别把旧帽带过去。 */
+static void cap_vendor_reset(const char *why) {
+  int any = 0;
+  for (int i = 0; i < g_npol; i++) {
+    if (g_pol[i].vcap > 0) any = 1;
+    g_pol[i].vcap = 0;
+    g_pol[i].vcap_at = 0;
+    g_pol[i].vcap_fails = 0;
+  }
+  if (any && why) log("CPU 上限：%s，平台帽记忆清零重探", why);
+}
+
+/* 配置/状态刚变过：清掉 30 秒节流与退避，下一拍立刻按新下限写一次。 */
+static void cpu_min_refresh(void) {
+  cpu_min_reset_backoff(NULL);
+  cap_vendor_reset(NULL);
+}
+
+/* 只还原本模块按“进阶最低频/下限锁”压过的簇，不动 suppression 或厂商 */
+static void cpu_min_restore_user(void) {
+  for (int i = 0; i < g_npol; i++) {
+    if (g_min_target[i] <= 0) continue;
+    char path[256];
+    snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
+    boost_restore_path(path);
+    g_min_target[i] = 0;
+  }
+}
+
+static void floor_commit(int i, long target, int soft, long now);
+
 static void sup_min_clamp(int on) {
   for (int i = 0; i < g_npol; i++) {
     if (g_pol[i].hw_min <= 0) continue;
@@ -6153,13 +6443,17 @@ static void sup_min_clamp(int on) {
     if (target <= 0) continue;
     snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
     if (on) {
+      /* 走仲裁：压制只是"一个请求"，不再自己写节点 */
+      floor_req_set(i, FLOOR_SUP, target);
+      long pick = floor_pick(&g_pol[i], i);
       long cur = read_num(path);
       if (cur <= 0) continue;
-      if (cur != target && !write_journaled(NODES_JOURNAL, path, target))
-        g_sup_min_on = 1;
+      if (cur != pick) floor_commit(i, pick, 0, mono_sec());
+      if (read_num(path) == pick) g_sup_min_on = 1;
       /* 下限已放松，因 min>max 留下的"写不进"退避要立刻作废。 */
       g_sup_stuck[i] = 0;
     } else if (g_sup_min_on) {
+      floor_req_set(i, FLOOR_SUP, 0);
       boost_restore_path(path);
     }
   }
@@ -6987,6 +7281,28 @@ static void apply_normal(int force) {
   }
 }
 
+/* ── 游戏 cpuset 矫正（Kin correctGameTopAppCpus）──
+   厂商/场景可能把 top-app cpuset 收窄；游戏态下发现被收窄就写回全核（1s 节流）。 */
+static long g_csfix_ms;
+static void game_cpuset_fix(void) {
+  if (!cfg.game_cpuset_fix) return;
+  char online[64] = {0}, cur[64] = {0};
+  if (read_file("/sys/devices/system/cpu/online", online, sizeof online)) return;
+  trim(online);
+  if (!online[0]) return;
+  if (read_file("/dev/cpuset/top-app/cpus", cur, sizeof cur)) return;
+  trim(cur);
+  if (!cur[0]) return;
+  if (!strcmp(cur, online)) return;
+  long now = mono_ms();
+  if (g_csfix_ms && now - g_csfix_ms < 1000) return;
+  g_csfix_ms = now;
+  cpuset_write_journaled("/dev/cpuset/cpus", online);
+  cpuset_write_journaled("/dev/cpuset/top-app/cpus", online);
+  cpuset_write_journaled("/dev/cpuset/foreground/cpus", online);
+  log("游戏 cpuset 被收窄（%s），矫正回 %s", cur, online);
+}
+
 /* 交权态（游戏 / 满血 / 熄屏）下不能抢回节点：游戏分支只在包名变化时 */
 static int reclaim_caps_allowed(void) {
   return strcmp(g_state, "game") != 0 && strcmp(g_state, "full") != 0;
@@ -7135,118 +7451,26 @@ static void cpu_min_to_floor(void) {
   if (n) log("熄屏：CPU 下限已压到目标（%d 个簇）", n);
 }
 
-/* 亮屏常态的 CPU 下限巡检（CPU_MIN_LOCK）。
- *
- * 平台侧（MTK PPM / 厂商 powerhint / perfd）在插电、boost 期间会把 cpufreq
- * 的硬下限抬到 1.8~2.2GHz。这时写 scaling_min_freq 是"写成功但被当场夹回"：
- * store_scaling_min_freq() 返回写入长度（不算错），policy->min 却停在平台的
- * 下限上，回读拿到的那个数不是"内核拒绝写入"，而是平台此刻的下限，会随
- * 插拔电/温控漂移（本机 policy7 在 1.85M / 2.0M / 2.15M 之间跳）。
- *
- * 所以夹回不再算"失败"：记下"被平台钉在 X"，按簇退避 60→180→300→600 秒
- * 封顶，永不"本启动放弃"；插拔电、亮屏、改配置/状态立刻清零重探。
- * 写完隔一拍（约 1 秒）再复核，区分"当场被夹"和"写成功后被人覆盖"。 */
-static long g_min_writes, g_min_last, g_min_fail_at;
-static int  g_min_fails;                  /* 夹回累计，只在 status 里展示 */
-static int  g_min_pfails[MAX_POLICY];     /* 每簇连续夹回次数，决定退避长度 */
-static int  g_min_giveup[MAX_POLICY];     /* 1 = 该簇正被平台下限钉住 */
-static long g_min_pinned[MAX_POLICY];     /* 最近一次夹回值（平台下限） */
-static long g_min_logpin[MAX_POLICY];     /* 上次打过日志的钉住值，同值不重复报 */
-static long g_min_log_at[MAX_POLICY];     /* 上次打日志的时间（同一簇 60s 一条） */
-static long g_min_target[MAX_POLICY];
-static long g_min_next[MAX_POLICY];       /* 该簇下次允许重探的时间 */
-static long g_min_pend_at[MAX_POLICY];    /* > now：写完还没复核 */
-static long g_min_pend_val[MAX_POLICY];
-static int  g_min_pend_soft[MAX_POLICY];  /* 1 = 只要"不低于目标"就算成功 */
-static int  g_min_pend_chg[MAX_POLICY];   /* 写入时的充电态，只给日志用 */
-static int  g_min_chg = -1;               /* 上一拍充电态，-1 = 还没读过 */
-
-/* 退避阶梯：封顶 10 分钟，绝不"本启动放弃"。 */
-static long min_backoff_sec(int fails) {
-  static const long step[] = {60, 180, 300, 600};
-  int n = (int)(sizeof step / sizeof step[0]);
-  if (fails <= 1) return step[0];
-  return step[fails >= n ? n - 1 : fails - 1];
-}
-
-/* 清掉所有退避/夹回记忆，下一拍立刻重探（why 只用于日志）。 */
-static void cpu_min_reset_backoff(const char *why) {
-  int any = 0;
-  for (int i = 0; i < g_npol; i++) {
-    if (g_min_pfails[i] || g_min_giveup[i] || g_min_next[i]) any = 1;
-    g_min_pfails[i] = 0;
-    g_min_giveup[i] = 0;
-    g_min_next[i] = 0;
-    g_min_pinned[i] = 0;
-    g_min_logpin[i] = 0;
-    g_min_pend_at[i] = 0;
+/* 唯一的写入口：日志/节流/复核/退避全在这里 */
+static void floor_commit(int i, long target, int soft, long now) {
+  if (target <= 0) return;
+  char path[256];
+  snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
+  long cur = read_num(path);
+  if (cur <= 0) return;
+  if (cur == target || (soft && cur > target)) {
+    if (g_min_giveup[i] || g_min_pfails[i]) min_note_ok(i, cur);
+    return;
   }
-  if (g_min_fails) any = 1;
-  g_min_fails = 0;
-  g_min_fail_at = 0;
-  g_min_last = 0;
-  if (any && why) log("CPU 下限：%s，退避清零重新探底", why);
-}
-
-/* 一簇"达成"：清掉该簇退避；之前被钉过的补一行放开日志。 */
-static void min_note_ok(int i, long cur) {
-  if (g_min_giveup[i] || g_min_pfails[i])
-    log("CPU 下限：%s 已生效（%ld），平台下限放开",
-        g_pol[i].name, cur > 0 ? cur : g_min_target[i]);
-  g_min_pfails[i] = 0;
-  g_min_giveup[i] = 0;
-  g_min_next[i] = 0;
-  g_min_pinned[i] = 0;
-  g_min_logpin[i] = 0;
-  g_min_fails = 0;
-}
-
-/* 一簇"没达成"：记平台下限 + 按簇退避，日志带上充电态便于定位。 */
-static void min_note_clamp(int i, long target, long got, int charging) {
-  int n = ++g_min_pfails[i];
-  long wait = min_backoff_sec(n);
-  long now = mono_sec();
-  g_min_giveup[i] = 1;
-  g_min_pinned[i] = got;
-  g_min_next[i] = now + wait;
-  g_min_fails++;
-  g_min_fail_at = now;
-  /* 同一个钉住值只报一次；平台换档（回读值变了）再报，且同一簇 60s 最多一条 */
-  if (got > 0 && got != g_min_logpin[i] && now - g_min_log_at[i] >= 60) {
-    g_min_logpin[i] = got;
-    g_min_log_at[i] = now;
-    log("CPU 下限：%s 目标 %ld，平台下限夹在 %ld（%s，第 %d 次，%ld 秒后重探）",
-        g_pol[i].name, target, got, charging ? "插电中" : "未插电", n, wait);
-  }
-}
-
-/* 平台帽（max 侧）清零：配置/状态/亮屏/插拔电一变就重探，别把旧帽带过去。 */
-static void cap_vendor_reset(const char *why) {
-  int any = 0;
-  for (int i = 0; i < g_npol; i++) {
-    if (g_pol[i].vcap > 0) any = 1;
-    g_pol[i].vcap = 0;
-    g_pol[i].vcap_at = 0;
-    g_pol[i].vcap_fails = 0;
-  }
-  if (any && why) log("CPU 上限：%s，平台帽记忆清零重探", why);
-}
-
-/* 配置/状态刚变过：清掉 30 秒节流与退避，下一拍立刻按新下限写一次。 */
-static void cpu_min_refresh(void) {
-  cpu_min_reset_backoff(NULL);
-  cap_vendor_reset(NULL);
-}
-
-/* 只还原本模块按“进阶最低频/下限锁”压过的簇，不动 suppression 或厂商 */
-static void cpu_min_restore_user(void) {
-  for (int i = 0; i < g_npol; i++) {
-    if (g_min_target[i] <= 0) continue;
-    char path[256];
-    snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
-    boost_restore_path(path);
-    g_min_target[i] = 0;
-  }
+  if (g_min_pend_at[i]) return;                      /* 上一写还没复核 */
+  if (g_min_next[i] && now < g_min_next[i]) return;  /* 平台钉着，退避中 */
+  if (write_journaled(NODES_JOURNAL, path, target)) return;
+  g_min_writes++;
+  g_min_last = now;
+  g_min_pend_val[i] = target;
+  g_min_pend_soft[i] = soft;
+  g_min_pend_chg[i] = g_min_chg;
+  g_min_pend_at[i] = now + 1;
 }
 
 static void cpu_min_patrol(void) {
@@ -7310,7 +7534,9 @@ static void cpu_min_patrol(void) {
   if (g_min_last && now - g_min_last < 30) return;
   for (int i = 0; i < g_npol; i++) {
     if (g_pol[i].hw_min <= 0) continue;
+    floor_req_clear(i);
     long user_target = user_min_for(&g_pol[i]);
+    floor_req_set(i, FLOOR_USER, user_target);
     int grp = (g_pol[i].tier & 3) == 0 ? 0 : 1;
     long fsm_target = 0;
     if (cfg.strategy == 1) {
@@ -7343,10 +7569,10 @@ static void cpu_min_patrol(void) {
       follow_target = fp > 0 ? snap_freq(&g_pol[i], g_pol[i].cap * fp / 100)
                              : g_pol[i].hw_min;
     }
-    long target = fsm_target > 0 ? fsm_target
-                 : user_target > 0 ? user_target
-                 : follow_target > 0 ? follow_target : g_pol[i].hw_min;
-    /* 用户最低频只要“不低于目标”就算成功；CPU_MIN_LOCK 的下限是硬件最低 */
+    floor_req_set(i, FLOOR_FSM, fsm_target);
+    floor_req_set(i, FLOOR_FOLLOW, follow_target);
+    /* 仲裁：优先级 + 窗口守护，唯一写入口 */
+    long target = floor_pick(&g_pol[i], i);
     int soft = user_target > 0 || fsm_target > 0;
     if (target != g_min_target[i]) {
       g_min_target[i] = target;
@@ -7355,23 +7581,7 @@ static void cpu_min_patrol(void) {
       g_min_next[i] = 0;
       g_min_pend_at[i] = 0;
     }
-    char path[256];
-    snprintf(path, sizeof path, "%s/scaling_min_freq", g_pol[i].dir);
-    long cur = read_num(path);
-    if (cur <= 0) continue;
-    if (cur == target || (soft && cur > target)) {
-      if (g_min_giveup[i] || g_min_pfails[i]) min_note_ok(i, cur);
-      continue;
-    }
-    if (g_min_pend_at[i]) continue;                      /* 上一写还没复核 */
-    if (g_min_next[i] && now < g_min_next[i]) continue;  /* 平台钉着，退避中 */
-    if (write_journaled(NODES_JOURNAL, path, target)) continue;
-    g_min_writes++;
-    g_min_last = now;
-    g_min_pend_val[i] = target;
-    g_min_pend_soft[i] = soft;
-    g_min_pend_chg[i] = g_min_chg;
-    g_min_pend_at[i] = now + 1;
+    floor_commit(i, target, soft, now);
   }
 }
 
@@ -7581,6 +7791,9 @@ static void load_cfg(void) {
   cfg.quiet_night = 1; cfg.quiet_night_s = 300;
   cfg.idle_uclamp = 18;
   cfg.app_profile = 1;
+  cfg.camera_hold = 1; cfg.camera_hold_pct = 80; cfg.camera_pkgs[0] = 0;
+  cfg.fsm_joint = 1;
+  cfg.game_cpuset_fix = 1;
   cfg.game_dnd = 0;
   cfg.wifi_ps = 0;
   cfg.cap_backend = CAP_BE_AUTO;
@@ -7595,7 +7808,7 @@ static void load_cfg(void) {
   cfg.strategy = 0;
   cfg.suppress = 0;
   cfg.sup_style = 0;
-  cfg.app_switch_tier = 2;
+  cfg.app_switch_tier = 0;   /* ASB/Kin 无此逻辑，默认关 */
   memset(cfg.fsm_cpu, 0, sizeof cfg.fsm_cpu);
   memset(cfg.fsm_min, 0, sizeof cfg.fsm_min);
   memset(cfg.fsm_gpu, 0, sizeof cfg.fsm_gpu);
@@ -7802,6 +8015,16 @@ static void load_cfg(void) {
     cfg.big_min = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("BIG_OFFLINE", v) == 0)
     cfg.big_offline = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("CAMERA_HOLD", v) == 0)
+    cfg.camera_hold = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("CAMERA_HOLD_PCT", v) == 0) cfg.camera_hold_pct = clampi(atoi(v), 40, 100, 80);
+  if (cfg_get("CAMERA_HOLD_PKGS", v) == 0) {
+    snprintf(cfg.camera_pkgs, sizeof cfg.camera_pkgs, "%s", v);
+  }
+  if (cfg_get("FSM_JOINT", v) == 0)
+    cfg.fsm_joint = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
+  if (cfg_get("GAME_CPUSET_FIX", v) == 0)
+    cfg.game_cpuset_fix = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("GAME_DND", v) == 0)
     cfg.game_dnd = (!strcmp(v, "0") || !strcasecmp(v, "false")) ? 0 : 1;
   if (cfg_get("WIFI_PS", v) == 0) {
@@ -7999,6 +8222,14 @@ static void publish_status(void) {
           g_tick_n, g_fg_probe_n, g_gmin_writes,
           g_min_writes, g_min_fails, cmin_paused, cmin_give,
           cat_name, cat_cpu, cat_gpu);
+  {
+    char lrn[128];
+    int off = 0;
+    lrn_load();
+    for (int i = 0; i < 12 && off < (int)sizeof lrn - 8; i++)
+      off += snprintf(lrn + off, sizeof lrn - off, "%s%d", i ? "," : "", g_lrn.alpha[i]);
+    n = ps_append(buf, sizeof buf, n, "lrn=%s\n", lrn);
+  }
   n = ps_append(buf, sizeof buf, n, "src=%s\ngsrc=%s\nfsmrs=%s\nfsmw=%d\n",
                 policy_source(), gpu_policy_source(),
                 g_sm.reason[0] ? g_sm.reason : "-", g_sm.wait);
@@ -8857,6 +9088,7 @@ int main(int argc, char **argv) {
       smart_changed = smart_tick(fg_changed && !game, game && cfg.fsm_game_hint);
     if (smart_changed) cpu_min_refresh();
     /* Kin 的日志契约：前台/类型/状态变化，以及亮屏 60s 心跳，都是同一行 */
+    if (fg[0]) camera_hold_update(fg);
     if (cfg.strategy == 1) {
       long nowms = mono_ms();
       int hb = !g_screen_off && g_smart_fg_log_ms > 0 &&
@@ -8906,6 +9138,7 @@ int main(int argc, char **argv) {
         snprintf(g_game, sizeof g_game, "%s", fg);
         unlock_game();
       }
+      game_cpuset_fix();
       publish_status();
       sleep(cfg.interval * 2);
       continue;

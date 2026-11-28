@@ -15,7 +15,11 @@
 | `CPU_MIN_PCT_BIG/MID2/MID/LITTLE` | 0 | 进阶最低频：把对应簇 `scaling_min_freq` 抬到硬件上限的百分比，0 = 跟随系统；目标夹在硬件最低与当前封顶之间；设过的簇 `CPU_MIN_LOCK` 让位 |
 | `GPU_PCT` | 45 | GPU 封顶百分比 |
 | `STRATEGY` | cap | `cap` 固定百分比封顶；`smart` 六态智能调度，`CPU_PCT_*` 只当天花板 |
-| `APP_SWITCH_TIER` | 2 | 智能模式切前台首拍预热档：0=关、1=轻载、2=中载(85%)、3=重载；只升不降 |
+| `APP_SWITCH_TIER` | 0 | **遗留项，默认关**：ASB/Kin 没有「切前台预热」这套逻辑。0=关，1/2/3=轻/中/重载；开了才会在每次切前台强行抬档 |
+| `CAMERA_HOLD` / `CAMERA_HOLD_PCT` | 1 / 80 | 相机前台时封顶软钳到本机峰值×N%（够 4K60 不冲满） |
+| `CAMERA_HOLD_PKGS` | 空 | 追加相机包名（逗号分隔），空 = 只用内置表 |
+| `FSM_JOINT` | 1 | zTT：热受限 GAMING 且 GPU≥90% 时削大核 8% |
+| `GAME_CPUSET_FIX` | 1 | 游戏态 top-app cpuset 被收窄时写回全核（1s 节流） |
 | `GAME_DND` | 0 | 游戏态自动免打扰：进 GAMING 切「仅优先」，离开还原（默认关，改系统行为） |
 | `WIFI_PS` | auto | WiFi 省电：`auto` 不动、`on`/`off` 写 `wlan_pm`（记账，停守护还原） |
 | `PROBE_CADENCE` | 1 | 多窗口扫描节流：重载/高负载 8s、中等 25s、安静 120s（省 fork） |
@@ -221,6 +225,32 @@ PSI 争用、皮肤/外壳温也参与选档；ADPF 从 `/data/adb/soc_freqcap/a
   命中时按"没有前台应用"处理，**不再回退 dumpsys**；
 - 取不到时用 **2 秒内的 last_good**，并要求它仍出现在 top-app（小窗盖住游戏时游戏仍在）；
 - 以上都拿不到才走原来的 dumpsys 解析（手动/兜底路径）。
+
+### 下限只有一个写入口（floor arbiter）
+
+以前 `scaling_min_freq` 有 5 个写手（下限锁、跟随下限、包络下限、压制静置、交权还原），
+互相能顶住。现在改成**请求 + 仲裁 + 唯一写**：
+
+| 优先级（高→低） | 来源 |
+|---|---|
+| 1 | 用户 `CPU_MIN_PCT_*` |
+| 2 | 智能状态包络下限（ASB clampFloor） |
+| 3 | 跟随下限（限频模式，`CAP_MIN_FOLLOW`） |
+| 4 | 动态压制静置下限 |
+| 5 | 硬件最低 |
+
+`floor_pick()` 取最高有效请求 → 过窗口守护（至少比封顶低 N 档）→ `floor_commit()` 唯一写入
+（记账、1 拍后复核、平台夹回退避都在这里）。任何新功能要动下限，只提交请求，不再直接写节点。
+
+### 热源决策 / 相机保持 / zTT / 游戏 cpuset
+
+- **热源决策**（移植 Kin `ThermalDecision`）：皮肤 5–70℃ 时按 `皮肤+(60−47)` 对齐结温刻度，
+  结温 ≥100℃ 强制到 veto；**两源打架**（结温到硬顶、皮肤侧仍认为没到）时，负载驱动的状态迁移
+  多要一拍确认，热降 SUSTAINED 不受影响。
+- **相机保持**：相机在前台 → 封顶软钳到 `hwmax × CAMERA_HOLD_PCT%`（默认 80），不冲满。
+- **zTT 联合决策**：GAMING 且 GPU≥90、同时热受限（CPU 温度 ≥ 压频起始或 ADPF ≥85）→ 大核再削 8%。
+- **游戏 cpuset 矫正**：游戏态发现 `top-app/cpus` 被收窄 → 写回全核（`/dev/cpuset/cpus`、
+  `top-app`、`foreground`），1 秒节流防乒乓。
 
 ### 游戏免打扰 / WiFi 省电
 

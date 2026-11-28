@@ -307,13 +307,13 @@ static void sf_test_smart_audit(void) {
     g_smart_warmup = 0;
     snprintf(g_state, sizeof g_state, "normal");
     smart_on_leave_screen_off();
-    sf_check(g_cpu_prev_ok == 0 && g_smart_warmup == 1,
-             "AC-2：亮屏重立基线并请求预热（同应用也走这条，不靠 fg_changed）", NULL);
+    sf_check(g_cpu_prev_ok == 0 && g_sm.fsm == SMART_MODERATE,
+             "AC-2：亮屏沿直接进 MODERATE（Kin AutoFsm 亮屏分支）", NULL);
     g_test_busy = -1;
     g_test_half = 0;
-    int ch = smart_tick(0, 0);
-    sf_check(ch == 1 && g_sm.state == 2 && g_smart_warmup == 0,
-             "AC-2：预热只升不降到默认中载 2", NULL);
+    smart_tick(0, 0);
+    sf_check(g_sm.state == SMART_MODERATE,
+             "AC-2：亮屏后维持中载，等负载再变档（不再有切前台预热）", NULL);
 
     g_sm.fsm = 3; g_sm.state = 3; g_smart_warmup = 1;
     g_test_busy = -1;
@@ -350,11 +350,11 @@ static void sf_test_smart_audit(void) {
     cfg.strategy = 1;
     g_sm.state = 3; g_cpu_prev_ok = 1; g_smart_warmup = 0;
     smart_on_strategy_edge(0, 1);
-    sf_check(g_sm.state == 0 && g_cpu_prev_ok == 0 && g_smart_warmup == 1,
-             "AC-4：cap→smart 重置后请求预热", NULL);
+    sf_check(g_sm.state == SMART_LIGHT_IDLE && g_cpu_prev_ok == 0,
+             "AC-4：cap→smart 重置到 LIGHT_IDLE（Kin reset 语义）", NULL);
     g_test_busy = -1; g_test_half = 0;
     smart_tick(0, 0);
-    sf_check(g_sm.state == 2, "AC-4：cap→smart 预热到中载", NULL);
+    sf_check(g_sm.state == SMART_LIGHT_IDLE, "AC-4：重置后不再强行跳档", NULL);
 
     cfg.strategy = save_st;
     cfg.app_switch_tier = save_tier;
@@ -1171,6 +1171,23 @@ int sf_test_main(void) {
     sf_check(fg_blacklisted("com.miui.home") == 1, "MIUI 桌面", NULL);
     sf_check(fg_blacklisted("com.google.android.inputmethod.latin") == 1, "Gboard", NULL);
     sf_check(fg_blacklisted("com.tencent.tmgp.sgame") == 0, "游戏不是黑名单", NULL);
+  }
+
+  printf("\n== 热源决策 / 相机保持 / 游戏 cpuset ==\n");
+  {
+    sf_check(thermal_decision(90, 45) == 58, "皮肤锚定：45℃ 皮肤 = 58℃ 决策温", NULL);
+    sf_check(thermal_decision(95, 3) == 95, "皮肤无效（≤5℃）→ 直接用结温", NULL);
+    sf_check(thermal_decision(100, 40) == 60, "结温 ≥100℃ 硬顶 → 强制 60", NULL);
+    sf_check(thermal_disputed(100, 40) == 1, "结温到硬顶但皮肤侧说凉 → 有争议", NULL);
+    sf_check(thermal_disputed(90, 40) == 0, "结温未到硬顶 → 无争议", NULL);
+    sf_check(thermal_disputed(100, 1) == 0, "单一热源不算争议", NULL);
+
+    sf_check(camera_is("com.oplus.camera") == 1, "内置相机包命中", NULL);
+    cfg.camera_pkgs[0] = 0;
+    sf_check(camera_is("com.example.cam") == 0, "未配置的相机包不命中", NULL);
+    snprintf(cfg.camera_pkgs, sizeof cfg.camera_pkgs, "%s", "com.example.cam");
+    sf_check(camera_is("com.example.cam") == 1, "自定义相机包命中", NULL);
+    cfg.camera_pkgs[0] = 0;
   }
 
   printf("\n== 老 MTK GPU OPP 解析 ==\n");

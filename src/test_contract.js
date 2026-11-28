@@ -3745,6 +3745,42 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
   ok(/int therm_w = \(g_ls.skin_max > 0 && g_ls.skin_max < 40\) \? 50 : 100;/.test(csrc),
      '热否决推力：皮肤 <40℃ 时减半（ASB V64）');
 
+  ok(/APP_SWITCH_TIER: 2 -> 0/.test(fs.readFileSync(MOD0 + '/customize.sh', 'utf8')),
+     '安装器把旧默认 APP_SWITCH_TIER=2 一次性迁到 0');
+
+  /* 下限仲裁层：唯一写入口 + 五级优先级 */
+  ok(/enum \{ FLOOR_HW = 0, FLOOR_SUP, FLOOR_FOLLOW, FLOOR_FSM, FLOOR_USER, FLOOR_SRC_N \}/.test(csrc) &&
+     /static long floor_pick\(const struct policy \*p, int i\)/.test(csrc) &&
+     /for \(int s = FLOOR_SUP; s < FLOOR_SRC_N; s\+\+\)/.test(csrc),
+     '下限仲裁：五级优先级（用户>包络>跟随>压制>硬件最低）');
+  ok(/static void floor_commit\(int i, long target, int soft, long now\)/.test(csrc) &&
+     /floor_commit\(i, target, soft, now\);/.test(csrc) &&
+     /floor_commit\(i, pick, 0, mono_sec\(\)\);/.test(csrc),
+     '唯一下限写入口 floor_commit（巡检与压制都走它）');
+  {
+    const sup = (csrc.match(/static void sup_min_clamp\(int on\)[\s\S]*?\n\}/) || [''])[0];
+    ok(/floor_req_set\(i, FLOOR_SUP, target\)/.test(sup) && !/write_journaled/.test(sup),
+       '压制下限只提交请求，不再自己写节点');
+  }
+
+  /* Kin 旁路子系统：热源决策 / 相机 / zTT / cpuset 矫正 */
+  ok(/static int thermal_decision\(int junction, int skin\)/.test(csrc) &&
+     /static int thermal_disputed\(int junction, int skin\)/.test(csrc) &&
+     /if \(g_fsm_disputed && want != SMART_SUSTAINED\) window \+= 1;/.test(csrc),
+     '皮肤锚定决策温 + 双热源争议多要一拍（Kin ThermalDecision）');
+  ok(/static int camera_is\(const char \*pkg\)/.test(csrc) &&
+     /cfg\.camera_hold_pct >= 40 && cfg\.camera_hold_pct < 100/.test(csrc) &&
+     /相机保持/.test(csrc),
+     '相机保持：前台相机时封顶钳到 hwmax×pct%');
+  ok(/cfg\.fsm_joint && \(tierkey & 3\) == 0/.test(csrc) &&
+     /g_sm\.fsm == SMART_GAMING && g_fsm_gpu >= 90/.test(csrc) &&
+     /p\[i\]\.cap \* 92 \/ 100/.test(csrc),
+     'zTT：热受限 GAMING + GPU≥90 时大核削 8%');
+  ok(/static void game_cpuset_fix\(void\)/.test(csrc) &&
+     /\/dev\/cpuset\/top-app\/cpus/.test(csrc) &&
+     /now - g_csfix_ms < 1000/.test(csrc),
+     '游戏 cpuset 被收窄时写回全核（1s 节流）');
+
   /* 前台检测 1:1 Kin getTopAppFast */
   ok(/static int fg_scan_top_app\(char \*best, size_t bn, int \*want_found, const char \*want,\s*\n?\s*int \*saw_black\)/.test(csrc) &&
      /\"\/dev\/cpuset\/top-app\/cgroup.procs\",/.test(csrc) &&
@@ -3884,12 +3920,12 @@ console.log('\n== 实时偏移（PSI / 温控 / 充电态）==');
      /kSmartDownWindow \* kSmartTickSec/.test(csrc) &&
      /kSmartPairWindow \* kSmartTickSec/.test(csrc) && /SMART_STATE_COUNT/.test(csrc),
      '六态 FSM：升档 2 拍、降档 5 拍，相邻档位多一拍确认');
-  ok(/^APP_SWITCH_TIER=2$/m.test(conf) &&
+  ok(/^APP_SWITCH_TIER=0$/m.test(conf) &&
      /cfg_get\("APP_SWITCH_TIER"/.test(csrc) &&
      /smart_fsm_enter\(target,/.test(csrc) &&
      /clusters_below_half/.test(csrc) &&
      /静置且各簇低于半帽/.test(csrc),
-     '切前台首拍预热（可配 0-3）＋静置跨档快降');
+     '切前台预热默认关（遗留项，ASB/Kin 无此逻辑）；静置跨档快降仍在');
   ok(/p\[l\] != '\/' && p\[l\] != ':'/.test(csrc),
      '前台包名解析剥离 :process 后缀（分身/多开），多用户 u10/u0a123 已覆盖');
   ok(/grab_pkg_relaxed/.test(csrc) && /is_game_overlay/.test(csrc) &&

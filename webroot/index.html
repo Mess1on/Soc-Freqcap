@@ -1329,7 +1329,7 @@ html.lg-pause .beat{animation-play-state:paused}
     </div>
     <div class="htxt">
       <h1>Soc智能限频</h1>
-      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.5.7</span></div>
+      <div class="sub">梦笙Mess1on &amp; Ktwo · <span id="ver">V2.5.0</span></div>
     </div>
   </div>
   <!-- 主题开关：太阳=浅色，月亮=深色。点一下就换，选中哪个存到本地。 -->
@@ -1372,7 +1372,7 @@ html.lg-pause .beat{animation-play-state:paused}
       <div class="hero-foot">
         <span>桥接 <b id="m-bridge">—</b></span>
         <span class="sep">·</span>
-        <span>守护 <b id="ver2">V2.5.7</b></span>
+        <span>守护 <b id="ver2">V2.5.0</b></span>
       </div>
     </div>
   </div>
@@ -1687,6 +1687,89 @@ html.lg-pause .beat{animation-play-state:paused}
       <label class="sw"><input type="checkbox" id="cpu_min_lock" onchange="pv('cpu_min_lock');paintCpuMin(lastSt)"><i></i></label>
     </div>
     <div class="hint" id="cmin-stat">CPU 下限巡检：未开启</div>
+  </div>
+  <div class="card">
+    <div class="ttl"><b>高级选项</b><span>默认值即推荐值；改动会立刻写进配置并重启守护</span></div>
+    <div class="row">
+      <div class="lbl"><b>相机保持</b><span>相机在前台时封顶软钳到本机峰值 ×80%，够 4K60 不冲满。</span></div>
+      <label class="sw"><input type="checkbox" id="camera_hold" onchange="pv('camera_hold')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>zTT 联合决策</b><span>热受限的游戏态且 GPU≥90% 时，大核再削 8%（不伤帧率）。</span></div>
+      <label class="sw"><input type="checkbox" id="fsm_joint" onchange="pv('fsm_joint')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>游戏 cpuset 矫正</b><span>游戏态 top-app cpuset 被厂商收窄时写回全核（1 秒节流）。</span></div>
+      <label class="sw"><input type="checkbox" id="game_cpuset_fix" onchange="pv('game_cpuset_fix')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>游戏免打扰</b><span>进游戏把 zen_mode 切到「仅优先」，离开还原。默认关，会改系统行为。</span></div>
+      <label class="sw"><input type="checkbox" id="game_dnd" onchange="pv('game_dnd')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>夜间静默</b><span>学到的夜间窗口里息屏，巡检间隔拉长到 300 秒。</span></div>
+      <label class="sw"><input type="checkbox" id="quiet_night" onchange="pv('quiet_night')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>探测节流</b><span>多窗口扫描按 8/25/120 秒分档，省 dumpsys 的 fork。</span></div>
+      <label class="sw"><input type="checkbox" id="probe_cadence" onchange="pv('probe_cadence')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>跟随下限</b><span>限频模式下限随负载在硬件最低与封顶 45%/75% 之间动（Scene 式）。</span></div>
+      <label class="sw"><input type="checkbox" id="cap_min_follow" onchange="pv('cap_min_follow')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>会话学习</b><span>按每次亮屏会话漂移 alpha（热/掉电/重载↑，干净凉快↓）。</span></div>
+      <label class="sw"><input type="checkbox" id="fsm_learn" onchange="pv('fsm_learn')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>详细日志</b><span>每拍都打封顶明细；排查"为什么是这个值"时开。</span></div>
+      <label class="sw"><input type="checkbox" id="log_verbose" onchange="pv('log_verbose')"><i></i></label>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>WiFi 省电</b><span>auto=不动/还原；on/off 写 wlan_pm，停守护还原。</span></div>
+      <span id="wifi_ps"></span>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>学习倾向 alpha</b><span>0=均衡包络，1000=省电包络（整条曲线下移）。</span></div>
+      <div class="slider"><input type="range" id="fsm_alpha" min="0" max="1000" step="10" oninput="pv('fsm_alpha')"></div>
+      <div class="pct" id="fsm_alpha_v">0</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>学习率</b><span>千分比：100=每次会话只走信号的 10%。</span></div>
+      <div class="slider"><input type="range" id="fsm_learn_rate" min="0" max="500" step="10" oninput="pv('fsm_learn_rate')"></div>
+      <div class="pct" id="fsm_learn_rate_v">100</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>跟随下限·中载%</b><span>限频模式下限 = 封顶 × 此值（负载 ≥ 低阈值时）。</span></div>
+      <div class="slider"><input type="range" id="cap_min_pct_lo" min="0" max="100" step="5" oninput="pv('cap_min_pct_lo')"></div>
+      <div class="pct" id="cap_min_pct_lo_v">45</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>跟随下限·高载%</b><span>负载 ≥ 高阈值时下限抬到封顶 × 此值。</span></div>
+      <div class="slider"><input type="range" id="cap_min_pct_hi" min="0" max="100" step="5" oninput="pv('cap_min_pct_hi')"></div>
+      <div class="pct" id="cap_min_pct_hi_v">75</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>相机封顶%</b><span>相机前台时封顶钳到本机峰值的百分比（80 = 够 4K60）。</span></div>
+      <div class="slider"><input type="range" id="camera_hold_pct" min="40" max="100" step="5" oninput="pv('camera_hold_pct')"></div>
+      <div class="pct" id="camera_hold_pct_v">80</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>夜间巡检间隔</b><span>夜间息屏时把巡检拉长到多少秒（60~1800）。</span></div>
+      <div class="slider"><input type="range" id="quiet_night_s" min="60" max="1800" step="30" oninput="pv('quiet_night_s')"></div>
+      <div class="pct" id="quiet_night_s_v">300</div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>空闲 uclamp%</b><span>息屏把 background 组 uclamp.max 收到多少（0=关）。</span></div>
+      <div class="slider"><input type="range" id="idle_uclamp" min="0" max="100" step="2" oninput="pv('idle_uclamp')"></div>
+      <div class="pct" id="idle_uclamp_v">18</div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="ttl"><b>学习画像</b><span>12 桶 = 6 时段 × 工作日/周末；颜色越暖 = 越省电（alpha 越高）</span></div>
+    <div id="lrn-grid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;padding:4px 0"></div>
+    <div class="hint" id="lrn-stat">未积累会话</div>
   </div>
 <div class="card">
     <h2><svg class="ico" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>保存</h2>
@@ -2576,6 +2659,15 @@ function buildStaticDD(){
     w.onchange = ()=>{ if(GOV_LOCKED){ w.value = ''; return; } pv('governor'); };
     g.parentNode.replaceChild(w, g);
   }
+  const wp = document.getElementById('wifi_ps');
+  if (wp && !wp.children.length) {
+    const opts = [['auto','auto（不动）'],['on','on'],['off','off']];
+    const w = ddEl(opts, 'auto', '');
+    w.id = 'wifi_ps';
+    w.style.flex = '0 0 130px';
+    w.onchange = ()=>pv('wifi_ps');
+    wp.parentNode.replaceChild(w, wp);
+  }
   const m = document.getElementById('pk-mode');
   if(m && !m.children.length){
     const w = ddEl(PK_MODE_OPTS, 'full', '');
@@ -2990,6 +3082,32 @@ function paintAdapt(s){
 }
 
 /* CPU 下限巡检的自证：开关打开后光有开关看不出它是在写、被夹回还是在退避。 */
+/* 学习画像：12 桶 = 6 时段 × 工作日/周末，颜色越暖 = alpha 越高（越省电） */
+function paintLrn(s){
+  const box = document.getElementById('lrn-grid');
+  if (!box) return;
+  const v = String(s && s.lrn || '').split(',').map(Number);
+  const dpn = ['睡 0-6','醒 6-9','上午 9-12','白天 12-17','傍晚 17-21','深夜 21-24'];
+  const ok = v.length >= 12 && v.every(x => isFinite(x));
+  let html = '';
+  for (let dp = 0; dp < 6; dp++) {
+    for (let w = 0; w < 2; w++) {
+      const a = v[dp * 2 + w];
+      const hue = 210 - Math.round((ok ? a : 0) * 0.18);
+      const light = ok ? (a >= 500 ? 45 : 88) : 92;
+      const bg = ok ? `hsl(${hue} 55% ${light}%)` : '#e9e9ee';
+      const fg = ok && a >= 500 ? '#fff' : '#222';
+      html += `<div style="padding:8px;border-radius:10px;background:${bg};color:${fg}">`
+            + `<div style="font-size:11px;opacity:.75">${dpn[dp]} · ${w ? '周末' : '工作日'}</div>`
+            + `<b style="font-size:15px">${ok ? a : '—'}</b></div>`;
+    }
+  }
+  box.innerHTML = html;
+  const st = document.getElementById('lrn-stat');
+  if (st) st.textContent = (s && s.alpha !== undefined)
+    ? `当前桶 ${s.abkt} · alpha ${s.alpha} · 置信 ${s.acnf}` : '未积累会话';
+}
+
 function paintCpuMin(s){
   const el = document.getElementById('cmin-stat');
   if(!el) return;
@@ -3048,6 +3166,7 @@ async function loadStatus(){
     document.getElementById('pbadge').style.display = s.paused === '1' ? '' : 'none';
     paintAdapt(s);
     paintCpuMin(s);
+    paintLrn(s);
     document.getElementById('m-pid').textContent = s.pid || '—';
     /* 首页不显示"前台 / 档位"那一格：状态徽标已说明当前档位， */
     document.getElementById('m-bridge').textContent = bridgeName();
@@ -3452,6 +3571,19 @@ async function loadConf(){
     bm.checked = c.BIG_MIN === '1'; pv('big_min');
     const bo = document.getElementById('big_offline');
     bo.checked = c.BIG_OFFLINE === '1'; pv('big_offline');
+    const _adv = [['camera_hold','CAMERA_HOLD'],['fsm_joint','FSM_JOINT'],['game_cpuset_fix','GAME_CPUSET_FIX'],
+                  ['game_dnd','GAME_DND'],['quiet_night','QUIET_NIGHT'],['probe_cadence','PROBE_CADENCE'],
+                  ['cap_min_follow','CAP_MIN_FOLLOW'],['fsm_learn','FSM_LEARN'],['log_verbose','LOG_VERBOSE']];
+    for (const [id, k] of _adv) { const el = document.getElementById(id); if (el) { el.checked = c[k] === '1'; pv(id); } }
+    for (const [id, k, d] of [['fsm_alpha','FSM_ALPHA',0],['fsm_learn_rate','FSM_LEARN_RATE',100],
+                              ['cap_min_pct_lo','CAP_MIN_PCT_LO',45],['cap_min_pct_hi','CAP_MIN_PCT_HI',75],
+                              ['camera_hold_pct','CAMERA_HOLD_PCT',80],['quiet_night_s','QUIET_NIGHT_S',300],
+                              ['idle_uclamp','IDLE_UCLAMP',18]]) {
+      const el = document.getElementById(id);
+      if (el) { el.value = c[k] || d; pv(id); }
+    }
+    const _wp = document.getElementById('wifi_ps');
+    if (_wp && _wp.value !== undefined) { _wp.value = c.WIFI_PS || 'auto'; }
     const cml = document.getElementById('cpu_min_lock');
     cml.checked = c.CPU_MIN_LOCK === '1'; pv('cpu_min_lock');
     const iv = document.getElementById('interval');
@@ -3518,6 +3650,7 @@ async function loadConf(){
     /* 功能页的下拉档和"现在会怎么做"那几句，都按刚填好的控件重算 */
     syncFunc();
     paintCpuMin(lastSt);
+    paintLrn(lastSt);
     confLoaded = true;
     toast('已载入当前配置');
   }catch(e){ confLoaded = false; toast(e.message, true); }
@@ -3699,6 +3832,21 @@ async function saveAll(){
     pairs.push(['BIG_MIN', document.getElementById('big_min').checked ? '1' : '0']);
     pairs.push(['BIG_OFFLINE', document.getElementById('big_offline').checked ? '1' : '0']);
     pairs.push(['CPU_MIN_LOCK', document.getElementById('cpu_min_lock').checked ? '1' : '0']);
+    for (const [id, k] of [['camera_hold','CAMERA_HOLD'],['fsm_joint','FSM_JOINT'],['game_cpuset_fix','GAME_CPUSET_FIX'],
+                           ['game_dnd','GAME_DND'],['quiet_night','QUIET_NIGHT'],['probe_cadence','PROBE_CADENCE'],
+                           ['cap_min_follow','CAP_MIN_FOLLOW'],['fsm_learn','FSM_LEARN'],['log_verbose','LOG_VERBOSE']]) {
+      const el = document.getElementById(id);
+      if (el) pairs.push([k, el.checked ? '1' : '0']);
+    }
+    for (const [id, k] of [['fsm_alpha','FSM_ALPHA'],['fsm_learn_rate','FSM_LEARN_RATE'],
+                           ['cap_min_pct_lo','CAP_MIN_PCT_LO'],['cap_min_pct_hi','CAP_MIN_PCT_HI'],
+                           ['camera_hold_pct','CAMERA_HOLD_PCT'],['quiet_night_s','QUIET_NIGHT_S'],
+                           ['idle_uclamp','IDLE_UCLAMP']]) {
+      const el = document.getElementById(id);
+      if (el) pairs.push([k, el.value]);
+    }
+    const wp2 = document.getElementById('wifi_ps');
+    if (wp2) pairs.push(['WIFI_PS', wp2.value]);
     pairs.push(['INTERVAL', document.getElementById('interval').value]);
     pairs.push(['GAME_GRACE_SEC', document.getElementById('grace').value]);
     pairs.push(['BOOT_FULL_S', document.getElementById('boot_full').value]);
@@ -5373,6 +5521,9 @@ const st = s.state || '';
     monKV('电流', Number(s.cur) >= 0 ? s.cur + ' mA' +
       (Number(s.pw) >= 0 ? ' · ' + s.pw + ' mW' : '') : '—'),
     monKV('前台', (s.fg && s.fg !== '-' ? s.fg : '—') + fgTypeTxt(s.fgtype)),
+    monKV('学习', (s.alpha !== undefined ? 'alpha ' + s.alpha : '—') +
+      (s.acnf !== undefined ? ' · 置信 ' + s.acnf : '') +
+      (s.abkt !== undefined ? ' · 桶 ' + s.abkt : '')),
     monKV('PSI', Number(s.psiv) >= 0 ? s.psiv + '%' : '—'),
     monKV('负载', Number(s.stall) >= 0 ? s.stall + ' ms/s' : '—'),
     monKV('探测', (s.tick || 0) + ' 拍 / dumpsys ' + (s.fgprobe || 0)),

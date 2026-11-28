@@ -12,8 +12,23 @@
 > 模块**只负责报版本号**，安装包统一放网盘，地址写在 `update.json` 的 `zipUrl`。
 > 每次发版请把网盘链接一起更新，并在这里置顶写清楚。
 
-## V2.5.7 — 2026-11-28 ｜ versionCode 25007
+## V2.5.0 — 2026-11-28 ｜ versionCode 25000
 
+- 汇总 2.5.x 全部内容：ASB/Kin 六态 + 包络模型、12 桶会话学习、夜间窗口自学、前台 cpuset 快路径
+- 下限仲裁层（唯一写入口）、窗口守护、平台帽学习、跟随下限、相机保持、zTT、游戏 cpuset 矫正
+- 日志精简、WebUI 高级选项与学习画像、DND / WiFi 省电、深睡与开机满血
+- 版本号从本版起统一记 `2.5.0`，不再出 2.5.x 碎版本
+
+## V2.5.10 — 2026-11-28 ｜ versionCode 25010
+
+- **下限仲裁层**：`scaling_min_freq` 收敛成唯一写入口。用户最低频 / 状态包络 / 跟随下限 / 压制静置 / 硬件最低按优先级提交请求，由 `floor_pick()` 仲裁后再过窗口守护，`floor_commit()` 统一写、复核、退避
+- 压制下限不再自己写节点，改为提交 `FLOOR_SUP` 请求
+- 补 Kin 旁路子系统：热源决策（皮肤锚定 + 双源争议多一拍）、相机保持、zTT、游戏 cpuset 矫正
+
+## V2.5.9 — 2026-11-28 ｜ versionCode 25009
+
+- 前台取包改为 Kin 的「后覆盖前」，并把无障碍/TTS 引擎加入黑名单（之前会取到 `com.oplus.ttsaccessibilityengine`）；安装器把旧默认 `APP_SWITCH_TIER=2` 一次性迁到 0
+- **去掉「切前台预热」**（`APP_SWITCH_TIER` 默认 0）：ASB/Kin 没有这套逻辑；亮屏沿按 Kin 直接进 MODERATE，策略切到智能时按 Kin reset() 回 LIGHT_IDLE
 - **前台检测 1:1 对齐 Kin**：top-app cpuset → /proc/pid/cmdline 快路径（300ms 缓存、不 fork），桌面/输入法/systemui 黑名单，last_good 2s + 仍在 top-app 校验；dumpsys 只作最后兜底
 - **游戏免打扰 / WiFi 省电**：`GAME_DND`（进游戏 zen_mode=仅优先、离开还原）、`WIFI_PS`（auto/on/off，写 wlan_pm 并记账还原）；不做厂商限制组件恢复
 - **探测节流 / 夜间静默 / 空闲 uclamp / 画像自动匹配**：多窗口扫描按 8s/25s/120s 分档；夜间息屏巡检拉长到 300s；息屏把 background uclamp 收到 18%；未配置的应用自动落「其他」画像档（`app_categories.conf` 的 `tool_*`）

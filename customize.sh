@@ -504,6 +504,15 @@ if [ -f "$DATA/socfreq.conf" ] && [ -f "$MODPATH/socfreq.conf" ]; then
     ui_print "  熄屏轻巡检已设为常开（SCREEN_POLICY=cap）"
   fi
   [ "$_added" -gt 0 ] && ui_print "  配置补齐新增项：$_added 条"
+  # V2.5.9：切前台预热默认关（ASB/Kin 没有这套逻辑）。旧默认 2 一次性迁到 0。
+  _TIER_MARK="$DATA/.app_switch_tier_default0"
+  if [ ! -f "$_TIER_MARK" ]; then
+    if grep -qE '^[[:space:]]*APP_SWITCH_TIER[[:space:]]*=[[:space:]]*2[[:space:]]*$' "$DATA/socfreq.conf" 2>/dev/null; then
+      sed -i 's/^[[:space:]]*APP_SWITCH_TIER[[:space:]]*=.*/APP_SWITCH_TIER=0/' "$DATA/socfreq.conf" 2>/dev/null
+      ui_print "  APP_SWITCH_TIER: 2 -> 0（切前台预热已默认关闭，与 ASB/Kin 一致）"
+    fi
+    : > "$_TIER_MARK" 2>/dev/null
+  fi
   # 删掉模块目录内原件：并存两份配置时改模块目录那份不会有任何效果
   rm -f "$MODPATH/socfreq.conf" 2>/dev/null
 fi
